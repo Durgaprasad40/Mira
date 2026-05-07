@@ -25,9 +25,11 @@ import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isActiveTruthDareUpload, useTruthDareUploadStore } from '@/stores/truthDareUploadStore';
+import { useTodMediaPreload } from '@/hooks/useTodMediaPreload';
 
 const C = INCOGNITO_COLORS;
 const PHASE2_TOD_HOME_ROUTE = '/(main)/(private)/(tabs)/truth-or-dare';
+const PHASE2_TOD_MINE_ROUTE = '/(main)/(private)/my-truth-or-dare';
 
 // Premium color palette for elevated UI
 const PREMIUM = {
@@ -213,23 +215,28 @@ export default function PromptThreadScreen() {
   }>();
   const { promptId, autoOpenComposer, source, requestId, highlightAnswerId } = params;
   const shouldReturnToPhase2TodHome = source === 'phase2-tod';
+  const shouldReturnToPhase2TodMine = source === 'phase2-tod-mine';
   const handleBackToSource = useCallback(() => {
+    if (shouldReturnToPhase2TodMine) {
+      router.replace(PHASE2_TOD_MINE_ROUTE as any);
+      return;
+    }
     if (shouldReturnToPhase2TodHome) {
       router.replace(PHASE2_TOD_HOME_ROUTE as any);
       return;
     }
     router.back();
-  }, [router, shouldReturnToPhase2TodHome]);
+  }, [router, shouldReturnToPhase2TodHome, shouldReturnToPhase2TodMine]);
 
   useFocusEffect(
     useCallback(() => {
-      if (!shouldReturnToPhase2TodHome) return undefined;
+      if (!shouldReturnToPhase2TodHome && !shouldReturnToPhase2TodMine) return undefined;
       const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
         handleBackToSource();
         return true;
       });
       return () => subscription.remove();
-    }, [handleBackToSource, shouldReturnToPhase2TodHome])
+    }, [handleBackToSource, shouldReturnToPhase2TodHome, shouldReturnToPhase2TodMine])
   );
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
@@ -393,10 +400,35 @@ export default function PromptThreadScreen() {
     });
   }, [answers, pendingUploadsForPrompt]);
 
+  const [isThreadFocused, setIsThreadFocused] = useState(false);
+  const [viewableAnswerIds, setViewableAnswerIds] = useState<Set<string>>(new Set());
+  const viewabilityConfigRef = useRef({
+    itemVisiblePercentThreshold: 45,
+    minimumViewTime: 160,
+  });
+  const onViewableItemsChangedRef = useRef(({ viewableItems }: { viewableItems: any[] }) => {
+    const nextIds = new Set<string>();
+    viewableItems.forEach((viewable) => {
+      const item = viewable.item;
+      if (item?.kind === 'answer' && item.answer?._id) {
+        nextIds.add(String(item.answer._id));
+      }
+    });
+    setViewableAnswerIds(nextIds);
+  });
+
   const answersForList = useMemo(() => {
     if (hiddenAnswerIdsForPendingEdits.size === 0) return answers;
     return answers.filter((answer) => !hiddenAnswerIdsForPendingEdits.has(String(answer._id)));
   }, [answers, hiddenAnswerIdsForPendingEdits]);
+
+  const { getPreloadState } = useTodMediaPreload({
+    answers: answersForList,
+    authUserId: userId,
+    viewableAnswerIds,
+    enabled: isThreadFocused && !!userId,
+    lookaheadCount: 5,
+  });
 
   const threadListItems = useMemo(() => {
     return [
@@ -443,6 +475,7 @@ export default function PromptThreadScreen() {
     hasViewed?: boolean;
     isFrontCamera?: boolean;
   } | null>(null);
+  const [mediaViewerLoading, setMediaViewerLoading] = useState(false);
 
   // T/D VIDEO FIX: Custom progress for front camera videos (native controls flip with scaleX)
   const [videoProgress, setVideoProgress] = useState<{
@@ -800,6 +833,15 @@ export default function PromptThreadScreen() {
       requestHighlightTimeoutRef.current = null;
     }, 4500);
   }, [answers.length, highlightAnswerId, requestId, source, threadListItems]);
+
+  useFocusEffect(
+    useCallback(() => {
+      setIsThreadFocused(true);
+      return () => {
+        setIsThreadFocused(false);
+      };
+    }, []),
+  );
 
   const handleScrollToIndexFailed = useCallback((info: { index: number; averageItemLength: number }) => {
     if (!listRef.current) return;
@@ -1406,10 +1448,14 @@ export default function PromptThreadScreen() {
     // above already returned when `isOwner && !answer.mediaUrl`, so the URL
     // is guaranteed here — restate it locally so TypeScript narrows.
     if (isOwner && answer.mediaUrl) {
+      const preloaded = getPreloadState(answer);
       if (isMountedRef.current) {
         setViewingMedia({
           answerId,
-          mediaUrl: answer.mediaUrl,
+          mediaUrl:
+            preloaded.status === 'ready' && preloaded.url && preloaded.kind === answer.type
+              ? preloaded.url
+              : answer.mediaUrl,
           mediaType: answer.type as 'photo' | 'video',
           isOwnAnswer: true,
           isFrontCamera: answer.isFrontCamera,
@@ -1472,11 +1518,17 @@ export default function PromptThreadScreen() {
         return;
       }
 
-      // Use the fresh URL from backend
+      // Backend claim still gates the real view. A preloaded URL can only be
+      // used after that claim succeeds, and only when it matches this media
+      // kind; stale cache entries fall back to the freshly claimed URL.
+      const preloaded = getPreloadState(answer);
       if (isMountedRef.current) {
         setViewingMedia({
           answerId,
-          mediaUrl: result.url,
+          mediaUrl:
+            preloaded.status === 'ready' && preloaded.url && preloaded.kind === result.mediaType
+              ? preloaded.url
+              : result.url,
           mediaType: result.mediaType,
           isOwnAnswer: false,
           hasViewed: true,
@@ -1499,13 +1551,14 @@ export default function PromptThreadScreen() {
       // P0-001 FIX: Always clear the pending flag
       pendingMediaClaimsRef.current.delete(answerId);
     }
-  }, [userId, claimAnswerMediaView]);
+  }, [userId, claimAnswerMediaView, getPreloadState]);
 
   // Handle closing the media viewer. Backend consumption already happened
   // during claim/open, so close is UI-only.
   const handleCloseMediaViewer = useCallback(async () => {
     if (isMountedRef.current) {
       setViewingMedia(null);
+      setMediaViewerLoading(false);
     }
     // T/D VIDEO FIX: Reset video progress state
     if (isMountedRef.current) {
@@ -1513,6 +1566,12 @@ export default function PromptThreadScreen() {
     }
 
   }, []);
+
+  useEffect(() => {
+    if (viewingMedia) {
+      setMediaViewerLoading(true);
+    }
+  }, [viewingMedia?.answerId, viewingMedia?.mediaUrl]);
 
   // Unified submit handler - handles text + optional media attachment
   // Uses MERGE behavior: only sends fields that changed
@@ -1797,10 +1856,20 @@ export default function PromptThreadScreen() {
           return null;
       }
     })();
+    const preloadState =
+      tileState && tileState !== 'locked' && tileState !== 'viewed'
+        ? getPreloadState(item)
+        : { status: 'idle' as const };
+    const isMediaTile = tileState === 'photo' || tileState === 'video' || tileState === 'voice';
+    const isTilePreloading = isMediaTile && preloadState.status === 'loading';
+    const didTilePreloadFail = isMediaTile && preloadState.status === 'error';
     const tileMicrotext = (() => {
       if (tileState === 'locked') return 'Creator only';
       if (tileState === 'viewed') return 'Viewed';
       if (tileState === 'voice') {
+        if (preloadState.status === 'loading') return 'Preparing voice…';
+        if (preloadState.status === 'ready') return 'Tap to play';
+        if (preloadState.status === 'error') return 'Tap to retry';
         // Idle: show a clean "0:10" total when known, otherwise "Voice".
         if (!isThisVoicePlaying) {
           if (voiceTotalMs > 0) return formatVoiceClock(voiceTotalMs);
@@ -1814,6 +1883,11 @@ export default function PromptThreadScreen() {
         }
         return formatVoiceClock(voicePosMs);
       }
+      if (tileState === 'photo' && preloadState.status === 'loading') return 'Preparing photo…';
+      if (tileState === 'video' && preloadState.status === 'loading') return 'Preparing video…';
+      if (tileState === 'photo' && preloadState.status === 'ready') return 'Tap to view';
+      if (tileState === 'video' && preloadState.status === 'ready') return 'Ready • Tap to play';
+      if ((tileState === 'photo' || tileState === 'video') && preloadState.status === 'error') return 'Tap to retry';
       if (isCreatorOnly && (tileState === 'photo' || tileState === 'video')) return 'Tap once';
       if (tileState === 'photo' || tileState === 'video') return 'Tap to view';
       return null;
@@ -1980,19 +2054,25 @@ export default function PromptThreadScreen() {
                     styles.todMediaTileIconChip,
                     tileState === 'locked' && styles.todMediaTileIconChipMuted,
                     tileState === 'viewed' && styles.todMediaTileIconChipMuted,
+                    isTilePreloading && styles.todMediaTileIconChipLoading,
+                    didTilePreloadFail && styles.todMediaTileIconChipError,
                   ]}
                 >
-                  <Ionicons
-                    name={tileIconName}
-                    size={18}
-                    color={
-                      tileState === 'locked'
-                        ? PREMIUM.textMuted
-                        : tileState === 'viewed'
+                  {isTilePreloading ? (
+                    <ActivityIndicator size="small" color={PREMIUM.coral} />
+                  ) : (
+                    <Ionicons
+                      name={didTilePreloadFail ? 'refresh' : tileIconName}
+                      size={18}
+                      color={
+                        tileState === 'locked'
                           ? PREMIUM.textMuted
-                          : PREMIUM.coral
-                    }
-                  />
+                          : tileState === 'viewed'
+                            ? PREMIUM.textMuted
+                            : PREMIUM.coral
+                      }
+                    />
+                  )}
                 </View>
                 {/* Lock corner badge for creator-only tappable photos/videos
                     so the prompt owner can tell at a glance that the media is
@@ -2197,6 +2277,7 @@ export default function PromptThreadScreen() {
     handleToggleSelect,
     handleOpenMenu,
     handleViewMedia,
+    getPreloadState,
     handleReact,
     handleSendConnect,
     connectSending,
@@ -2501,6 +2582,8 @@ export default function PromptThreadScreen() {
         keyExtractor={(item) => item.key}
         renderItem={renderThreadItem}
         onScrollToIndexFailed={handleScrollToIndexFailed}
+        onViewableItemsChanged={onViewableItemsChangedRef.current}
+        viewabilityConfig={viewabilityConfigRef.current}
         style={styles.answersListContainer}
         contentContainerStyle={styles.listContent}
         ListHeaderComponent={
@@ -2792,6 +2875,8 @@ export default function PromptThreadScreen() {
                 viewingMedia.isFrontCamera && styles.unmirrorMedia,
               ]}
               contentFit="contain"
+              onLoad={() => setMediaViewerLoading(false)}
+              onError={() => setMediaViewerLoading(false)}
             />
           )}
 
@@ -2808,6 +2893,9 @@ export default function PromptThreadScreen() {
                 useNativeControls={!viewingMedia.isFrontCamera}
                 isLooping={false}
                 onPlaybackStatusUpdate={(status) => {
+                  if (status.isLoaded) {
+                    setMediaViewerLoading(false);
+                  }
                   if (status.isLoaded && viewingMedia.isFrontCamera) {
                     setVideoProgress({
                       position: status.positionMillis ?? 0,
@@ -2816,6 +2904,7 @@ export default function PromptThreadScreen() {
                     });
                   }
                 }}
+                onError={() => setMediaViewerLoading(false)}
               />
               {/* T/D VIDEO FIX: Custom progress bar for front camera videos (unflipped) */}
               {viewingMedia.isFrontCamera && videoProgress.duration > 0 && (
@@ -2833,6 +2922,15 @@ export default function PromptThreadScreen() {
                   </Text>
                 </View>
               )}
+            </View>
+          )}
+
+          {mediaViewerLoading && viewingMedia && (
+            <View style={styles.mediaViewerLoadingOverlay} pointerEvents="none">
+              <ActivityIndicator size="large" color="#FFF" />
+              <Text style={styles.mediaViewerLoadingText}>
+                {viewingMedia.mediaType === 'video' ? 'Preparing video…' : 'Preparing photo…'}
+              </Text>
             </View>
           )}
 
@@ -3594,6 +3692,14 @@ const styles = StyleSheet.create({
     backgroundColor: `${PREMIUM.textMuted}22`,
     borderColor: `${PREMIUM.textMuted}40`,
   },
+  todMediaTileIconChipLoading: {
+    backgroundColor: `${PREMIUM.coral}12`,
+    borderColor: `${PREMIUM.coral}45`,
+  },
+  todMediaTileIconChipError: {
+    backgroundColor: 'rgba(245, 166, 35, 0.12)',
+    borderColor: 'rgba(245, 166, 35, 0.38)',
+  },
   todMediaTileCorner: {
     position: 'absolute',
     top: 5,
@@ -3981,6 +4087,23 @@ const styles = StyleSheet.create({
   mediaViewerVideo: {
     width: '100%',
     height: '80%',
+  },
+  mediaViewerLoadingOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(0,0,0,0.24)',
+  },
+  mediaViewerLoadingText: {
+    color: '#FFF',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0,
   },
   // T/D VIDEO FIX: Container for video + custom progress
   videoContainer: {

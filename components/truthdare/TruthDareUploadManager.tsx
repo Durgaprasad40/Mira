@@ -3,6 +3,12 @@ import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { uploadMediaToConvexWithProgress, UploadError } from '@/lib/uploadUtils';
+import {
+  TOD_MEDIA_LIMITS,
+  type TodMediaLimitKind,
+  formatTodMediaLimit,
+  resolveTodMime,
+} from '@/lib/todMediaLimits';
 import { useAuthStore } from '@/stores/authStore';
 import {
   TruthDarePendingUpload,
@@ -17,6 +23,29 @@ function uploadKindFor(kind?: TruthDareUploadMediaKind): 'photo' | 'video' | 'au
   if (kind === 'video') return 'video';
   if (kind === 'voice' || kind === 'audio') return 'audio';
   return 'photo';
+}
+
+function limitKindFor(kind?: TruthDareUploadMediaKind): TodMediaLimitKind {
+  if (kind === 'video') return 'video';
+  if (kind === 'voice' || kind === 'audio') return 'voice';
+  return 'photo';
+}
+
+function getTodUploadOptions(
+  kind: TodMediaLimitKind,
+  localUri: string,
+  mime?: string
+) {
+  const contentType = resolveTodMime(kind, localUri, mime);
+  if (!contentType) {
+    throw new Error('Unsupported media format.');
+  }
+
+  return {
+    contentType,
+    maxBytes: TOD_MEDIA_LIMITS[kind].maxBytes,
+    limitMessage: formatTodMediaLimit(kind),
+  };
 }
 
 function sanitizeError(error: unknown): { message: string; code?: string; retryable?: boolean } {
@@ -102,6 +131,7 @@ export function TruthDareUploadManager() {
       if (item.attachment?.localUri && !mediaStorageId) {
         ensureCurrentUser();
         const mediaType = uploadKindFor(item.attachment.kind);
+        const limitKind = limitKindFor(item.attachment.kind);
         mediaStorageId = await uploadMediaToConvexWithProgress(
           item.attachment.localUri,
           () => generateUploadUrl({ authUserId: item.userId }),
@@ -111,7 +141,12 @@ export function TruthDareUploadManager() {
             if (now - lastProgressAt < PROGRESS_THROTTLE_MS && progress < 100) return;
             lastProgressAt = now;
             updateProgress(item.clientId, progress);
-          }
+          },
+          getTodUploadOptions(
+            limitKind,
+            item.attachment.localUri,
+            item.mediaMime ?? item.attachment.mime
+          )
         );
         await trackStorageId(mediaStorageId);
       }
@@ -121,7 +156,9 @@ export function TruthDareUploadManager() {
         authorPhotoStorageId = await uploadMediaToConvexWithProgress(
           item.authorPhotoLocalUri,
           () => generateUploadUrl({ authUserId: item.userId }),
-          'photo'
+          'photo',
+          undefined,
+          getTodUploadOptions('photo', item.authorPhotoLocalUri, 'image/jpeg')
         );
         await trackStorageId(authorPhotoStorageId);
       }

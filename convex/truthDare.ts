@@ -13,6 +13,11 @@ import {
   TOD_REPORT_THRESHOLDS,
   moderationStatusForTodReportCount,
 } from './lib/todModeration';
+import {
+  TOD_MEDIA_LIMITS,
+  formatTodMediaLimit,
+  isTodAllowedMime,
+} from '../lib/todMediaLimits';
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -27,6 +32,7 @@ const RATE_LIMITS = {
   report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 reports per day
   prompt_report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 prompt reports per day
   claim_media: { max: 20, windowMs: 60 * 1000 }, // 20 media claims per minute
+  media_upload: { max: 30, windowMs: 60 * 1000 }, // 30 upload URLs/finalizations per minute
 };
 
 // TOD-P2-001 FIX: Rate limit error message
@@ -221,36 +227,75 @@ async function deleteStorageIfPresent(
   }
 }
 
-type TodUploadMediaKind = 'photo' | 'video' | 'audio';
+type TodUploadMediaKind = 'photo' | 'video' | 'voice';
 
-const TOD_UPLOAD_MEDIA_LIMITS: Record<
-  TodUploadMediaKind,
-  { maxBytes: number; contentTypePrefix: string }
-> = {
-  photo: { maxBytes: 15 * 1024 * 1024, contentTypePrefix: 'image/' },
-  video: { maxBytes: 100 * 1024 * 1024, contentTypePrefix: 'video/' },
-  audio: { maxBytes: 20 * 1024 * 1024, contentTypePrefix: 'audio/' },
+type ValidatedTodUploadReference = {
+  size: number;
+  contentType: string;
+  kind: TodUploadMediaKind;
 };
+
+function normalizeTodMime(mime: string | undefined | null): string {
+  return mime?.split(';')[0]?.trim().toLowerCase() ?? '';
+}
+
+function getTodUploadKindFromMime(mime: string | undefined | null): TodUploadMediaKind | undefined {
+  const normalizedMime = normalizeTodMime(mime);
+  if (isTodAllowedMime('photo', normalizedMime)) return 'photo';
+  if (isTodAllowedMime('video', normalizedMime)) return 'video';
+  if (isTodAllowedMime('voice', normalizedMime)) return 'voice';
+  if (normalizedMime.startsWith('image/')) return 'photo';
+  if (normalizedMime.startsWith('video/')) return 'video';
+  if (normalizedMime.startsWith('audio/')) return 'voice';
+  return undefined;
+}
 
 function getTodUploadKindFromMedia(
   mediaMime: string | undefined,
   fallbackType: 'text' | 'photo' | 'video' | 'voice' | undefined
-): TodUploadMediaKind {
-  const normalizedMime = mediaMime?.toLowerCase() ?? '';
-  if (normalizedMime.startsWith('audio/')) return 'audio';
-  if (normalizedMime.startsWith('video/')) return 'video';
-  if (normalizedMime.startsWith('image/')) return 'photo';
-  if (fallbackType === 'voice') return 'audio';
+): TodUploadMediaKind | undefined {
+  const mimeKind = getTodUploadKindFromMime(mediaMime);
+  if (mimeKind) return mimeKind;
+  if (fallbackType === 'voice') return 'voice';
   if (fallbackType === 'video') return 'video';
-  return 'photo';
+  if (fallbackType === 'photo') return 'photo';
+  return undefined;
+}
+
+function getTodAnswerTypeFromUploadKind(
+  mediaKind: TodUploadMediaKind | undefined
+): 'text' | 'photo' | 'video' | 'voice' {
+  if (mediaKind === 'voice') return 'voice';
+  if (mediaKind === 'video') return 'video';
+  if (mediaKind === 'photo') return 'photo';
+  return 'text';
+}
+
+function validateTodMediaDurationSec(
+  mediaKind: TodUploadMediaKind | 'text' | undefined,
+  durationSec: number | undefined
+): number | undefined {
+  if (mediaKind === 'video' || mediaKind === 'voice') {
+    if (
+      typeof durationSec !== 'number' ||
+      !Number.isFinite(durationSec) ||
+      durationSec <= 0 ||
+      durationSec > TOD_MEDIA_LIMITS[mediaKind].maxDurationSec
+    ) {
+      throw new Error(formatTodMediaLimit(mediaKind));
+    }
+    return durationSec;
+  }
+
+  return undefined;
 }
 
 async function validateTodUploadReference(
   ctx: any,
   storageId: Id<'_storage'>,
   userId: Id<'users'>,
-  mediaKind: TodUploadMediaKind
-): Promise<void> {
+  declaredMediaKind?: TodUploadMediaKind
+): Promise<ValidatedTodUploadReference> {
   const pending = await ctx.db
     .query('pendingUploads')
     .withIndex('by_storage', (q: any) => q.eq('storageId', storageId))
@@ -267,15 +312,33 @@ async function validateTodUploadReference(
     throw new Error('Invalid storage reference: metadata unavailable');
   }
 
-  const limits = TOD_UPLOAD_MEDIA_LIMITS[mediaKind];
-  if (typeof meta.size === 'number' && meta.size > limits.maxBytes) {
-    throw new Error(`Media exceeds size limit for ${mediaKind}`);
+  if (
+    typeof meta.size !== 'number' ||
+    !Number.isFinite(meta.size) ||
+    meta.size <= 0
+  ) {
+    throw new Error('Invalid storage reference: size metadata unavailable');
   }
 
-  const contentType = typeof meta.contentType === 'string' ? meta.contentType.toLowerCase() : '';
-  if (!contentType.startsWith(limits.contentTypePrefix)) {
-    throw new Error(`Media content type does not match declared ${mediaKind}`);
+  const contentType = normalizeTodMime(meta.contentType);
+  const actualMediaKind = getTodUploadKindFromMime(contentType);
+  if (!actualMediaKind || !isTodAllowedMime(actualMediaKind, contentType)) {
+    throw new Error('Unsupported media format.');
   }
+
+  if (declaredMediaKind && declaredMediaKind !== actualMediaKind) {
+    throw new Error('Unsupported media format.');
+  }
+
+  if (meta.size > TOD_MEDIA_LIMITS[actualMediaKind].maxBytes) {
+    throw new Error(formatTodMediaLimit(actualMediaKind));
+  }
+
+  return {
+    size: meta.size,
+    contentType,
+    kind: actualMediaKind,
+  };
 }
 
 function getNormalizedTodAnswerIdentity(
@@ -1959,7 +2022,11 @@ export const generateUploadUrl = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { authUserId }) => {
-    await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
+    const userId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
+    const rateCheck = await checkRateLimit(ctx, userId, 'media_upload');
+    if (!rateCheck.allowed) {
+      throw new Error(RATE_LIMIT_ERROR);
+    }
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -2002,6 +2069,14 @@ export const submitPrivateMediaResponse = mutation({
       throw new Error('Prompt not found');
     }
 
+    const mediaUpload = await validateTodUploadReference(
+      ctx,
+      args.storageId,
+      fromUserId,
+      args.mediaType
+    );
+    const viewDurationSec = validateViewDuration(args.durationSec ?? 20) ?? 20;
+
     // Check for existing pending media from this user for this prompt
     const existing = await ctx.db
       .query('todPrivateMedia')
@@ -2027,8 +2102,9 @@ export const submitPrivateMediaResponse = mutation({
       toUserId: prompt.ownerUserId,
       mediaType: args.mediaType,
       storageId: args.storageId,
+      fileSize: mediaUpload.size,
       viewMode: args.viewMode ?? 'tap', // default to tap-to-view
-      durationSec: args.durationSec ?? 20,
+      durationSec: viewDurationSec,
       status: 'pending',
       createdAt: now,
       expiresAt: now + TWENTY_FOUR_HOURS_MS, // 24h auto-delete
@@ -2456,6 +2532,66 @@ export const cleanupExpiredTodData = internalMutation({
 // ============================================================
 // GLOBAL FEED & THREAD QUERIES
 // ============================================================
+
+/**
+ * Owner-only prompt history for "My Truth & Dare".
+ *
+ * Returns prompt metadata and aggregate counts only. It intentionally does not
+ * return answer text, answer author identity, media URLs, report details, or
+ * private moderation internals.
+ */
+export const getMyPrompts = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    const ownerUserId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
+    const now = Date.now();
+
+    const prompts = await ctx.db
+      .query('todPrompts')
+      .withIndex('by_owner', (q) => q.eq('ownerUserId', ownerUserId))
+      .collect();
+
+    prompts.sort((a, b) => b.createdAt - a.createdAt);
+    const cappedPrompts = prompts.slice(0, 60);
+
+    return await Promise.all(
+      cappedPrompts.map(async (prompt) => {
+        const promptId = prompt._id as unknown as string;
+        const answers = await ctx.db
+          .query('todAnswers')
+          .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+          .collect();
+
+        const expiresAt = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+        const moderationStatus =
+          prompt.moderationStatus ??
+          moderationStatusForTodReportCount(prompt.uniqueReportCount ?? prompt.reportCount ?? 0);
+
+        return {
+          _id: prompt._id,
+          type: prompt.type,
+          text: prompt.text,
+          createdAt: prompt.createdAt,
+          expiresAt,
+          isExpired: expiresAt <= now,
+          answerCount: answers.length,
+          totalReactionCount: prompt.totalReactionCount ?? 0,
+          moderationStatus,
+          hiddenByReportsAt: prompt.hiddenByReportsAt,
+          moderationStatusAt: prompt.moderationStatusAt,
+          editedAt: (prompt as any).editedAt,
+          hasMedia: answers.some(
+            (answer) =>
+              answer.type !== 'text' &&
+              (Boolean(answer.mediaStorageId) || Boolean(answer.mediaUrl)),
+          ),
+        };
+      }),
+    );
+  },
+});
 
 /**
  * List all active (non-expired) prompts with up to 2 ranked preview answers.
@@ -3007,6 +3143,7 @@ async function checkRateLimit(
     | 'report'
     | 'prompt_report'
     | 'claim_media'
+    | 'media_upload'
 ): Promise<{ allowed: boolean; remaining: number }> {
   const now = Date.now();
   const limit = RATE_LIMITS[actionType];
@@ -3127,9 +3264,14 @@ export const createOrEditAnswer = mutation({
     const normalizedText = validateAnswerText(args.text);
     const viewDurationSec = validateViewDuration(args.viewDurationSec);
 
+    let mediaUpload: ValidatedTodUploadReference | undefined;
+    let mediaDurationSec: number | undefined;
+    let resolvedMediaMime = args.mediaMime;
     if (args.mediaStorageId) {
       const mediaKind = getTodUploadKindFromMedia(args.mediaMime, args.type);
-      await validateTodUploadReference(ctx, args.mediaStorageId, userId, mediaKind);
+      mediaUpload = await validateTodUploadReference(ctx, args.mediaStorageId, userId, mediaKind);
+      mediaDurationSec = validateTodMediaDurationSec(mediaUpload.kind, args.durationSec);
+      resolvedMediaMime = mediaUpload.contentType;
     }
     if (args.authorPhotoStorageId) {
       await validateTodUploadReference(ctx, args.authorPhotoStorageId, userId, 'photo');
@@ -3177,6 +3319,7 @@ export const createOrEditAnswer = mutation({
         patch.mediaStorageId = undefined;
         patch.mediaUrl = undefined;
         patch.mediaMime = undefined;
+        patch.fileSize = undefined;
         patch.durationSec = undefined;
         patch.isFrontCamera = undefined;
         patch.viewMode = undefined;
@@ -3188,8 +3331,9 @@ export const createOrEditAnswer = mutation({
         // Replace media
         patch.mediaStorageId = args.mediaStorageId;
         patch.mediaUrl = mediaUrl;
-        patch.mediaMime = args.mediaMime;
-        patch.durationSec = args.durationSec;
+        patch.mediaMime = resolvedMediaMime;
+        patch.fileSize = mediaUpload?.size;
+        patch.durationSec = mediaDurationSec;
         patch.isFrontCamera = args.isFrontCamera;
         patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
         patch.viewDurationSec = viewDurationSec ?? existing.viewDurationSec;
@@ -3205,7 +3349,7 @@ export const createOrEditAnswer = mutation({
       // Determine type based on final content
       const finalText = args.text !== undefined ? normalizedText : existing.text;
       const finalMedia = args.removeMedia ? undefined : (args.mediaStorageId ?? existing.mediaStorageId);
-      const finalMime = args.removeMedia ? undefined : (args.mediaMime ?? existing.mediaMime);
+      const finalMime = args.removeMedia ? undefined : (resolvedMediaMime ?? existing.mediaMime);
 
       if (!finalText && !finalMedia) {
         throw new Error('Answer requires text or media');
@@ -3214,10 +3358,11 @@ export const createOrEditAnswer = mutation({
       // Compute type from content
       let type: 'text' | 'photo' | 'video' | 'voice' = 'text';
       if (finalMedia) {
-        if (finalMime?.startsWith('audio/')) type = 'voice';
-        else if (finalMime?.startsWith('video/')) type = 'video';
-        else if (finalMime?.startsWith('image/')) type = 'photo';
-        else if (args.type) type = args.type; // fallback to provided type
+        type = getTodAnswerTypeFromUploadKind(
+          args.mediaStorageId && mediaUpload
+            ? mediaUpload.kind
+            : getTodUploadKindFromMedia(finalMime, existing.type)
+        );
       }
       patch.type = type;
 
@@ -3291,10 +3436,7 @@ export const createOrEditAnswer = mutation({
       // Compute type
       let type: 'text' | 'photo' | 'video' | 'voice' = 'text';
       if (hasMedia) {
-        if (args.mediaMime?.startsWith('audio/')) type = 'voice';
-        else if (args.mediaMime?.startsWith('video/')) type = 'video';
-        else if (args.mediaMime?.startsWith('image/')) type = 'photo';
-        else if (args.type) type = args.type;
+        type = getTodAnswerTypeFromUploadKind(mediaUpload?.kind);
       }
 
       const answerId = await ctx.db.insert('todAnswers', {
@@ -3304,8 +3446,9 @@ export const createOrEditAnswer = mutation({
         text: normalizedText,
         mediaStorageId: args.mediaStorageId,
         mediaUrl,
-        mediaMime: args.mediaMime,
-        durationSec: args.durationSec,
+        mediaMime: resolvedMediaMime,
+        fileSize: mediaUpload?.size,
+        durationSec: mediaDurationSec,
         likeCount: 0,
         createdAt: now,
         identityMode,
@@ -3834,6 +3977,84 @@ export const deleteMyAnswer = mutation({
 // ============================================================
 // SECURE ANSWER MEDIA VIEWING APIs
 // ============================================================
+
+/**
+ * Read-only media URL preloader for prompt threads.
+ *
+ * This intentionally does NOT write todAnswerViews, does NOT call claim-media
+ * rate limits, and must never be treated as a real view. The tap/open path
+ * still goes through claimAnswerMediaView for photo/video one-time media.
+ */
+export const preloadAnswerMediaUrl = query({
+  args: {
+    answerId: v.string(),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { answerId, authUserId }) => {
+    const viewerId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
+
+    const answer = await ctx.db
+      .query('todAnswers')
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
+      .first();
+
+    if (
+      !answer ||
+      answer.type === 'text' ||
+      (!answer.mediaStorageId && !answer.mediaUrl)
+    ) {
+      return null;
+    }
+
+    if ((answer.type === 'photo' || answer.type === 'video') && !answer.mediaStorageId) {
+      return null;
+    }
+
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      return null;
+    }
+
+    const canAccess = await canViewerAccessAnswerMedia(ctx, answer, viewerId, prompt);
+    if (!canAccess) {
+      return null;
+    }
+
+    const isAnswerAuthor = answer.userId === viewerId;
+    if (!isAnswerAuthor && (answer.type === 'photo' || answer.type === 'video')) {
+      const existingView = await ctx.db
+        .query('todAnswerViews')
+        .withIndex('by_answer_viewer', (q) =>
+          q.eq('answerId', answerId).eq('viewerUserId', viewerId)
+        )
+        .first();
+
+      if (existingView) {
+        return null;
+      }
+    }
+
+    const url = answer.mediaStorageId
+      ? await ctx.storage.getUrl(answer.mediaStorageId)
+      : answer.mediaUrl;
+
+    if (!url) {
+      return null;
+    }
+
+    return {
+      url,
+      kind: answer.type as 'photo' | 'video' | 'voice',
+      mediaStorageId: answer.mediaStorageId,
+      durationSec: answer.durationSec ?? answer.viewDurationSec,
+      isFrontCamera: answer.isFrontCamera ?? false,
+    };
+  },
+});
 
 /**
  * Claim viewing rights for an answer's secure media.

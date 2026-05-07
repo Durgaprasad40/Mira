@@ -25,10 +25,19 @@ import {
 } from '@/lib/constants';
 import { InAppMediaCamera, MediaCaptureResult } from './InAppMediaCamera';
 import type { TodPrompt } from '@/types';
+import {
+  TOD_MEDIA_LIMITS,
+  TOD_VIDEO_MAX_DURATION_SEC,
+  TOD_VOICE_MAX_DURATION_SEC,
+  type TodMediaLimitKind,
+  formatTodMediaLimit,
+  isTodAllowedMime,
+  resolveTodMime,
+} from '@/lib/todMediaLimits';
 
 const C = INCOGNITO_COLORS;
 const MAX_TEXT_CHARS = 400;
-const MAX_AUDIO_SEC = 60;
+const MAX_AUDIO_SEC = TOD_VOICE_MAX_DURATION_SEC;
 const TEXT_MAX_SCALE = 1.2;
 const HEADER_ICON_SIZE = moderateScale(22, 0.25);
 const AUDIO_PREVIEW_ICON_SIZE = moderateScale(34, 0.25);
@@ -52,14 +61,6 @@ const CONFIRM_ICON_SIZE = SIZES.icon.xl;
 const SHEET_RADIUS = moderateScale(20, 0.25);
 const MODAL_RADIUS = moderateScale(16, 0.25);
 
-// P2-001: Media file size limits (in bytes)
-const MAX_PHOTO_SIZE_MB = 10;
-const MAX_VIDEO_SIZE_MB = 50;
-const MAX_AUDIO_SIZE_MB = 5;
-const MAX_PHOTO_SIZE = MAX_PHOTO_SIZE_MB * 1024 * 1024;
-const MAX_VIDEO_SIZE = MAX_VIDEO_SIZE_MB * 1024 * 1024;
-const MAX_AUDIO_SIZE = MAX_AUDIO_SIZE_MB * 1024 * 1024;
-
 const debugTodLog = (...args: unknown[]) => {
   if (__DEV__) {
     console.log(...args);
@@ -71,6 +72,22 @@ const debugTodWarn = (...args: unknown[]) => {
     console.warn(...args);
   }
 };
+
+type ComposerMediaKind = 'photo' | 'video' | 'audio';
+
+function getTodLimitKind(kind: ComposerMediaKind): TodMediaLimitKind {
+  return kind === 'audio' ? 'voice' : kind;
+}
+
+function normalizePickerDurationMs(duration: number | null | undefined): number | undefined {
+  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) {
+    return undefined;
+  }
+
+  return duration <= TOD_VIDEO_MAX_DURATION_SEC
+    ? Math.round(duration * 1000)
+    : Math.round(duration);
+}
 
 // Identity modes matching backend
 export type IdentityMode = 'anonymous' | 'no_photo' | 'profile';
@@ -280,6 +297,15 @@ export function UnifiedAnswerComposer({
       // M-007 FIX: Use ref for latest duration to avoid stale closure
       const finalSeconds = recordSecondsRef.current;
       if (uri && finalSeconds > 0) {
+        if (!validateMediaDuration('audio', finalSeconds * 1000)) {
+          return;
+        }
+
+        const mime = getValidatedMime('audio', uri, 'audio/mp4');
+        if (!mime) {
+          return;
+        }
+
         // P2-001: Validate audio file size before attaching
         const fileSize = await getFileSizeBytes(uri);
         if (!validateMediaSize(fileSize, 'audio')) {
@@ -290,7 +316,7 @@ export function UnifiedAnswerComposer({
         setAttachment({
           kind: 'audio',
           uri,
-          mime: 'audio/mp4',
+          mime,
           durationMs: finalSeconds * 1000,
         });
         setMediaRemoved(false);
@@ -352,29 +378,51 @@ export function UnifiedAnswerComposer({
   };
 
   // P2-001: Validate file size before attaching
-  const validateMediaSize = (sizeBytes: number | null | undefined, kind: 'photo' | 'video' | 'audio'): boolean => {
+  const validateMediaSize = (sizeBytes: number | null | undefined, kind: ComposerMediaKind): boolean => {
     if (sizeBytes === null || sizeBytes === undefined) {
       // Can't determine size, allow it but log warning
       debugTodWarn('[T/D COMPOSER] Could not determine file size, allowing upload');
       return true;
     }
 
-    const limits = {
-      photo: { max: MAX_PHOTO_SIZE, label: `${MAX_PHOTO_SIZE_MB}MB` },
-      video: { max: MAX_VIDEO_SIZE, label: `${MAX_VIDEO_SIZE_MB}MB` },
-      audio: { max: MAX_AUDIO_SIZE, label: `${MAX_AUDIO_SIZE_MB}MB` },
-    };
-
-    const limit = limits[kind];
-    if (sizeBytes > limit.max) {
-      const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(1);
-      Alert.alert(
-        'File Too Large',
-        `This ${kind} is ${sizeMB}MB, which exceeds the ${limit.label} limit. Please choose a smaller file.`
-      );
+    const limitKind = getTodLimitKind(kind);
+    if (sizeBytes > TOD_MEDIA_LIMITS[limitKind].maxBytes) {
+      Alert.alert('File Too Large', formatTodMediaLimit(limitKind));
       return false;
     }
     return true;
+  };
+
+  const validateMediaDuration = (kind: ComposerMediaKind, durationMs: number | undefined): boolean => {
+    const limitKind = getTodLimitKind(kind);
+    if (limitKind !== 'video' && limitKind !== 'voice') {
+      return true;
+    }
+
+    const durationSec = durationMs ? Math.ceil(durationMs / 1000) : undefined;
+    if (
+      typeof durationSec !== 'number' ||
+      durationSec <= 0 ||
+      durationSec > TOD_MEDIA_LIMITS[limitKind].maxDurationSec
+    ) {
+      Alert.alert('Media Too Long', formatTodMediaLimit(limitKind));
+      return false;
+    }
+    return true;
+  };
+
+  const getValidatedMime = (
+    kind: ComposerMediaKind,
+    uri: string,
+    mime: string | null | undefined
+  ): string | undefined => {
+    const limitKind = getTodLimitKind(kind);
+    const resolvedMime = resolveTodMime(limitKind, uri, mime);
+    if (!resolvedMime || !isTodAllowedMime(limitKind, resolvedMime)) {
+      Alert.alert('Unsupported media format', 'Unsupported media format.');
+      return undefined;
+    }
+    return resolvedMime;
   };
 
   // Gallery picker - picks both photos and videos
@@ -384,7 +432,7 @@ export function UnifiedAnswerComposer({
         mediaTypes: ['images', 'videos'],
         allowsEditing: false,
         quality: 0.8,
-        videoMaxDuration: 60,
+        videoMaxDuration: TOD_VIDEO_MAX_DURATION_SEC,
       });
 
       if (result.canceled || !result.assets?.[0]) return;
@@ -404,8 +452,15 @@ export function UnifiedAnswerComposer({
         return; // Size validation failed, don't attach
       }
 
-      const mime = isVideo ? 'video/mp4' : 'image/jpeg';
-      const durationMs = asset.duration ? Math.round(asset.duration) : undefined;
+      const mime = getValidatedMime(kind, asset.uri, asset.mimeType);
+      if (!mime) {
+        return;
+      }
+
+      const durationMs = isVideo ? normalizePickerDurationMs(asset.duration) : undefined;
+      if (isVideo && !validateMediaDuration('video', durationMs)) {
+        return;
+      }
 
       setAttachment({
         kind,
@@ -440,6 +495,19 @@ export function UnifiedAnswerComposer({
   const handleMediaCaptured = useCallback(async (result: MediaCaptureResult) => {
     setShowMediaCamera(false);
 
+    if (!validateMediaDuration(result.kind, result.durationMs)) {
+      return;
+    }
+
+    const mime = getValidatedMime(
+      result.kind,
+      result.uri,
+      result.kind === 'video' ? 'video/mp4' : 'image/jpeg'
+    );
+    if (!mime) {
+      return;
+    }
+
     // P2-001: Validate file size before attaching
     const fileSize = await getFileSizeBytes(result.uri);
     if (!validateMediaSize(fileSize, result.kind)) {
@@ -449,7 +517,7 @@ export function UnifiedAnswerComposer({
     setAttachment({
       kind: result.kind,
       uri: result.uri,
-      mime: result.kind === 'video' ? 'video/mp4' : 'image/jpeg',
+      mime,
       durationMs: result.durationMs,
       isFrontCamera: result.isFrontCamera,
     });

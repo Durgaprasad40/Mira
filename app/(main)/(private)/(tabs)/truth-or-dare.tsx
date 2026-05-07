@@ -887,6 +887,10 @@ export default function TruthOrDareScreen() {
     router.push('/(main)/incognito-create-tod' as any);
   }, [router]);
 
+  const openMyTruthDare = useCallback(() => {
+    router.push('/(main)/(private)/my-truth-or-dare' as any);
+  }, [router]);
+
   // Open thread for adding comment (same as opening thread, composer auto-shows)
   const openThreadForComment = useCallback((promptId: string) => {
     router.push({
@@ -1021,6 +1025,14 @@ export default function TruthOrDareScreen() {
             <Ionicons name="flame" size={14} color="#FFF" />
           </LinearGradient>
           <Text style={styles.headerTitle}>Truth or Dare</Text>
+          <TouchableOpacity
+            style={styles.headerActionButton}
+            onPress={openMyTruthDare}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityLabel="My Truth and Dare"
+          >
+            <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
+          </TouchableOpacity>
         </View>
         <View style={styles.emptyState}>
           <View style={styles.emptyIconContainer}>
@@ -1059,6 +1071,14 @@ export default function TruthOrDareScreen() {
             <Ionicons name="flame" size={14} color="#FFF" />
           </LinearGradient>
           <Text style={styles.headerTitle}>Truth or Dare</Text>
+          <TouchableOpacity
+            style={styles.headerActionButton}
+            onPress={openMyTruthDare}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityLabel="My Truth and Dare"
+          >
+            <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
+          </TouchableOpacity>
         </View>
         <View style={styles.listContent}>
           <SkeletonCard />
@@ -1092,6 +1112,14 @@ export default function TruthOrDareScreen() {
             <Ionicons name="flame" size={14} color="#FFF" />
           </LinearGradient>
           <Text style={styles.headerTitle}>Truth or Dare</Text>
+          <TouchableOpacity
+            style={styles.headerActionButton}
+            onPress={openMyTruthDare}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityLabel="My Truth and Dare"
+          >
+            <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
+          </TouchableOpacity>
         </View>
         <View style={styles.emptyState}>
           <View style={styles.emptyIconContainer}>
@@ -1128,6 +1156,14 @@ export default function TruthOrDareScreen() {
           <Ionicons name="flame" size={14} color="#FFF" />
         </LinearGradient>
         <Text style={styles.headerTitle}>Truth or Dare</Text>
+        <TouchableOpacity
+          style={styles.headerActionButton}
+          onPress={openMyTruthDare}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityLabel="My Truth and Dare"
+        >
+          <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
+        </TouchableOpacity>
       </View>
 
       <FlatList
@@ -1241,10 +1277,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   headerTitle: {
+    flex: 1,
     fontSize: 18,
     fontWeight: '700',
     color: PREMIUM.textPrimary,
     letterSpacing: 0.3,
+  },
+  headerActionButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: PREMIUM.bgElevated,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
   },
 
   // ─── Section Headers ───

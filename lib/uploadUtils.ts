@@ -18,6 +18,14 @@ export const FILE_SIZE_LIMITS_DISPLAY = {
   DOODLE: '5 MB',
 };
 
+type UploadMediaType = 'photo' | 'video' | 'audio' | 'doodle';
+
+type UploadValidationOptions = {
+  maxBytes?: number;
+  limitMessage?: string;
+  contentType?: string;
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // UPLOAD ERROR TYPES
 // ═══════════════════════════════════════════════════════════════════════════
@@ -46,7 +54,8 @@ export class UploadError extends Error {
 /**
  * Get file size limit based on media type
  */
-function getFileSizeLimit(mediaType?: 'photo' | 'video' | 'audio' | 'doodle'): number {
+function getFileSizeLimit(mediaType?: UploadMediaType, options?: UploadValidationOptions): number {
+  if (typeof options?.maxBytes === 'number') return options.maxBytes;
   switch (mediaType) {
     case 'video': return FILE_SIZE_LIMITS.VIDEO_MAX_BYTES;
     case 'audio': return FILE_SIZE_LIMITS.AUDIO_MAX_BYTES;
@@ -59,7 +68,7 @@ function getFileSizeLimit(mediaType?: 'photo' | 'video' | 'audio' | 'doodle'): n
 /**
  * Get human-readable file size limit
  */
-function getFileSizeLimitDisplay(mediaType?: 'photo' | 'video' | 'audio' | 'doodle'): string {
+function getFileSizeLimitDisplay(mediaType?: UploadMediaType): string {
   switch (mediaType) {
     case 'video': return FILE_SIZE_LIMITS_DISPLAY.VIDEO;
     case 'audio': return FILE_SIZE_LIMITS_DISPLAY.AUDIO;
@@ -84,7 +93,8 @@ function formatFileSize(bytes: number): string {
  */
 export async function validateFileSize(
   uri: string,
-  mediaType?: 'photo' | 'video' | 'audio' | 'doodle'
+  mediaType?: UploadMediaType,
+  options?: UploadValidationOptions
 ): Promise<number> {
   const info = await FileSystem.getInfoAsync(uri);
 
@@ -97,7 +107,7 @@ export async function validateFileSize(
   }
 
   const fileSize = (info as any).size as number;
-  const limit = getFileSizeLimit(mediaType);
+  const limit = getFileSizeLimit(mediaType, options);
   const limitDisplay = getFileSizeLimitDisplay(mediaType);
 
   if (fileSize > limit) {
@@ -106,7 +116,8 @@ export async function validateFileSize(
                       mediaType === 'audio' ? 'Audio' :
                       mediaType === 'doodle' ? 'Doodle' : 'Image';
     throw new UploadError(
-      `${typeLabel} is too large (${sizeDisplay}). Maximum size is ${limitDisplay}.`,
+      options?.limitMessage ??
+        `${typeLabel} is too large (${sizeDisplay}). Maximum size is ${limitDisplay}.`,
       'FILE_TOO_LARGE',
       false
     );
@@ -266,7 +277,8 @@ function mapConvexUploadUrlError(err: unknown): UploadError {
 export async function uploadMediaToConvex(
   uri: string,
   generateUploadUrl: () => Promise<string>,
-  mediaType?: 'photo' | 'video' | 'audio' | 'doodle'
+  mediaType?: UploadMediaType,
+  options?: UploadValidationOptions
 ): Promise<Id<'_storage'>> {
   const uriPrefix = uri.substring(0, Math.min(40, uri.length));
   console.log(`[UPLOAD] starting type=${mediaType ?? 'auto'} uri=${uriPrefix}...`);
@@ -286,7 +298,7 @@ export async function uploadMediaToConvex(
   try {
     // Step 1: Validate file size BEFORE any other processing
     // This fails fast with a clear error if file is too large
-    const fileSize = await validateFileSize(uri, mediaType);
+    const fileSize = await validateFileSize(uri, mediaType, options);
     console.log(`[UPLOAD] file size validated: ${formatFileSize(fileSize)}`);
 
     // Step 2: Ensure we have a stable file path to upload from
@@ -303,7 +315,9 @@ export async function uploadMediaToConvex(
     }
 
     // Step 4: Detect content type from URI
-    const contentType = getContentTypeFromUri(stableUri, mediaType as 'photo' | 'video' | 'audio');
+    const contentType =
+      options?.contentType ??
+      getContentTypeFromUri(stableUri, mediaType as 'photo' | 'video' | 'audio');
     console.log(`[UPLOAD] contentType=${contentType}`);
 
     // Step 5: Upload file with timeout handling
@@ -407,8 +421,9 @@ export async function uploadMediaToConvex(
 export async function uploadMediaToConvexWithProgress(
   uri: string,
   generateUploadUrl: () => Promise<string>,
-  mediaType?: 'photo' | 'video' | 'audio' | 'doodle',
-  onProgress?: (progress: number) => void
+  mediaType?: UploadMediaType,
+  onProgress?: (progress: number) => void,
+  options?: UploadValidationOptions
 ): Promise<Id<'_storage'>> {
   // Guard: skip upload for remote URLs (http/https)
   if (uri.startsWith('http://') || uri.startsWith('https://')) {
@@ -422,7 +437,7 @@ export async function uploadMediaToConvexWithProgress(
   let stableUri: string | null = null;
   try {
     // Step 1: Validate file size
-    await validateFileSize(uri, mediaType);
+    await validateFileSize(uri, mediaType, options);
 
     // Step 2: Stable file path
     stableUri = await ensureStableFile(uri, mediaType);
@@ -436,7 +451,9 @@ export async function uploadMediaToConvexWithProgress(
     }
 
     // Step 4: Content type
-    const contentType = getContentTypeFromUri(stableUri, mediaType as 'photo' | 'video' | 'audio');
+    const contentType =
+      options?.contentType ??
+      getContentTypeFromUri(stableUri, mediaType as 'photo' | 'video' | 'audio');
 
     // Step 5: createUploadTask path (progress-capable)
     let task: FileSystem.UploadTask | null = null;
@@ -463,7 +480,7 @@ export async function uploadMediaToConvexWithProgress(
       );
     } catch (err) {
       // Fallback: if task creation fails, use existing uploadAsync path (no progress)
-      return await uploadMediaToConvex(uri, generateUploadUrl, mediaType);
+      return await uploadMediaToConvex(uri, generateUploadUrl, mediaType, options);
     }
 
     // Start at 0 for UI

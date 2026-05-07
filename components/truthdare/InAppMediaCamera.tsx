@@ -13,9 +13,10 @@ import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { TOD_VIDEO_MAX_DURATION_SEC } from '@/lib/todMediaLimits';
 
 const C = INCOGNITO_COLORS;
-const MAX_VIDEO_DURATION_SEC = 60;
+const MAX_VIDEO_DURATION_SEC = TOD_VIDEO_MAX_DURATION_SEC;
 
 // Internal mode for UI, maps to CameraView mode ('picture' | 'video')
 type CaptureMode = 'photo' | 'video';

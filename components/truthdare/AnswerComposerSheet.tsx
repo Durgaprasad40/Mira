@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import type { TodPrompt } from '@/types';
+import { formatTodMediaLimit } from '@/lib/todMediaLimits';
 
 const C = INCOGNITO_COLORS;
 
@@ -42,6 +43,7 @@ export function AnswerComposerSheet({
   };
 
   const isTruth = prompt.type === 'truth';
+  const mediaLimitHint = `${formatTodMediaLimit('photo')} ${formatTodMediaLimit('video')} ${formatTodMediaLimit('voice')}`;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -68,7 +70,7 @@ export function AnswerComposerSheet({
               </TouchableOpacity>
             ))}
           </View>
-          <Text style={styles.hint}>Video max 60s. One answer per prompt.</Text>
+          <Text style={styles.hint}>{mediaLimitHint} One answer per prompt.</Text>
         </View>
       </TouchableOpacity>
     </Modal>

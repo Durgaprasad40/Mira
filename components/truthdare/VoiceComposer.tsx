@@ -13,9 +13,10 @@ import {
 import { useTodIdentityStore, TodIdentityChoice } from '@/stores/todIdentityStore';
 import type { TodPrompt, TodProfileVisibility } from '@/types';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { TOD_VOICE_MAX_DURATION_SEC, formatTodMediaLimit } from '@/lib/todMediaLimits';
 
 const C = INCOGNITO_COLORS;
-const MAX_DURATION_SEC = 60; // 60 seconds max
+const MAX_DURATION_SEC = TOD_VOICE_MAX_DURATION_SEC;
 const TEXT_MAX_SCALE = 1.2;
 const HEADER_ICON_SIZE = moderateScale(22, 0.25);
 const PREVIEW_ICON_SIZE = moderateScale(58, 0.25);
@@ -242,6 +243,10 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
 
   const handleSubmit = useCallback(() => {
     if (!audioUri || !promptId) return;
+    if (seconds <= 0 || seconds > MAX_DURATION_SEC) {
+      Alert.alert('Media Too Long', formatTodMediaLimit('voice'));
+      return;
+    }
 
     // Save the identity choice for this thread
     const choice = modeToStoreChoice(identityMode);

@@ -1646,6 +1646,7 @@ export default defineSchema({
     mediaUrl: v.optional(v.string()),
     mediaStorageId: v.optional(v.id('_storage')),
     mediaMime: v.optional(v.string()), // MIME type for media
+    fileSize: v.optional(v.number()),
     durationSec: v.optional(v.number()),
     likeCount: v.number(), // legacy, kept for compatibility
     createdAt: v.number(),
@@ -1799,7 +1800,8 @@ export default defineSchema({
       v.literal('prompt_reaction'), // reactions on prompts
       v.literal('report'),
       v.literal('prompt_report'), // reports on prompts
-      v.literal('claim_media') // active secure-media claim rate limit action
+      v.literal('claim_media'), // active secure-media claim rate limit action
+      v.literal('media_upload') // upload URL generation / media finalization guard
     ),
     windowStart: v.number(), // Start of the rate limit window (day start)
     count: v.number(), // Actions in this window
@@ -1826,6 +1828,7 @@ export default defineSchema({
     toUserId: v.string(), // prompt owner (only person who can view)
     mediaType: v.union(v.literal('photo'), v.literal('video')),
     storageId: v.optional(v.id('_storage')), // cleared after deletion
+    fileSize: v.optional(v.number()),
     viewMode: v.union(v.literal('tap'), v.literal('hold')), // how owner views: tap once or hold to view
     durationSec: v.number(), // view timer in seconds (1-60, default 20)
     status: v.union(
