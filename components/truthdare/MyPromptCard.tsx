@@ -87,38 +87,44 @@ export const MyPromptCard = memo(function MyPromptCard({ prompt, onPress }: Prop
           style={styles.typePill}
         >
           <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
-          <Text style={styles.typeText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+          <Text style={styles.typeText} maxFontSizeMultiplier={1.15}>
+            {isTruth ? 'Truth' : 'Dare'}
+          </Text>
         </LinearGradient>
 
         <View style={styles.statusPill}>
           <Ionicons name={status.icon} size={12} color={status.color} />
-          <Text style={[styles.statusText, { color: status.color }]} numberOfLines={1}>
+          <Text
+            style={[styles.statusText, { color: status.color }]}
+            numberOfLines={1}
+            maxFontSizeMultiplier={1.15}
+          >
             {status.label}
           </Text>
         </View>
       </View>
 
-      <Text style={styles.promptText} numberOfLines={3}>
+      <Text style={styles.promptText} numberOfLines={3} maxFontSizeMultiplier={1.2}>
         {prompt.text}
       </Text>
 
       <View style={styles.metaRow}>
         <View style={styles.metaItem}>
           <Ionicons name="time-outline" size={13} color={PREMIUM.textMuted} />
-          <Text style={styles.metaText}>{getTimeAgo(prompt.createdAt)}</Text>
+          <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>{getTimeAgo(prompt.createdAt)}</Text>
         </View>
         <View style={styles.metaItem}>
           <Ionicons name="chatbubble-outline" size={13} color={PREMIUM.textMuted} />
-          <Text style={styles.metaText}>{pluralize(answerCount, 'response')}</Text>
+          <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>{pluralize(answerCount, 'response')}</Text>
         </View>
         <View style={styles.metaItem}>
           <Ionicons name="heart-outline" size={13} color={PREMIUM.textMuted} />
-          <Text style={styles.metaText}>{pluralize(reactionCount, 'reaction')}</Text>
+          <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>{pluralize(reactionCount, 'reaction')}</Text>
         </View>
         {prompt.hasMedia ? (
           <View style={styles.metaItem}>
             <Ionicons name="images-outline" size={13} color={PREMIUM.textMuted} />
-            <Text style={styles.metaText}>Media</Text>
+            <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>Media</Text>
           </View>
         ) : null}
       </View>
