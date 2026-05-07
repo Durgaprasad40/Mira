@@ -1605,6 +1605,7 @@ export const recordLocationBatch = mutation({
     let droppedStale = 0;
     let droppedFuture = 0;
     let droppedDedupe = 0;
+    let duplicateCount = 0;
     let droppedInvalid = 0;
     let latestAcceptedSample: { lat: number; lng: number; capturedAt: number; accuracy?: number } | null = null;
 
@@ -1633,13 +1634,28 @@ export const recordLocationBatch = mutation({
         droppedFuture++;
         continue;
       }
+      const snapped = roundToGrid(raw.lat, raw.lng);
+      const existingSameCapture = await ctx.db
+        .query('locationSamples')
+        .withIndex('by_user_capturedAt', (q) =>
+          q.eq('userId', userId).eq('capturedAt', raw.capturedAt),
+        )
+        .collect();
+      const isRetryDuplicate = existingSameCapture.some((sample) =>
+        sample.source === raw.source &&
+        Math.abs(sample.lat - snapped.lat) < 0.000001 &&
+        Math.abs(sample.lng - snapped.lng) < 0.000001,
+      );
+      if (isRetryDuplicate) {
+        duplicateCount++;
+        continue;
+      }
       // Dedupe against last accepted sample for this user.
       if (raw.capturedAt - lastAcceptedAt < SAMPLE_DEDUPE_MIN_GAP_MS) {
         droppedDedupe++;
         continue;
       }
 
-      const snapped = roundToGrid(raw.lat, raw.lng);
       await ctx.db.insert('locationSamples', {
         userId,
         lat: snapped.lat,
@@ -1668,16 +1684,38 @@ export const recordLocationBatch = mutation({
       }
     }
 
+    if (BG_LOCATION_AUDIT_ENABLED) {
+      const droppedCount = droppedDedupe + droppedStale + droppedFuture + droppedInvalid;
+      const skippedCount = droppedCount + duplicateCount;
+      console.log('[BG_LOCATION][batch_result]', {
+        userId,
+        acceptedCount: accepted,
+        duplicateCount,
+        droppedCount,
+        skippedCount,
+        droppedDedupe,
+        droppedStale,
+        droppedFuture,
+        droppedInvalid,
+        sources: Array.from(sources),
+      });
+    }
+
     // Only continue to user-doc update + detection if at least one sample
     // was accepted. Otherwise the batch is effectively a no-op.
     if (!latestAcceptedSample) {
+      const droppedCount = droppedDedupe + droppedStale + droppedFuture + droppedInvalid;
       return {
         success: true,
         accepted: 0,
+        acceptedCount: 0,
         droppedStale,
         droppedFuture,
         droppedDedupe,
+        duplicateCount,
         droppedInvalid,
+        droppedCount,
+        skippedCount: droppedCount + duplicateCount,
       };
     }
 
@@ -1708,13 +1746,18 @@ export const recordLocationBatch = mutation({
       accuracy: latestAcceptedSample.accuracy,
     });
 
+    const droppedCount = droppedDedupe + droppedStale + droppedFuture + droppedInvalid;
     return {
       success: true,
       accepted,
       droppedStale,
       droppedFuture,
       droppedDedupe,
+      duplicateCount,
       droppedInvalid,
+      droppedCount,
+      skippedCount: droppedCount + duplicateCount,
+      acceptedCount: accepted,
       crossingsWritten: detection.crossingsWritten,
     };
   },

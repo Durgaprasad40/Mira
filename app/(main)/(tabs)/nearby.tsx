@@ -94,6 +94,7 @@ import { HeaderAvatarButton } from '@/components/ui';
 import { NearbyPreviewCard, NearbyPreviewData } from '@/components/nearby/NearbyPreviewCard';
 import { trackEvent } from '@/lib/analytics';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
+import { flushQueuedBackgroundLocationSamples } from '@/tasks/backgroundLocationTask';
 
 // Key for storing when user last viewed crossed paths
 const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
@@ -463,6 +464,7 @@ export default function NearbyScreen() {
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const [showEmptyState, setShowEmptyState] = useState(false);
+  const [showCrossedPathsCTA, setShowCrossedPathsCTA] = useState(false);
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
   const [isMapReady, setIsMapReady] = useState(false);
   const [retainedNearbyUsersResult, setRetainedNearbyUsersResult] = useState<NearbyUsersQueryResult | null>(null);
@@ -482,6 +484,10 @@ export default function NearbyScreen() {
   const locationAcquireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const publishRefreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const loadingOverlayDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const emptyAutoHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const crossedPathsCtaTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const emptyNoticeShownThisFocusRef = useRef(false);
+  const lastCtaLatestCreatedAtRef = useRef(0);
 
   // P1-003 FIX: Ref to track query completion for timeout callback
   // This provides fresh state check inside setTimeout, avoiding stale closure values
@@ -496,11 +502,8 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // P3 POLISH: Animation refs for premium feel
   // ---------------------------------------------------------------------------
-  // Empty state is persistent: the card stays visible as long as the empty
-  // condition is true. An earlier iteration auto-hid the card after a few
-  // seconds, which left users staring at an empty map with no explanation
-  // or recovery affordance. Hybrid-UX restoration keeps the card in view
-  // until new users appear (handled by the show/clear effects below).
+  // Empty state is informational: show it once per focus session, then
+  // auto-hide so it does not sit over the map indefinitely.
   // P3-002: Recenter button press scale animation
   const recenterScale = useRef(new Animated.Value(1)).current;
   // P3-003: Loading overlay fade animation
@@ -557,6 +560,14 @@ export default function NearbyScreen() {
       if (loadingOverlayDelayRef.current) {
         clearTimeout(loadingOverlayDelayRef.current);
         loadingOverlayDelayRef.current = null;
+      }
+      if (emptyAutoHideTimeoutRef.current) {
+        clearTimeout(emptyAutoHideTimeoutRef.current);
+        emptyAutoHideTimeoutRef.current = null;
+      }
+      if (crossedPathsCtaTimeoutRef.current) {
+        clearTimeout(crossedPathsCtaTimeoutRef.current);
+        crossedPathsCtaTimeoutRef.current = null;
       }
       if (autoRetryTimeoutRef.current) {
         clearTimeout(autoRetryTimeoutRef.current);
@@ -621,12 +632,14 @@ export default function NearbyScreen() {
   useEffect(() => {
     if (!crossedPathSummaryQuery || crossedPathSummaryQuery.count === 0) {
       setHasNewCrossedPaths(false);
+      setShowCrossedPathsCTA(false);
       return;
     }
 
     const latestTimestamp = crossedPathSummaryQuery.latestCreatedAt ?? 0;
     if (!latestTimestamp) {
       setHasNewCrossedPaths(false);
+      setShowCrossedPathsCTA(false);
       return;
     }
 
@@ -635,7 +648,20 @@ export default function NearbyScreen() {
     AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY).then((lastSeenStr) => {
       if (!isMountedRef.current) return;
       const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
-      setHasNewCrossedPaths(latestTimestamp > lastSeen);
+      const hasNew = latestTimestamp > lastSeen;
+      setHasNewCrossedPaths(hasNew);
+      if (hasNew && latestTimestamp !== lastCtaLatestCreatedAtRef.current) {
+        lastCtaLatestCreatedAtRef.current = latestTimestamp;
+        setShowCrossedPathsCTA(true);
+        if (crossedPathsCtaTimeoutRef.current) {
+          clearTimeout(crossedPathsCtaTimeoutRef.current);
+        }
+        crossedPathsCtaTimeoutRef.current = setTimeout(() => {
+          if (!isMountedRef.current) return;
+          setShowCrossedPathsCTA(false);
+          crossedPathsCtaTimeoutRef.current = null;
+        }, 5000);
+      }
     }).catch(() => {
       if (!isMountedRef.current) return;
       // On error, assume there are new paths if we have any
@@ -1366,7 +1392,7 @@ export default function NearbyScreen() {
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Empty state: stay visible whenever Nearby is truthfully empty
+  // Empty state: show once per Nearby focus session, then auto-hide.
   // ---------------------------------------------------------------------------
   const isEmptyStateCondition =
     locationUIState === 'ready' &&
@@ -1375,20 +1401,34 @@ export default function NearbyScreen() {
     !isDemo &&
     (!shouldShowLoadingState || hasRetainedNearbyResult);
 
-  // Show empty-state card whenever the empty condition is truthy, then
-  // auto-hide it after 5 seconds. If the empty condition toggles (e.g. user
-  // refreshes, moves the map, or users appear and disappear again) the
-  // effect re-runs, clears the prior timer, and re-shows the card.
   useEffect(() => {
-    if (!isEmptyStateCondition) return;
+    if (!isEmptyStateCondition) {
+      setShowEmptyState(false);
+      return;
+    }
 
+    if (emptyNoticeShownThisFocusRef.current) {
+      return;
+    }
+
+    emptyNoticeShownThisFocusRef.current = true;
     setShowEmptyState(true);
 
-    const timer = setTimeout(() => {
+    if (emptyAutoHideTimeoutRef.current) {
+      clearTimeout(emptyAutoHideTimeoutRef.current);
+    }
+    emptyAutoHideTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
       setShowEmptyState(false);
+      emptyAutoHideTimeoutRef.current = null;
     }, 5000);
 
-    return () => clearTimeout(timer);
+    return () => {
+      if (emptyAutoHideTimeoutRef.current) {
+        clearTimeout(emptyAutoHideTimeoutRef.current);
+        emptyAutoHideTimeoutRef.current = null;
+      }
+    };
   }, [isEmptyStateCondition]);
 
   // P3-004: Subtle pulse loop while empty card is visible. Native driver,
@@ -1461,6 +1501,11 @@ export default function NearbyScreen() {
     // Mark crossed paths as seen
     AsyncStorage.setItem(CROSSED_PATHS_LAST_SEEN_KEY, Date.now().toString()).catch(() => {});
     setHasNewCrossedPaths(false);
+    setShowCrossedPathsCTA(false);
+    if (crossedPathsCtaTimeoutRef.current) {
+      clearTimeout(crossedPathsCtaTimeoutRef.current);
+      crossedPathsCtaTimeoutRef.current = null;
+    }
     safePush(router, '/(main)/crossed-paths' as any, 'nearby->crossed-paths');
   }, [router]);
 
@@ -1655,6 +1700,7 @@ export default function NearbyScreen() {
   useFocusEffect(
     useCallback(() => {
       setIsNearbyFocused(true);
+      emptyNoticeShownThisFocusRef.current = false;
       requestNearbyRefresh({ force: true });
       log.info('[NEARBY]', 'screen focused, starting location tracking');
       if (__DEV__) {
@@ -1670,17 +1716,28 @@ export default function NearbyScreen() {
         });
       }
       startNearbyLocationTracking();
+      void flushQueuedBackgroundLocationSamples(userId);
 
       // Cleanup: stop tracking when leaving Nearby tab (battery optimization)
       return () => {
         setIsNearbyFocused(false);
+        setShowEmptyState(false);
+        setShowCrossedPathsCTA(false);
+        if (emptyAutoHideTimeoutRef.current) {
+          clearTimeout(emptyAutoHideTimeoutRef.current);
+          emptyAutoHideTimeoutRef.current = null;
+        }
+        if (crossedPathsCtaTimeoutRef.current) {
+          clearTimeout(crossedPathsCtaTimeoutRef.current);
+          crossedPathsCtaTimeoutRef.current = null;
+        }
         log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
         if (__DEV__) {
           console.log('[NEARBY_ENTRY][focus]', { event: 'leave' });
         }
         stopLocationTracking();
       };
-    }, [requestNearbyRefresh, startNearbyLocationTracking, stopLocationTracking])
+    }, [requestNearbyRefresh, startNearbyLocationTracking, stopLocationTracking, userId])
   );
 
   // ---------------------------------------------------------------------------
@@ -2163,6 +2220,28 @@ export default function NearbyScreen() {
           </View>
         )}
 
+        {showCrossedPathsCTA && (
+          <View style={[styles.mapNoticeContainer, styles.crossedPathsCtaContainer]} pointerEvents="box-none">
+            <View style={styles.mapNoticeCard}>
+              <Text
+                style={styles.mapNoticeText}
+                numberOfLines={1}
+                maxFontSizeMultiplier={1.2}
+              >
+                You crossed paths with someone
+              </Text>
+              <TouchableOpacity
+                onPress={handleOpenCrossedPaths}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={styles.mapNoticeAction} numberOfLines={1} maxFontSizeMultiplier={1.2}>
+                  View Crossed Paths
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
         {/* Query loading indicator - shown while fetching nearby users */}
         {/* P3-003 / Phase-3: Fade-in + lightweight shimmer placeholders so
              the overlay reads as an active scan rather than a dead spinner. */}
@@ -2203,7 +2282,7 @@ export default function NearbyScreen() {
           </View>
         )}
 
-        {/* Empty state card — persistent while empty condition holds. Gives
+        {/* Empty state card — shown once per focus session, then auto-hidden. Gives
              the user clear context + two recovery actions (refresh, widen
              preferences) so they never land on a silent empty map. */}
         {/* P2-FIX-3: pointerEvents="box-none" lets taps on the surrounding
@@ -2524,6 +2603,9 @@ const styles = StyleSheet.create({
     left: SPACING.base,
     right: SPACING.base,
     alignItems: 'center',
+  },
+  crossedPathsCtaContainer: {
+    top: moderateScale(112, 0.5),
   },
   mapNoticeCard: {
     flexDirection: 'row',

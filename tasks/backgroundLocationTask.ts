@@ -33,6 +33,13 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '@/convex/_generated/api';
+import {
+  buildNearbyBackgroundUploadBatch,
+  clearNearbyBackgroundSampleQueue,
+  enqueueNearbyBackgroundSamples,
+  replaceNearbyBackgroundSampleQueue,
+  type NearbyBackgroundSample,
+} from '@/lib/nearbyBackgroundQueue';
 
 /** Registered task name — referenced by startLocationUpdatesAsync. */
 export const BACKGROUND_LOCATION_TASK = 'mira/bg-location-task';
@@ -61,6 +68,198 @@ type BgLocationError = {
   message?: string;
 };
 
+const FOREGROUND_QUEUE_FLUSH_THROTTLE_MS = 60 * 1000;
+let lastForegroundQueueFlushAt = 0;
+
+type UploadSummary = {
+  attempted: boolean;
+  sampleCount: number;
+  queuedCount: number;
+  remainingCount: number;
+  acceptedCount?: number;
+  duplicateCount?: number;
+  skippedCount?: number;
+  crossingsWritten?: number;
+  reason?: string;
+  error?: string;
+};
+
+function safeErrorMessage(error: unknown): string {
+  return String(error).slice(0, 180);
+}
+
+function summarizeSources(samples: NearbyBackgroundSample[]): string[] {
+  return Array.from(new Set(samples.map((sample) => sample.source)));
+}
+
+function summarizeBatchResult(result: unknown) {
+  if (!result || typeof result !== 'object') return {};
+  const r = result as Record<string, unknown>;
+  const acceptedCount =
+    typeof r.acceptedCount === 'number'
+      ? r.acceptedCount
+      : typeof r.accepted === 'number'
+        ? r.accepted
+        : undefined;
+  const duplicateCount = typeof r.duplicateCount === 'number' ? r.duplicateCount : undefined;
+  const skippedCount = typeof r.skippedCount === 'number' ? r.skippedCount : undefined;
+  const crossingsWritten = typeof r.crossingsWritten === 'number' ? r.crossingsWritten : undefined;
+  const reason = typeof r.reason === 'string' ? r.reason : undefined;
+
+  return {
+    acceptedCount,
+    duplicateCount,
+    skippedCount,
+    crossingsWritten,
+    reason,
+  };
+}
+
+async function uploadLocationSamplesWithQueue(
+  authUserId: string,
+  currentSamples: NearbyBackgroundSample[],
+  trigger: 'task' | 'foreground',
+): Promise<UploadSummary> {
+  const convexUrl = process.env.EXPO_PUBLIC_CONVEX_URL;
+  if (!convexUrl) {
+    if (__DEV__) console.log('[BG_LOCATION][dropped]', { reason: 'no_convex_url' });
+    return {
+      attempted: false,
+      sampleCount: 0,
+      queuedCount: 0,
+      remainingCount: 0,
+      reason: 'no_convex_url',
+    };
+  }
+
+  const uploadBatch = await buildNearbyBackgroundUploadBatch(currentSamples);
+  const sources = summarizeSources(uploadBatch.samples);
+  if (uploadBatch.samples.length === 0) {
+    return {
+      attempted: false,
+      sampleCount: 0,
+      queuedCount: uploadBatch.queuedCount,
+      remainingCount: uploadBatch.queuedCount,
+      reason: 'empty_queue',
+    };
+  }
+
+  try {
+    if (__DEV__) {
+      console.log('[BG_LOCATION][upload_attempt]', {
+        trigger,
+        sampleCount: uploadBatch.samples.length,
+        queuedCount: uploadBatch.queuedCount,
+        currentCount: uploadBatch.currentCount,
+        sources,
+      });
+    }
+
+    const client = new ConvexHttpClient(convexUrl);
+    const result = await client.mutation(api.crossedPaths.recordLocationBatch, {
+      userId: authUserId,
+      samples: uploadBatch.samples,
+    });
+    await replaceNearbyBackgroundSampleQueue(uploadBatch.remainingSamples);
+    const resultSummary = summarizeBatchResult(result);
+
+    if (__DEV__) {
+      console.log('[BG_LOCATION][upload_success]', {
+        trigger,
+        sampleCount: uploadBatch.samples.length,
+        queuedCount: uploadBatch.queuedCount,
+        remainingCount: uploadBatch.remainingSamples.length,
+        sources,
+        ...resultSummary,
+      });
+    }
+
+    if (__DEV__) {
+      console.log('[BG_LOCATION_QUEUE] flush_success', {
+        trigger,
+        uploaded: uploadBatch.samples.length,
+        queuedCount: uploadBatch.queuedCount,
+        currentCount: uploadBatch.currentCount,
+        remainingCount: uploadBatch.remainingSamples.length,
+        sources,
+        ...resultSummary,
+      });
+    }
+
+    return {
+      attempted: true,
+      sampleCount: uploadBatch.samples.length,
+      queuedCount: uploadBatch.queuedCount,
+      remainingCount: uploadBatch.remainingSamples.length,
+      ...resultSummary,
+    };
+  } catch (e) {
+    const err = safeErrorMessage(e);
+    let queuedAfterFailure: number | undefined;
+    if (currentSamples.length > 0) {
+      const queueResult = await enqueueNearbyBackgroundSamples(currentSamples, {
+        trigger,
+        sources: summarizeSources(currentSamples),
+      });
+      queuedAfterFailure = queueResult.total;
+      if (__DEV__) {
+        console.log('[BG_LOCATION][queue_after_failure]', {
+          trigger,
+          sampleCount: currentSamples.length,
+          queuedCount: queueResult.total,
+          prunedCount: queueResult.pruned,
+          sources: summarizeSources(currentSamples),
+        });
+      }
+    }
+
+    if (__DEV__) {
+      console.log('[BG_LOCATION][upload_failed]', {
+        trigger,
+        sampleCount: uploadBatch.samples.length,
+        queuedCount: uploadBatch.queuedCount,
+        currentCount: uploadBatch.currentCount,
+        sources,
+        error: err,
+      });
+      console.log('[BG_LOCATION_QUEUE] flush_failed', {
+        trigger,
+        queuedCount: uploadBatch.queuedCount,
+        currentCount: uploadBatch.currentCount,
+        remainingCount: queuedAfterFailure ?? uploadBatch.queuedCount,
+        sources,
+        error: err,
+      });
+    }
+
+    return {
+      attempted: true,
+      sampleCount: uploadBatch.samples.length,
+      queuedCount: uploadBatch.queuedCount,
+      remainingCount: queuedAfterFailure ?? uploadBatch.queuedCount,
+      error: err,
+    };
+  }
+}
+
+export async function flushQueuedBackgroundLocationSamples(
+  authUserId?: string | null,
+): Promise<void> {
+  if (!authUserId) return;
+  const now = Date.now();
+  if (now - lastForegroundQueueFlushAt < FOREGROUND_QUEUE_FLUSH_THROTTLE_MS) {
+    return;
+  }
+  lastForegroundQueueFlushAt = now;
+  if (__DEV__) {
+    console.log('[BG_LOCATION_QUEUE] foreground_flush_start', { trigger: 'foreground' });
+  }
+  const summary = await uploadLocationSamplesWithQueue(authUserId, [], 'foreground');
+  if (__DEV__) {
+    console.log('[BG_LOCATION_QUEUE] foreground_flush_done', summary);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Task registration — MUST run at module scope so the OS can resolve the
 // task name even when the app is launched from a terminated state.
@@ -76,6 +275,12 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
       }
       const locations = data?.locations ?? [];
       if (locations.length === 0) return;
+      if (__DEV__) {
+        console.log('[BG_LOCATION][task_received]', {
+          sampleCount: locations.length,
+          platform: Platform.OS,
+        });
+      }
 
       try {
         // Android Phase-2: self-check Discovery Mode expiry before doing
@@ -101,6 +306,9 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
             try {
               await SecureStore.deleteItemAsync(DISCOVERY_EXPIRES_KEY);
             } catch {}
+            try {
+              await clearNearbyBackgroundSampleQueue();
+            } catch {}
             return;
           }
         }
@@ -111,19 +319,12 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
           return;
         }
 
-        const convexUrl = process.env.EXPO_PUBLIC_CONVEX_URL;
-        if (!convexUrl) {
-          if (__DEV__) console.log('[BG_LOCATION][dropped]', { reason: 'no_convex_url' });
-          return;
-        }
-
-        const client = new ConvexHttpClient(convexUrl);
         const now = Date.now();
 
         // Map expo-location updates to the mutation's sample schema.
         // Source: 'slc' on iOS (Significant Location Change is our configured
         // trigger there), 'bg' elsewhere. Clamp capturedAt to [now - 6h, now].
-        const samples = locations
+        const samples: NearbyBackgroundSample[] = locations
           .filter((loc) => loc && loc.coords)
           .map((loc) => {
             const ts = typeof loc.timestamp === 'number' ? loc.timestamp : now;
@@ -151,10 +352,7 @@ if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK)) {
           }
         }
 
-        await client.mutation(api.crossedPaths.recordLocationBatch, {
-          userId: authUserId,
-          samples,
-        });
+        await uploadLocationSamplesWithQueue(authUserId, samples, 'task');
       } catch (e) {
         if (__DEV__) {
           console.log('[BG_LOCATION][dropped]', {
@@ -240,6 +438,10 @@ export async function disableBackgroundLocation(): Promise<void> {
     if (__DEV__) console.log('[BG_LOCATION][disabled]', { ok: true });
   } catch (e) {
     if (__DEV__) console.log('[BG_LOCATION][disabled]', { ok: false, err: String(e) });
+  } finally {
+    try {
+      await clearNearbyBackgroundSampleQueue();
+    } catch {}
   }
 }
 
@@ -442,6 +644,9 @@ export async function disableAndroidDiscoveryMode(): Promise<void> {
     // somehow wakes again (e.g. system resurrection, race with stop call).
     try {
       await SecureStore.deleteItemAsync(DISCOVERY_EXPIRES_KEY);
+    } catch {}
+    try {
+      await clearNearbyBackgroundSampleQueue();
     } catch {}
   }
 }

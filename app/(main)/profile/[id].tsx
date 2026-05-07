@@ -614,6 +614,43 @@ export default function ViewProfileScreen() {
     };
   }, [isDemoMode, isPhase2, token, userId]);
 
+  const goBackSafely = React.useCallback(() => {
+    if (isPhase2) {
+      if (router.canGoBack()) {
+        router.back();
+        return;
+      }
+      router.replace('/(main)/(private)/(tabs)/deep-connect' as any);
+      return;
+    }
+
+    if (normalizedSource === 'nearby' || normalizedSource === 'crossed_paths') {
+      router.replace('/(main)/(tabs)/nearby' as any);
+      return;
+    }
+
+    if (
+      normalizedSource === 'phase1_discover' ||
+      normalizedSource === 'discover' ||
+      normalizedSource === 'home'
+    ) {
+      router.replace('/(main)/(tabs)/home' as any);
+      return;
+    }
+
+    if (normalizedSource === 'phase1_explore' || normalizedSource === 'explore') {
+      router.replace('/(main)/(tabs)/explore' as any);
+      return;
+    }
+
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+
+    router.replace('/(main)/(tabs)/home' as any);
+  }, [isPhase2, normalizedSource, router]);
+
   const syncPhase1DiscoverAction = (action: 'like' | 'pass' | 'super_like') => {
     if (isPhase2 || !userId) return;
 
@@ -642,7 +679,7 @@ export default function ViewProfileScreen() {
     if (isDemoMode) {
       if (action === 'pass') {
         syncPhase1DiscoverAction(action);
-        router.back();
+        goBackSafely();
         return;
       }
 
@@ -668,7 +705,7 @@ export default function ViewProfileScreen() {
           safePush(router, `/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any, 'profile->matchCelebration');
         } else {
           syncPhase1DiscoverAction(action);
-          router.back();
+          goBackSafely();
         }
       }
       return;
@@ -687,7 +724,7 @@ export default function ViewProfileScreen() {
         safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}` as any, 'profile->matchCelebration');
       } else {
         syncPhase1DiscoverAction(action);
-        router.back();
+        goBackSafely();
       }
     } catch {
       Toast.show('Something went wrong. Please try again.');
@@ -716,7 +753,7 @@ export default function ViewProfileScreen() {
       <View style={styles.loadingContainer}>
         <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
         <Text style={styles.loadingText}>Profile not available</Text>
-        <TouchableOpacity style={styles.backButtonAlt} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backButtonAlt} onPress={goBackSafely}>
           <Text style={styles.backButtonText}>Go Back</Text>
         </TouchableOpacity>
       </View>
@@ -738,7 +775,7 @@ export default function ViewProfileScreen() {
       <View style={styles.loadingContainer}>
         <Ionicons name="person-outline" size={48} color={COLORS.textMuted} />
         <Text style={styles.loadingText}>Profile not found</Text>
-        <TouchableOpacity style={styles.backButtonAlt} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backButtonAlt} onPress={goBackSafely}>
           <Text style={styles.backButtonText}>Go Back</Text>
         </TouchableOpacity>
       </View>
@@ -770,7 +807,7 @@ export default function ViewProfileScreen() {
       {/* P1-FIX: Sticky Header - appears when scrolled past photo */}
       {showStickyHeader && (
         <View style={[styles.stickyHeader, { paddingTop: insets.top }]}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.stickyBackButton}>
+          <TouchableOpacity onPress={goBackSafely} style={styles.stickyBackButton}>
             <Ionicons name="chevron-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
           <Text style={styles.stickyHeaderTitle} numberOfLines={1}>
@@ -1479,7 +1516,7 @@ export default function ViewProfileScreen() {
         reportedUserId={userId || ''}
         reportedUserName={profile?.name || 'this user'}
         currentUserId={currentUserId || ''}
-        onBlockSuccess={() => router.back()}
+        onBlockSuccess={goBackSafely}
       />
     </View>
   );
