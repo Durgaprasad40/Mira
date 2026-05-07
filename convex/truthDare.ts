@@ -4648,6 +4648,218 @@ export const openPromptMedia = mutation({
 });
 
 /**
+ * Phase 4 (preload split): preparation step for prompt-owner photo/video.
+ *
+ * Returns a fresh, authorized media URL **without** inserting a row into
+ * `todPromptMediaViews`. Used by the new two-tap client flow:
+ *
+ *   1) First tap (preload): client calls this, warms the asset locally.
+ *   2) Second tap (open):   client opens the viewer with the cached URL.
+ *   3) Consumption complete:client calls `markPromptMediaViewed` to burn
+ *                           the one-time view in the ledger.
+ *
+ * Loading/preloading must NOT mark viewed, so this mutation never writes.
+ * Authorization, hidden-by-reports, blocked-user, and rate-limit gates
+ * mirror `openPromptMedia` exactly. If the viewer has already burned the
+ * one-time view (a `todPromptMediaViews` row exists for the pair), this
+ * mutation returns `already_viewed` so the client can show the friendly
+ * alert without leaking a fresh URL.
+ *
+ * Voice and owner branches behave identically to `openPromptMedia` (no
+ * ledger row is ever written for those).
+ */
+export const preparePromptMedia = mutation({
+  args: {
+    promptId: v.string(),
+    viewerUserId: v.string(),
+  },
+  handler: async (ctx, { promptId, viewerUserId: argsViewerId }) => {
+    const viewerId = await requireAuthenticatedTodUserId(ctx, argsViewerId, 'Unauthorized');
+
+    const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
+    if (!rateCheck.allowed) {
+      throw new Error('Rate limit exceeded. Please wait a moment.');
+    }
+
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+    if (!prompt) {
+      return { status: 'no_media' as const };
+    }
+    if (!prompt.mediaStorageId || !prompt.mediaKind) {
+      return { status: 'no_media' as const };
+    }
+    if (isPromptHiddenForViewer(prompt, viewerId)) {
+      return { status: 'not_authorized' as const };
+    }
+
+    const isOwner =
+      !isSystemTodOwnerId(prompt.ownerUserId) && prompt.ownerUserId === viewerId;
+    const kind = prompt.mediaKind as 'photo' | 'video' | 'voice';
+
+    // Voice: replayable for everyone — return URL, never inserts a row.
+    if (kind === 'voice') {
+      const url = await ctx.storage.getUrl(prompt.mediaStorageId);
+      if (!url) return { status: 'no_media' as const };
+      return {
+        status: 'ok' as const,
+        mediaUrl: url,
+        mediaKind: kind,
+        mediaMime: prompt.mediaMime,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera ?? false,
+        isOwner,
+      };
+    }
+
+    // Owner: unlimited access, never inserts a row.
+    if (isOwner) {
+      const url = await ctx.storage.getUrl(prompt.mediaStorageId);
+      if (!url) return { status: 'no_media' as const };
+      return {
+        status: 'ok' as const,
+        mediaUrl: url,
+        mediaKind: kind,
+        mediaMime: prompt.mediaMime,
+        durationSec: prompt.durationSec,
+        isFrontCamera: prompt.isFrontCamera ?? false,
+        isOwner: true,
+      };
+    }
+
+    // Non-owner photo/video: one-time gate is read-only here. If the user
+    // has already burned the view in a prior session, do not leak a new
+    // URL — return the same `already_viewed` shape the client knows about.
+    const existing = await ctx.db
+      .query('todPromptMediaViews')
+      .withIndex('by_prompt_viewer', (q) =>
+        q.eq('promptId', promptId).eq('viewerUserId', viewerId as string)
+      )
+      .first();
+    if (existing) {
+      return { status: 'already_viewed' as const, isOwner: false };
+    }
+
+    const url = await ctx.storage.getUrl(prompt.mediaStorageId);
+    if (!url) return { status: 'no_media' as const };
+
+    debugTodLog(
+      `[T/D] preparePromptMedia (no-burn) viewerId=${viewerId} promptId=${promptId} kind=${kind}`
+    );
+
+    // NOTE: intentionally NO `ctx.db.insert('todPromptMediaViews', …)`.
+    // The view is burned only by `markPromptMediaViewed` after the client
+    // confirms actual consumption (photo viewer closed after render,
+    // video/audio playback completed).
+    return {
+      status: 'ok' as const,
+      mediaUrl: url,
+      mediaKind: kind,
+      mediaMime: prompt.mediaMime,
+      durationSec: prompt.durationSec,
+      isFrontCamera: prompt.isFrontCamera ?? false,
+      isOwner: false,
+    };
+  },
+});
+
+/**
+ * Phase 4 (preload split): completion step for prompt-owner photo/video.
+ *
+ * Called by the client only after actual consumption:
+ *   - photo: viewer was open and the image rendered, then user closed/back
+ *   - video: playback reached the end (didJustFinish)
+ *   - voice/audio: playback finished
+ *
+ * Inserts the one-time-view row in `todPromptMediaViews` if not already
+ * present. Idempotent: re-calling for the same (promptId, viewerId) pair
+ * is a no-op success and reports `alreadyViewed: true`.
+ *
+ * Owner and voice branches are intentional no-ops: the ledger never tracks
+ * those (owner is unlimited, voice is replayable). Calling this for those
+ * branches is safe — the client may unconditionally call it on completion
+ * without special-casing.
+ */
+export const markPromptMediaViewed = mutation({
+  args: {
+    promptId: v.string(),
+    viewerUserId: v.string(),
+  },
+  handler: async (ctx, { promptId, viewerUserId: argsViewerId }) => {
+    const viewerId = await requireAuthenticatedTodUserId(ctx, argsViewerId, 'Unauthorized');
+
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+    if (!prompt) {
+      return { status: 'no_media' as const };
+    }
+    if (!prompt.mediaStorageId || !prompt.mediaKind) {
+      return { status: 'no_media' as const };
+    }
+    if (isPromptHiddenForViewer(prompt, viewerId)) {
+      return { status: 'not_authorized' as const };
+    }
+
+    const isOwner =
+      !isSystemTodOwnerId(prompt.ownerUserId) && prompt.ownerUserId === viewerId;
+    const kind = prompt.mediaKind as 'photo' | 'video' | 'voice';
+
+    // Owner / voice: ledger is intentionally not tracked.
+    if (isOwner || kind === 'voice') {
+      return {
+        status: 'ok' as const,
+        alreadyViewed: false,
+        viewedAt: Date.now(),
+        isOwner,
+        recorded: false,
+      };
+    }
+
+    // Non-owner photo/video: idempotent ledger insert.
+    const existing = await ctx.db
+      .query('todPromptMediaViews')
+      .withIndex('by_prompt_viewer', (q) =>
+        q.eq('promptId', promptId).eq('viewerUserId', viewerId as string)
+      )
+      .first();
+    if (existing) {
+      return {
+        status: 'ok' as const,
+        alreadyViewed: true,
+        viewedAt: existing.viewedAt,
+        isOwner: false,
+        recorded: false,
+      };
+    }
+
+    const viewedAt = Date.now();
+    await ctx.db.insert('todPromptMediaViews', {
+      promptId,
+      viewerUserId: viewerId as string,
+      ownerUserId: prompt.ownerUserId as string,
+      mediaKind: kind,
+      viewedAt,
+    });
+
+    debugTodLog(
+      `[T/D] markPromptMediaViewed inserted view viewerId=${viewerId} promptId=${promptId} kind=${kind}`
+    );
+
+    return {
+      status: 'ok' as const,
+      alreadyViewed: false,
+      viewedAt,
+      isOwner: false,
+      recorded: true,
+    };
+  },
+});
+
+/**
  * Get URL for voice message playback.
  * Voice messages are NOT one-time secure - they can be replayed.
  */

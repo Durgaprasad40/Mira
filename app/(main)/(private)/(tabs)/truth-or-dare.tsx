@@ -24,10 +24,18 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { TodAvatar } from '@/components/truthdare/TodAvatar';
-import { TodPromptMediaTile } from '@/components/truthdare/TodPromptMediaTile';
+import {
+  TodPromptMediaTile,
+  type TodPromptMediaPreloadStatus,
+} from '@/components/truthdare/TodPromptMediaTile';
 import { TodConnectRequestsIndicator } from '@/components/truthdare/TodConnectRequestsIndicator';
 import { TodConnectRequestsSheet } from '@/components/truthdare/TodConnectRequestsSheet';
+import { PendingPromptCard } from '@/components/truthdare/PendingPromptCard';
 import { useAuthStore } from '@/stores/authStore';
+import {
+  TruthDarePendingPromptUpload,
+  useTruthDarePromptUploadStore,
+} from '@/stores/truthDarePromptUploadStore';
 import { useScreenTrace } from '@/lib/devTrace';
 import { resolveAnswerPreviewIdentity } from '@/lib/todAnswerIdentity';
 
@@ -258,7 +266,7 @@ const CommentPreviewRow = React.memo(function CommentPreviewRow({ answer }: { an
         textColor={PREMIUM.textPrimary}
         iconSize={10}
       />
-      <Text style={styles.commentText} numberOfLines={1} ellipsizeMode="tail">
+      <Text style={styles.commentText} numberOfLines={1} ellipsizeMode="tail" maxFontSizeMultiplier={1.15}>
         <Text style={styles.commentName}>{identity.displayName}</Text>
         {'  '}
         {isMedia ? (
@@ -295,7 +303,7 @@ function SectionHeader({
           >
             <Ionicons name="flame" size={12} color="#FFF" />
           </LinearGradient>
-          <Text style={styles.trendingSectionLabel}>Trending</Text>
+          <Text style={styles.trendingSectionLabel} maxFontSizeMultiplier={1.2}>Trending</Text>
         </View>
         {rightSlot}
       </View>
@@ -305,7 +313,7 @@ function SectionHeader({
   return (
     <View style={styles.sectionHeaderContainer}>
       <View style={styles.sectionDivider} />
-      <Text style={styles.sectionLabel}>{label}</Text>
+      <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.15}>{label}</Text>
       <View style={styles.sectionDivider} />
     </View>
   );
@@ -421,6 +429,7 @@ const TrendingCard = React.memo(function TrendingCard({
   onOpenPromptMedia,
   onLongPress,
   isOwner,
+  mediaPreloadStatus,
 }: {
   prompt: TrendingPromptData;
   promptId: string;
@@ -428,6 +437,10 @@ const TrendingCard = React.memo(function TrendingCard({
   onOpenPromptMedia: (payload: PromptMediaPayload) => void;
   onLongPress?: (id: string) => void;
   isOwner?: boolean;
+  // Phase 4 (prompt-owner preload): drives the two-tap tile UX.
+  // Computed at the screen level from a per-promptId state map so the
+  // card itself stays oblivious to preload bookkeeping.
+  mediaPreloadStatus?: TodPromptMediaPreloadStatus;
 }) {
   // P2-002: Stable callback references
   const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
@@ -498,13 +511,13 @@ const TrendingCard = React.memo(function TrendingCard({
             />
             {/* Identity: Name + Age/Gender on SAME ROW */}
             <View style={styles.ownerInfoRow}>
-              <Text style={styles.ownerNamePremium} numberOfLines={1}>
+              <Text style={styles.ownerNamePremium} numberOfLines={1} maxFontSizeMultiplier={1.15}>
                 {isAnon ? 'Anonymous' : (prompt.ownerName || 'User')}
               </Text>
               {!isAnon && (prompt.ownerAge || prompt.ownerGender) && (
                 <View style={styles.ownerMetaInline}>
                   {prompt.ownerAge && (
-                    <Text style={styles.ownerAgeInline}>{prompt.ownerAge}</Text>
+                    <Text style={styles.ownerAgeInline} maxFontSizeMultiplier={1.15}>{prompt.ownerAge}</Text>
                   )}
                   {prompt.ownerGender && ownerGenderIcon && (
                     <>
@@ -521,13 +534,13 @@ const TrendingCard = React.memo(function TrendingCard({
         {/* Prompt text - Hero element. Text always uses the full content
             width on the left; any owner-attached media tile lives in the
             right column directly below the Truth/Dare pill. */}
-        <Text style={styles.promptTextHero} numberOfLines={3}>{prompt.text}</Text>
+        <Text style={styles.promptTextHero} numberOfLines={3} maxFontSizeMultiplier={1.2}>{prompt.text}</Text>
 
         {/* Engagement row */}
         <View style={styles.engagementRow}>
           <View style={styles.answerBadge}>
             <Ionicons name="chatbubble" size={11} color={PREMIUM.textMuted} />
-            <Text style={styles.answerCountText}>
+            <Text style={styles.answerCountText} maxFontSizeMultiplier={1.15}>
               {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
             </Text>
           </View>
@@ -548,7 +561,7 @@ const TrendingCard = React.memo(function TrendingCard({
           style={styles.typePillGradient}
         >
           <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
-          <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+          <Text style={styles.typePillText} maxFontSizeMultiplier={1.15}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
         {prompt.hasMedia && prompt.mediaKind ? (
           <TodPromptMediaTile
@@ -569,6 +582,7 @@ const TrendingCard = React.memo(function TrendingCard({
               !!prompt.viewerHasViewedPromptMedia &&
               (prompt.mediaKind === 'photo' || prompt.mediaKind === 'video')
             }
+            preloadStatus={mediaPreloadStatus}
             onPress={handleOpenPromptMedia}
             accessibilityLabel={
               prompt.mediaKind === 'voice'
@@ -591,6 +605,7 @@ const PromptCard = React.memo(function PromptCard({
   onOpenPromptMedia,
   onLongPress,
   isOwner,
+  mediaPreloadStatus,
 }: {
   prompt: {
     _id: any;
@@ -626,6 +641,8 @@ const PromptCard = React.memo(function PromptCard({
   onOpenPromptMedia: (payload: PromptMediaPayload) => void;
   onLongPress?: (id: string) => void;
   isOwner?: boolean;
+  // Phase 4 (prompt-owner preload): see TrendingCard for full rationale.
+  mediaPreloadStatus?: TodPromptMediaPreloadStatus;
 }) {
   // P2-002: Stable callback references
   const handleOpenThread = useCallback(() => onOpenThread(promptId), [onOpenThread, promptId]);
@@ -689,13 +706,13 @@ const PromptCard = React.memo(function PromptCard({
             />
             {/* Identity: Name + Age/Gender on SAME ROW */}
             <View style={styles.ownerInfoRow}>
-              <Text style={styles.ownerNamePremium} numberOfLines={1}>
+              <Text style={styles.ownerNamePremium} numberOfLines={1} maxFontSizeMultiplier={1.15}>
                 {isAnon ? 'Anonymous' : (prompt.ownerName || 'User')}
               </Text>
               {!isAnon && (prompt.ownerAge || prompt.ownerGender) && (
                 <View style={styles.ownerMetaInline}>
                   {prompt.ownerAge && (
-                    <Text style={styles.ownerAgeInline}>{prompt.ownerAge}</Text>
+                    <Text style={styles.ownerAgeInline} maxFontSizeMultiplier={1.15}>{prompt.ownerAge}</Text>
                   )}
                   {prompt.ownerGender && ownerGenderIcon && (
                     <>
@@ -712,7 +729,7 @@ const PromptCard = React.memo(function PromptCard({
         {/* Prompt text - Hero element. Text always uses the full content
             width on the left; any owner-attached media tile lives in the
             right column directly below the Truth/Dare pill. */}
-        <Text style={styles.promptTextHero} numberOfLines={3}>{prompt.text}</Text>
+        <Text style={styles.promptTextHero} numberOfLines={3} maxFontSizeMultiplier={1.2}>{prompt.text}</Text>
 
         {/* Comment previews (up to 2) */}
         {/* P1-006 FIX: Added optional chaining to prevent crash if top2Answers becomes undefined */}
@@ -728,7 +745,7 @@ const PromptCard = React.memo(function PromptCard({
         <View style={styles.engagementRow}>
           <View style={styles.answerBadge}>
             <Ionicons name="chatbubble" size={11} color={PREMIUM.textMuted} />
-            <Text style={styles.answerCountText}>
+            <Text style={styles.answerCountText} maxFontSizeMultiplier={1.15}>
               {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
             </Text>
           </View>
@@ -745,7 +762,7 @@ const PromptCard = React.memo(function PromptCard({
           style={styles.typePillGradient}
         >
           <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={12} color="#FFF" />
-          <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+          <Text style={styles.typePillText} maxFontSizeMultiplier={1.15}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
         {prompt.hasMedia && prompt.mediaKind ? (
           <TodPromptMediaTile
@@ -766,6 +783,7 @@ const PromptCard = React.memo(function PromptCard({
               !!prompt.viewerHasViewedPromptMedia &&
               (prompt.mediaKind === 'photo' || prompt.mediaKind === 'video')
             }
+            preloadStatus={mediaPreloadStatus}
             onPress={handleOpenPromptMedia}
             accessibilityLabel={
               prompt.mediaKind === 'voice'
@@ -794,9 +812,18 @@ const PromptCard = React.memo(function PromptCard({
 function PromptMediaViewerModal({
   payload,
   onClose,
+  onConsumed,
 }: {
   payload: PromptMediaPayload | null;
   onClose: () => void;
+  // Fires at most once per opened payload, only for non-owner photo/video,
+  // and ONLY after actual consumption:
+  //   • photo  → image successfully rendered (onLoadEnd) AND viewer closed
+  //   • video  → playback ran to completion (didJustFinish)
+  // The parent uses this to call `markPromptMediaViewed` so the one-time
+  // view ledger row is inserted only after real consumption — never on the
+  // first preload tap.
+  onConsumed?: (promptId: string) => void;
 }) {
   const visible = !!payload?.mediaUrl && !!payload?.mediaKind;
   const insets = useSafeAreaInsets();
@@ -806,26 +833,62 @@ function PromptMediaViewerModal({
   const isFrontCamera = !!payload?.isFrontCamera;
   const [imageLoading, setImageLoading] = useState(true);
 
-  // Reset loading state whenever the source changes so a stale "loaded"
-  // flag doesn't suppress the spinner on the next open.
+  // Consumption tracking — refs so they don't trigger re-renders. The
+  // owner branch (and voice) never burns a view; we gate firing on the
+  // payload's `isPromptMediaOwner` and `mediaKind` below.
+  const imageRenderedRef = useRef(false);
+  const consumedFiredRef = useRef(false);
+  const promptIdRef = useRef<string | undefined>(undefined);
+
+  const isOwner = !!payload?.isPromptMediaOwner;
+  const promptId = payload?.promptId;
+  const shouldTrackConsumption =
+    !!promptId && !isOwner && (kind === 'photo' || kind === 'video');
+
+  const fireConsumed = useCallback(() => {
+    if (consumedFiredRef.current) return;
+    if (!shouldTrackConsumption) return;
+    if (!promptIdRef.current) return;
+    consumedFiredRef.current = true;
+    onConsumed?.(promptIdRef.current);
+  }, [onConsumed, shouldTrackConsumption]);
+
+  // Reset loading + consumption state whenever the source changes so a
+  // stale flag doesn't suppress the spinner OR pre-fire mark-viewed on
+  // the next open.
   useEffect(() => {
     if (visible && kind === 'photo') {
       setImageLoading(true);
     }
-  }, [visible, kind, mediaUrl]);
+    if (visible) {
+      imageRenderedRef.current = false;
+      consumedFiredRef.current = false;
+      promptIdRef.current = promptId;
+    }
+  }, [visible, kind, mediaUrl, promptId]);
+
+  // Wrap close so photo consumption (rendered → closed) fires on the way
+  // out. Video consumption fires from `onPlaybackStatusUpdate` instead, so
+  // closing mid-playback intentionally does NOT mark the video viewed.
+  const handleClose = useCallback(() => {
+    if (kind === 'photo' && imageRenderedRef.current) {
+      fireConsumed();
+    }
+    onClose();
+  }, [kind, fireConsumed, onClose]);
 
   return (
     <Modal
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onClose}
+      onRequestClose={handleClose}
       statusBarTranslucent
     >
       <View style={styles.promptMediaViewerBackdrop}>
         <Pressable
           style={StyleSheet.absoluteFillObject}
-          onPress={onClose}
+          onPress={handleClose}
           accessibilityRole="button"
           accessibilityLabel="Close media viewer"
         />
@@ -867,7 +930,13 @@ function PromptMediaViewerModal({
                 ]}
                 contentFit="contain"
                 transition={150}
-                onLoadEnd={() => setImageLoading(false)}
+                onLoadEnd={() => {
+                  setImageLoading(false);
+                  // Mark "image actually rendered" — this is the gate for
+                  // photo consumption. Mark-viewed only fires later, when
+                  // the user closes the viewer (handleClose).
+                  imageRenderedRef.current = true;
+                }}
               />
               {imageLoading ? (
                 <View style={styles.promptMediaViewerSpinnerWrap} pointerEvents="none">
@@ -886,8 +955,20 @@ function PromptMediaViewerModal({
               ]}
               useNativeControls
               resizeMode={ResizeMode.CONTAIN}
-              shouldPlay={false}
+              // Phase 4: autoplay on viewer open. The tile preloaded the URL
+              // via HEAD on the first tap so the second tap (which mounts
+              // this Video) starts playing with a warm CDN edge / OS HTTP
+              // cache instead of a black "buffering" frame.
+              shouldPlay={true}
               isLooping={false}
+              onPlaybackStatusUpdate={(status) => {
+                // Phase 4 part-2: video consumption fires ONLY when
+                // playback actually completes (didJustFinish). Closing
+                // mid-playback does NOT mark the video viewed.
+                if ('isLoaded' in status && status.isLoaded && status.didJustFinish) {
+                  fireConsumed();
+                }
+              }}
             />
           ) : null}
 
@@ -910,7 +991,7 @@ function PromptMediaViewerModal({
             styles.promptMediaViewerCloseBtn,
             { top: insets.top + 12 },
           ]}
-          onPress={onClose}
+          onPress={handleClose}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
           accessibilityRole="button"
           accessibilityLabel="Close media viewer"
@@ -983,31 +1064,97 @@ export default function TruthOrDareScreen() {
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Prompt-owner media viewer state. Tapping the covered media tile on a feed
-  // card opens this modal — but for non-owner photo/video the URL is NOT
-  // present in the inline payload (server-side redaction in Phase 4) and we
-  // must round-trip through `openPromptMedia` to consume the one-time view
-  // and receive a fresh URL. Voice and owner branches still open inline.
+  // card opens this modal. For non-owner photo/video the URL is NOT present
+  // in the inline payload (server-side redaction). We resolve the URL via
+  // `preparePromptMedia` on the first (preload) tap WITHOUT burning the
+  // one-time view; the view ledger row is inserted only after the user
+  // actually consumes the media (photo render + close, or video finishes
+  // playback) by calling `markPromptMediaViewed`. Voice and owner branches
+  // never burn a view.
   const [viewingPromptMedia, setViewingPromptMedia] = useState<PromptMediaPayload | null>(null);
-  const [isOpeningPromptMedia, setIsOpeningPromptMedia] = useState(false);
-  const openPromptMediaMutation = useMutation(api.truthDare.openPromptMedia);
+  const preparePromptMediaMutation = useMutation(api.truthDare.preparePromptMedia);
+  const markPromptMediaViewedMutation = useMutation(api.truthDare.markPromptMediaViewed);
+
+  // Phase 4 (prompt-owner preload state machine):
+  // Per-prompt preload entry. Drives the two-tap UX on TodPromptMediaTile:
+  //   1) idle    → tile shows download/arrow affordance
+  //   2) loading → tile shows inline spinner; URL is being resolved + asset
+  //                warmed in the background; viewer is NOT opened
+  //   3) ready   → tile shows the kind glyph; next tap opens the viewer
+  //                INSTANTLY using the cached resolved data (no extra
+  //                mutation, no extra network roundtrip)
+  //   4) failed  → tile shows refresh affordance; next tap retries
+  //
+  // We persist the resolved URL/kind/duration/isFrontCamera on the entry so
+  // a re-tap during the same screen mount opens the viewer with cached
+  // data even if the live prompt list later refetches and now reports
+  // `viewerHasViewedPromptMedia: true` (the user already burned the view
+  // on the preload tap; we must let them actually watch what they paid for).
+  type PromptMediaPreloadEntry = {
+    status: TodPromptMediaPreloadStatus;
+    resolvedUrl?: string;
+    resolvedKind?: 'photo' | 'video' | 'voice';
+    resolvedDurationSec?: number;
+    resolvedIsFrontCamera?: boolean;
+  };
+  const [promptMediaPreloadMap, setPromptMediaPreloadMap] = useState<
+    Record<string, PromptMediaPreloadEntry>
+  >({});
+  const updatePromptMediaPreloadEntry = useCallback(
+    (promptId: string, patch: Partial<PromptMediaPreloadEntry>) => {
+      setPromptMediaPreloadMap((prev) => ({
+        ...prev,
+        [promptId]: {
+          ...(prev[promptId] ?? { status: 'idle' as TodPromptMediaPreloadStatus }),
+          ...patch,
+        },
+      }));
+    },
+    []
+  );
+
   const handleOpenPromptMedia = useCallback(
     async (payload: PromptMediaPayload) => {
       if (!payload.mediaKind || !payload.promptId) return;
-
+      const promptId = payload.promptId;
       const isPhotoOrVideo =
         payload.mediaKind === 'photo' || payload.mediaKind === 'video';
 
-      // Owner OR voice: open inline with URL already in payload (server keeps
-      // the inline URL for these branches; no view row is consumed).
-      if (!isPhotoOrVideo || payload.isPromptMediaOwner) {
+      const entry = promptMediaPreloadMap[promptId];
+      const status: TodPromptMediaPreloadStatus = entry?.status ?? 'idle';
+
+      // Second tap (or later) on a preloaded tile: open the viewer
+      // instantly with the cached resolved data. Bypasses the
+      // already-viewed gate on purpose — see entry comment above.
+      if (status === 'ready' && entry?.resolvedUrl && entry?.resolvedKind) {
+        setViewingPromptMedia({
+          promptId,
+          mediaUrl: entry.resolvedUrl,
+          mediaKind: entry.resolvedKind,
+          durationSec: entry.resolvedDurationSec,
+          isFrontCamera: entry.resolvedIsFrontCamera,
+          isPromptMediaOwner: payload.isPromptMediaOwner,
+          viewerHasViewedPromptMedia: payload.viewerHasViewedPromptMedia,
+        });
+        return;
+      }
+
+      // Voice: there's no big asset to preload and the viewer just shows a
+      // placeholder; keep single-tap behavior so users don't have to
+      // double-tap a voice tile that won't even play in the feed.
+      if (payload.mediaKind === 'voice') {
         if (!payload.mediaUrl) return;
         setViewingPromptMedia(payload);
         return;
       }
 
-      // Non-owner photo/video and already-viewed: don't burn a request, show
-      // a friendly message instead.
-      if (payload.viewerHasViewedPromptMedia) {
+      // Non-owner photo/video that the server already records as viewed
+      // (and we have no preloaded entry): friendly alert, no view burn.
+      if (
+        !payload.isPromptMediaOwner &&
+        payload.viewerHasViewedPromptMedia &&
+        isPhotoOrVideo
+      ) {
         Alert.alert(
           'Already viewed',
           payload.mediaKind === 'video'
@@ -1017,47 +1164,164 @@ export default function TruthOrDareScreen() {
         return;
       }
 
-      // Non-owner photo/video, first open: consume the one-time view.
-      if (!userId || isOpeningPromptMedia) return;
-      setIsOpeningPromptMedia(true);
+      // Already preloading this exact tile: swallow extra taps.
+      if (status === 'loading') return;
+
+      // First tap (idle) or retry (failed): start the preload.
+      updatePromptMediaPreloadEntry(promptId, { status: 'loading' });
       try {
-        const result = await openPromptMediaMutation({
-          promptId: payload.promptId,
-          viewerUserId: userId,
-        });
-        if (result.status === 'ok' && result.mediaUrl) {
-          setViewingPromptMedia({
-            promptId: payload.promptId,
-            mediaUrl: result.mediaUrl,
-            mediaKind: result.mediaKind as 'photo' | 'video' | 'voice',
-            durationSec: result.durationSec ?? undefined,
-            isFrontCamera: result.isFrontCamera ?? false,
-            isPromptMediaOwner: false,
-            viewerHasViewedPromptMedia: false,
-          });
-        } else if (result.status === 'already_viewed') {
-          Alert.alert(
-            'Already viewed',
-            payload.mediaKind === 'video'
-              ? 'You can only watch this video once.'
-              : 'You can only view this photo once.'
-          );
-        } else if (result.status === 'not_authorized') {
-          Alert.alert("Can't open", 'This media is no longer available.');
+        let resolvedUrl: string | undefined;
+        let resolvedKind: 'photo' | 'video' | 'voice' = payload.mediaKind;
+        let resolvedDurationSec: number | undefined = payload.durationSec;
+        let resolvedIsFrontCamera: boolean | undefined = payload.isFrontCamera;
+
+        if (payload.isPromptMediaOwner) {
+          // Owner branch: payload already carries the URL; no view consumption.
+          resolvedUrl = payload.mediaUrl;
         } else {
-          Alert.alert("Can't open", 'This media is no longer available.');
+          // Non-owner first-view: round-trip `preparePromptMedia` to resolve
+          // a fresh URL WITHOUT burning the one-time view. The view ledger
+          // row is inserted later, by `markPromptMediaViewed`, only when
+          // the user actually consumes the media (photo: viewer closed
+          // after the image rendered; video: playback finished). This is
+          // the entire point of Phase 4 part-2 — preload != viewed.
+          if (!userId) {
+            updatePromptMediaPreloadEntry(promptId, { status: 'failed' });
+            return;
+          }
+          const result = await preparePromptMediaMutation({
+            promptId,
+            viewerUserId: userId,
+          });
+          if (result.status === 'already_viewed') {
+            // Reset to idle so the badge takes over visually; the parent
+            // card already shows "Viewed" via showViewedBadge after the
+            // next list refetch.
+            updatePromptMediaPreloadEntry(promptId, { status: 'idle' });
+            Alert.alert(
+              'Already viewed',
+              payload.mediaKind === 'video'
+                ? 'You can only watch this video once.'
+                : 'You can only view this photo once.'
+            );
+            return;
+          }
+          if (result.status !== 'ok' || !result.mediaUrl) {
+            updatePromptMediaPreloadEntry(promptId, { status: 'failed' });
+            Alert.alert("Can't open", 'This media is no longer available.');
+            return;
+          }
+          resolvedUrl = result.mediaUrl;
+          resolvedKind = (result.mediaKind ?? payload.mediaKind) as
+            | 'photo'
+            | 'video'
+            | 'voice';
+          resolvedDurationSec = result.durationSec ?? payload.durationSec;
+          resolvedIsFrontCamera =
+            result.isFrontCamera ?? payload.isFrontCamera ?? false;
         }
+
+        if (!resolvedUrl) {
+          updatePromptMediaPreloadEntry(promptId, { status: 'failed' });
+          return;
+        }
+
+        // Best-effort asset warm-up. For photos we use expo-image's
+        // prefetch which decodes into the disk + memory cache; for video we
+        // issue a HEAD against the playback URL so the OS HTTP cache + CDN
+        // edge are warm. Failures are non-fatal — the URL is still valid
+        // and the viewer falls back to its own loading state.
+        try {
+          if (resolvedKind === 'photo') {
+            await ExpoImage.prefetch(resolvedUrl);
+          } else if (resolvedKind === 'video') {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 4000);
+            try {
+              await fetch(resolvedUrl, {
+                method: 'HEAD',
+                signal: controller.signal,
+              });
+            } finally {
+              clearTimeout(timer);
+            }
+          }
+        } catch {
+          // swallow prefetch errors; asset will load when the viewer opens.
+        }
+
+        updatePromptMediaPreloadEntry(promptId, {
+          status: 'ready',
+          resolvedUrl,
+          resolvedKind,
+          resolvedDurationSec,
+          resolvedIsFrontCamera,
+        });
       } catch (err) {
+        updatePromptMediaPreloadEntry(promptId, { status: 'failed' });
         Alert.alert("Can't open", 'Something went wrong. Please try again.');
-      } finally {
-        setIsOpeningPromptMedia(false);
       }
     },
-    [openPromptMediaMutation, userId, isOpeningPromptMedia]
+    [
+      preparePromptMediaMutation,
+      userId,
+      promptMediaPreloadMap,
+      updatePromptMediaPreloadEntry,
+    ]
   );
   const handleClosePromptMedia = useCallback(() => {
     setViewingPromptMedia(null);
   }, []);
+
+  // Fired by the viewer when the user actually consumed the media:
+  //   • photo  → image rendered + viewer closed
+  //   • video  → playback finished (didJustFinish)
+  // For owner / voice / already-viewed branches the viewer never invokes
+  // this. Calls `markPromptMediaViewed` server-side (idempotent) so the
+  // one-time view ledger row is inserted only on real consumption.
+  const handlePromptMediaConsumed = useCallback(
+    (promptId: string) => {
+      if (!userId) return;
+      // Best-effort; we already know the asset was consumed, so any
+      // network failure here just leaves the ledger row missing — which
+      // means the user could re-view next session. That's an acceptable
+      // failure mode (lenient, never blocks playback).
+      markPromptMediaViewedMutation({
+        promptId,
+        viewerUserId: userId,
+      }).catch(() => {});
+    },
+    [markPromptMediaViewedMutation, userId]
+  );
+
+  // Resolves the visual preload status for a given prompt. Voice and
+  // already-viewed states intentionally bypass the preload visuals so the
+  // tile still reads as "regular kind icon" + the existing "Viewed" badge.
+  const getPromptMediaPreloadStatus = useCallback(
+    (
+      promptId: string,
+      prompt: {
+        mediaKind?: 'photo' | 'video' | 'voice';
+        isPromptMediaOwner?: boolean;
+        viewerHasViewedPromptMedia?: boolean;
+      }
+    ): TodPromptMediaPreloadStatus | undefined => {
+      const entry = promptMediaPreloadMap[promptId];
+      // Voice: keep the legacy single-tap UX → undefined (renders as ready).
+      if (prompt.mediaKind === 'voice') return undefined;
+      // Non-owner already-viewed (and we don't have a cached URL from this
+      // session): also render as ready so the existing Viewed badge wins.
+      if (
+        !prompt.isPromptMediaOwner &&
+        prompt.viewerHasViewedPromptMedia &&
+        entry?.status !== 'ready'
+      ) {
+        return undefined;
+      }
+      return entry?.status ?? 'idle';
+    },
+    [promptMediaPreloadMap]
+  );
 
   // Delete mutation - for owner prompt deletion from homepage
   const deletePromptMutation = useMutation(api.truthDare.deleteMyPrompt);
@@ -1272,10 +1536,67 @@ export default function TruthOrDareScreen() {
     });
   }, [deletePopupPromptId, router]);
 
+  // Pending optimistic prompt uploads for the current user. These appear
+  // ABOVE the real "More Truths & Dares" list as soon as the composer
+  // hands them off, and are replaced by their Convex post once the
+  // background `TruthDarePromptUploadManager` reports success. We filter
+  // strictly by `userId` so other users never see another user's
+  // in-flight pending media — security: no pending state is sent to
+  // the network, this is purely a local in-memory render.
+  const pendingPromptItems = useTruthDarePromptUploadStore((state) => state.items);
+  const removePendingPromptItem = useTruthDarePromptUploadStore((state) => state.remove);
+  const retryPendingPromptItem = useTruthDarePromptUploadStore((state) => state.retry);
+
+  const myPendingPrompts = useMemo<TruthDarePendingPromptUpload[]>(() => {
+    if (!userId) return [];
+    return pendingPromptItems
+      .filter((item) => item.userId === userId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [pendingPromptItems, userId]);
+
+  // Auto-cleanup: when a pending item finishes successfully and its real
+  // Convex post is now present in the feed, drop the pending entry to
+  // prevent showing both the pending card and the real card.
+  const promptIdSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of prompts) {
+      set.add(p._id as unknown as string);
+    }
+    if (trendingData?.trendingDarePrompt) {
+      set.add(trendingData.trendingDarePrompt._id as unknown as string);
+    }
+    if (trendingData?.trendingTruthPrompt) {
+      set.add(trendingData.trendingTruthPrompt._id as unknown as string);
+    }
+    return set;
+  }, [prompts, trendingData]);
+
+  useEffect(() => {
+    for (const item of myPendingPrompts) {
+      if (item.status !== 'success') continue;
+      // If the server post is already visible in the feed, retire the
+      // pending card. If it's not yet present (Convex reactivity tick),
+      // we leave the pending card up showing 100% / "Posted" until it
+      // arrives — this keeps the slot stable and avoids flicker.
+      if (item.serverPromptId && promptIdSet.has(item.serverPromptId)) {
+        removePendingPromptItem(item.clientId);
+      }
+    }
+  }, [myPendingPrompts, promptIdSet, removePendingPromptItem]);
+
+  // Hide pending items whose real Convex post is already present (defense
+  // in depth: if the cleanup effect hasn't run yet, never render both).
+  const visiblePendingPrompts = useMemo(() => {
+    return myPendingPrompts.filter(
+      (item) => !item.serverPromptId || !promptIdSet.has(item.serverPromptId)
+    );
+  }, [myPendingPrompts, promptIdSet]);
+
   type FeedItem =
     | { type: 'section'; label: string }
     | { type: 'trending'; prompt: TrendingPromptData }
-    | { type: 'prompt'; prompt: typeof prompts[0] };
+    | { type: 'prompt'; prompt: typeof prompts[0] }
+    | { type: 'pending'; pending: TruthDarePendingPromptUpload };
 
   const feedData: FeedItem[] = useMemo(() => {
     const items: FeedItem[] = [];
@@ -1294,14 +1615,20 @@ export default function TruthOrDareScreen() {
       }
     }
 
-    // Normal prompts section
-    if (normalPrompts.length > 0) {
+    // Pending optimistic posts (current user only) sit at the very top of
+    // "More Truths & Dares" so they appear immediately after POST. The
+    // section header is shown if either a pending or a real prompt exists
+    // so the layout doesn't shift when the feed catches up.
+    const hasPending = visiblePendingPrompts.length > 0;
+    const hasNormal = normalPrompts.length > 0;
+    if (hasPending || hasNormal) {
       items.push({ type: 'section', label: 'More Truths & Dares' });
+      visiblePendingPrompts.forEach((pending) => items.push({ type: 'pending', pending }));
       normalPrompts.forEach((p) => items.push({ type: 'prompt', prompt: p }));
     }
 
     return items;
-  }, [trendingData, normalPrompts]);
+  }, [trendingData, normalPrompts, visiblePendingPrompts]);
 
   // P2-002 FIX: Pass promptId and stable callbacks to cards (no inline arrow functions)
   const renderItem = useCallback(({ item }: { item: FeedItem }) => {
@@ -1319,6 +1646,7 @@ export default function TruthOrDareScreen() {
     if (item.type === 'trending') {
       const promptId = item.prompt._id as unknown as string;
       const isOwner = (item.prompt as any).ownerUserId === userId;
+      const preloadStatus = getPromptMediaPreloadStatus(promptId, item.prompt);
       return (
         <TrendingCard
           prompt={item.prompt}
@@ -1327,12 +1655,24 @@ export default function TruthOrDareScreen() {
           onOpenPromptMedia={handleOpenPromptMedia}
           onLongPress={handleLongPressPrompt}
           isOwner={isOwner}
+          mediaPreloadStatus={preloadStatus}
+        />
+      );
+    }
+
+    if (item.type === 'pending') {
+      return (
+        <PendingPromptCard
+          item={item.pending}
+          onRetry={retryPendingPromptItem}
+          onRemove={removePendingPromptItem}
         />
       );
     }
 
     const promptId = item.prompt._id as unknown as string;
     const isOwner = (item.prompt as any).ownerUserId === userId;
+    const preloadStatus = getPromptMediaPreloadStatus(promptId, item.prompt);
     return (
       <PromptCard
         prompt={item.prompt}
@@ -1341,6 +1681,7 @@ export default function TruthOrDareScreen() {
         onOpenPromptMedia={handleOpenPromptMedia}
         onLongPress={handleLongPressPrompt}
         isOwner={isOwner}
+        mediaPreloadStatus={preloadStatus}
       />
     );
   }, [
@@ -1349,12 +1690,16 @@ export default function TruthOrDareScreen() {
     openThread,
     handleOpenPromptMedia,
     handleLongPressPrompt,
+    retryPendingPromptItem,
+    removePendingPromptItem,
     userId,
+    getPromptMediaPreloadStatus,
   ]);
 
   const getKey = useCallback((item: FeedItem, idx: number) => {
     if (item.type === 'section') return `section_${idx}`;
     if (item.type === 'trending') return `trending_${item.prompt._id}`;
+    if (item.type === 'pending') return `pending_${item.pending.clientId}`;
     return `prompt_${item.prompt._id}`;
   }, []);
 
@@ -1374,7 +1719,7 @@ export default function TruthOrDareScreen() {
           >
             <Ionicons name="flame" size={14} color="#FFF" />
           </LinearGradient>
-          <Text style={styles.headerTitle}>Truth or Dare</Text>
+          <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>Truth or Dare</Text>
           <TouchableOpacity
             style={styles.headerActionButton}
             onPress={openMyTruthDare}
@@ -1420,7 +1765,7 @@ export default function TruthOrDareScreen() {
           >
             <Ionicons name="flame" size={14} color="#FFF" />
           </LinearGradient>
-          <Text style={styles.headerTitle}>Truth or Dare</Text>
+          <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>Truth or Dare</Text>
           <TouchableOpacity
             style={styles.headerActionButton}
             onPress={openMyTruthDare}
@@ -1461,7 +1806,7 @@ export default function TruthOrDareScreen() {
           >
             <Ionicons name="flame" size={14} color="#FFF" />
           </LinearGradient>
-          <Text style={styles.headerTitle}>Truth or Dare</Text>
+          <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>Truth or Dare</Text>
           <TouchableOpacity
             style={styles.headerActionButton}
             onPress={openMyTruthDare}
@@ -1505,7 +1850,7 @@ export default function TruthOrDareScreen() {
         >
           <Ionicons name="flame" size={14} color="#FFF" />
         </LinearGradient>
-        <Text style={styles.headerTitle}>Truth or Dare</Text>
+        <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>Truth or Dare</Text>
         <TouchableOpacity
           style={styles.headerActionButton}
           onPress={openMyTruthDare}
@@ -1562,6 +1907,7 @@ export default function TruthOrDareScreen() {
       <PromptMediaViewerModal
         payload={viewingPromptMedia}
         onClose={handleClosePromptMedia}
+        onConsumed={handlePromptMediaConsumed}
       />
 
       {/* Delete confirmation popup - compact and contextual */}
@@ -1573,8 +1919,8 @@ export default function TruthOrDareScreen() {
       >
         <Pressable style={styles.deletePopupOverlay} onPress={handleCloseDeletePopup}>
           <Pressable style={styles.deletePopupContainer} onPress={() => {}}>
-            <Text style={styles.deletePopupTitle}>Post options</Text>
-            <Text style={styles.deletePopupSubtitle}>
+            <Text style={styles.deletePopupTitle} maxFontSizeMultiplier={1.2}>Post options</Text>
+            <Text style={styles.deletePopupSubtitle} maxFontSizeMultiplier={1.2}>
               Edit or delete your post.
             </Text>
             <View style={styles.deletePopupActions}>
@@ -1583,7 +1929,7 @@ export default function TruthOrDareScreen() {
                 onPress={handleCloseDeletePopup}
                 disabled={isDeleting}
               >
-                <Text style={styles.deletePopupCancelText} numberOfLines={1}>Cancel</Text>
+                <Text style={styles.deletePopupCancelText} numberOfLines={1} maxFontSizeMultiplier={1.15}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.deletePopupEditBtn}
@@ -1591,7 +1937,7 @@ export default function TruthOrDareScreen() {
                 disabled={isDeleting}
               >
                 <Ionicons name="pencil-outline" size={14} color={PREMIUM.textPrimary} />
-                <Text style={styles.deletePopupEditText} numberOfLines={1}>Edit</Text>
+                <Text style={styles.deletePopupEditText} numberOfLines={1} maxFontSizeMultiplier={1.15}>Edit</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.deletePopupDeleteBtn}
@@ -1599,11 +1945,11 @@ export default function TruthOrDareScreen() {
                 disabled={isDeleting}
               >
                 {isDeleting ? (
-                  <Text style={styles.deletePopupDeleteText} numberOfLines={1}>Deleting...</Text>
+                  <Text style={styles.deletePopupDeleteText} numberOfLines={1} maxFontSizeMultiplier={1.15}>Deleting...</Text>
                 ) : (
                   <>
                     <Ionicons name="trash-outline" size={14} color="#FFF" />
-                    <Text style={styles.deletePopupDeleteText} numberOfLines={1}>Delete</Text>
+                    <Text style={styles.deletePopupDeleteText} numberOfLines={1} maxFontSizeMultiplier={1.15}>Delete</Text>
                   </>
                 )}
               </TouchableOpacity>

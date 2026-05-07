@@ -28,6 +28,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
 import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { InAppMediaCamera, MediaCaptureResult } from '@/components/truthdare/InAppMediaCamera';
+import { VoicePromptRecorder } from '@/components/truthdare/VoicePromptRecorder';
+import { useTruthDarePromptUploadStore } from '@/stores/truthDarePromptUploadStore';
 import {
   TOD_MEDIA_LIMITS,
   TOD_VIDEO_MAX_DURATION_SEC,
@@ -209,6 +211,7 @@ export default function CreateTodScreen() {
   const [mediaSheetVisible, setMediaSheetVisible] = useState(false);
   const [popupAnchor, setPopupAnchor] = useState<{ bottom: number; right: number } | null>(null);
   const [showMediaCamera, setShowMediaCamera] = useState(false);
+  const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const [promptMediaAttachment, setPromptMediaAttachment] = useState<PromptMediaAttachment | null>(
     null
   );
@@ -588,18 +591,42 @@ export default function CreateTodScreen() {
 
   const handleVoiceAction = useCallback(() => {
     closeMediaPopup();
-    // Voice prompt recording is not yet implemented end-to-end. The previous
-    // build attached a no-uri "mock" placeholder which `handleSubmit` would
-    // have silently dropped (Phase 3 wiring would have created a fake-voice
-    // post). To avoid that, we surface a clear coming-soon notice and do not
-    // set any attachment state. The voice option remains available so users
-    // can discover the upcoming capability.
-    Alert.alert(
-      'Coming Soon',
-      'Voice prompts are coming soon. For now, attach a photo or video, or post text only.'
-    );
-    debugTodLog('[T/D NEWPOST] voice_action_coming_soon');
+    setShowVoiceRecorder(true);
+    debugTodLog('[T/D NEWPOST] voice_recorder_open');
   }, [closeMediaPopup]);
+
+  const handleVoiceRecorderClose = useCallback(() => {
+    setShowVoiceRecorder(false);
+  }, []);
+
+  const handleVoiceRecorded = useCallback(
+    async (audioUri: string, durationMs: number) => {
+      // Validate duration against the 60s ceiling.
+      if (!validatePromptMediaDuration('voice', durationMs)) {
+        return;
+      }
+
+      // Resolve a supported audio mime; expo-av on iOS/Android writes .m4a /
+      // .caf — `resolveTodMime('voice', uri, 'audio/mp4')` normalizes both.
+      const mime = validatePromptMediaMime('voice', audioUri, 'audio/mp4');
+      if (!mime) return;
+
+      const fileSize = await getLocalFileSizeBytes(audioUri);
+      if (!validatePromptMediaSize(fileSize, 'voice')) return;
+
+      setPromptMediaAttachment({
+        kind: 'voice',
+        uri: audioUri,
+        mime,
+        durationMs,
+        isFrontCamera: false,
+        fileSize,
+      });
+      setShowVoiceRecorder(false);
+      debugTodLog('[T/D NEWPOST] voice_capture', { durationMs, fileSize });
+    },
+    [validatePromptMediaDuration, validatePromptMediaMime, validatePromptMediaSize]
+  );
 
   const handleMediaActionTap = useCallback(
     (action: PromptMediaAction) => {
@@ -610,6 +637,8 @@ export default function CreateTodScreen() {
     [handleCameraAction, handleGalleryAction, handleVoiceAction]
   );
 
+  const enqueuePromptUpload = useTruthDarePromptUploadStore((state) => state.enqueue);
+
   const handleSubmit = async () => {
     // Synchronous guard: prevent double-tap race condition
     if (!canSubmit || isSubmittingRef.current) return;
@@ -618,6 +647,145 @@ export default function CreateTodScreen() {
       return;
     }
     isSubmittingRef.current = true;
+
+    // ---- Optimistic media path ----------------------------------------
+    // For posts that include a photo/video/voice attachment we hand the
+    // upload off to the background `TruthDarePromptUploadManager` and
+    // return to the feed immediately. The pending card renders instantly
+    // with the local file URI + live progress; the post becomes
+    // "official" only after media upload + Convex `createPrompt` mutation
+    // both succeed (manager calls `markSuccess`). Failure surfaces Retry
+    // / Remove on the pending card. Text-only prompts continue to use
+    // the existing inline path below — text-only is already fast enough
+    // that optimistic queuing would just add UI flicker.
+    if (
+      promptMediaAttachment &&
+      promptMediaAttachment.uri &&
+      promptMediaAttachment.mime
+    ) {
+      try {
+        // Re-validate at submit time (file may have been replaced/cleared).
+        const submitTimeSize = await getLocalFileSizeBytes(promptMediaAttachment.uri);
+        if (
+          !validatePromptMediaSize(
+            submitTimeSize ?? promptMediaAttachment.fileSize,
+            promptMediaAttachment.kind
+          )
+        ) {
+          isSubmittingRef.current = false;
+          return;
+        }
+        if (
+          !validatePromptMediaDuration(
+            promptMediaAttachment.kind,
+            promptMediaAttachment.durationMs
+          )
+        ) {
+          isSubmittingRef.current = false;
+          return;
+        }
+
+        const durationSec =
+          typeof promptMediaAttachment.durationMs === 'number' &&
+          promptMediaAttachment.durationMs > 0
+            ? Math.max(1, Math.ceil(promptMediaAttachment.durationMs / 1000))
+            : undefined;
+
+        // Resolve owner identity snapshot ONCE, synchronously where
+        // possible. The manager will not re-resolve identity later.
+        let ownerName: string | undefined;
+        let ownerAge: number | undefined;
+        let ownerGender: string | undefined;
+        let ownerPhotoUrl: string | undefined;
+        let ownerPhotoLocalUri: string | undefined;
+        let isAnonymous = true;
+        let photoBlurMode: 'none' | 'blur' = 'none';
+        let storeVisibility: 'anonymous' | 'public' | 'no_photo' = 'anonymous';
+
+        if (visibility === 'anonymous') {
+          isAnonymous = true;
+          photoBlurMode = 'none';
+          storeVisibility = 'anonymous';
+        } else {
+          isAnonymous = false;
+          photoBlurMode = visibility === 'no_photo' ? 'blur' : 'none';
+          storeVisibility = visibility;
+          ownerName = ownerIdentity.name;
+          ownerAge = ownerIdentity.age;
+          ownerGender = ownerIdentity.gender;
+
+          // Reuse the prefetched best-photo result if available; otherwise
+          // resolve now (small cost: stat existence on local files). This
+          // does NOT upload — the manager handles upload off the main
+          // path so navigation isn't blocked.
+          const photoResult =
+            prefetchedPhotoResultRef.current?.cacheKey === ownerPhotoCandidatesKey
+              ? prefetchedPhotoResultRef.current.result
+              : await resolveBestPhoto(ownerIdentity.photoCandidates || []);
+
+          if (photoResult.url) {
+            if (photoResult.type === 'file') {
+              ownerPhotoLocalUri = photoResult.url;
+            } else {
+              ownerPhotoUrl = photoResult.url;
+            }
+          }
+        }
+
+        const clientId = `tod_prompt_${Date.now().toString(36)}_${Math.random()
+          .toString(36)
+          .slice(2, 9)}`;
+
+        enqueuePromptUpload({
+          clientId,
+          userId: effectiveUserId,
+          type: postType,
+          text: content.trim(),
+          visibility: storeVisibility,
+          isAnonymous,
+          photoBlurMode,
+          ownerName,
+          ownerAge,
+          ownerGender,
+          ownerPhotoUrl,
+          ownerPhotoLocalUri,
+          attachment: {
+            kind: promptMediaAttachment.kind,
+            localUri: promptMediaAttachment.uri,
+            mime: promptMediaAttachment.mime,
+            durationMs: promptMediaAttachment.durationMs,
+            durationSec,
+            isFrontCamera: promptMediaAttachment.isFrontCamera,
+            fileSize: submitTimeSize ?? promptMediaAttachment.fileSize,
+          },
+        });
+
+        debugTodLog(`[T/D NEWPOST] enqueued clientId=${clientId} kind=${promptMediaAttachment.kind} visibility=${storeVisibility}`);
+
+        // Return to the feed immediately — pending card renders there.
+        isSubmittingRef.current = false;
+        if (mountedRef.current) {
+          setIsSubmitting(false);
+        }
+        router.back();
+        return;
+      } catch (error: any) {
+        debugTodWarn('[T/D] Failed to enqueue optimistic post:', error);
+        isSubmittingRef.current = false;
+        if (mountedRef.current) {
+          setIsSubmitting(false);
+        }
+        Alert.alert('Error', error?.message || 'Could not start posting. Please try again.');
+        return;
+      }
+    }
+
+    // ---- Text-only / legacy synchronous path --------------------------
+    // Reached only when no media is attached. This path keeps the
+    // existing upload-then-create flow because there is no media to
+    // upload, so the only network call is `createPrompt` itself, which
+    // is fast. Photo / video / voice attachments are handled by the
+    // optimistic path above.
     const uploadedStorageIds: string[] = [];
 
     if (mountedRef.current) {
@@ -640,15 +808,12 @@ export default function CreateTodScreen() {
         }
       };
 
-      // ---- Phase 3: prompt-owner media upload ----
-      // Resolve any attached prompt media (photo/video) to a Convex storage
-      // reference BEFORE calling createPrompt. Voice is intentionally not
-      // wired yet — handleVoiceAction surfaces a coming-soon notice and never
-      // sets an attachment, so the `voice` branch below is purely defensive.
-      // Errors thrown here propagate to the outer catch which (a) skips
-      // createPrompt, (b) cleans up tracked uploads when non-retryable,
-      // (c) surfaces an alert, and (d) leaves the user on the composer
-      // with their text content intact for retry.
+      // ---- Legacy text-only media-args holder ----
+      // The optimistic path above handles every well-formed media
+      // attachment (photo, video, voice). The legacy branch only runs
+      // when no media is attached OR an attachment somehow lacks a uri /
+      // mime. We keep the defensive throw for the broken-attachment case
+      // so users aren't left with a silently-dropped attachment.
       const promptMediaArgs: {
         mediaStorageId?: any;
         mediaMime?: string;
@@ -658,73 +823,13 @@ export default function CreateTodScreen() {
       } = {};
 
       if (promptMediaAttachment) {
-        if (promptMediaAttachment.kind === 'voice') {
-          // Defensive: voice attachments cannot exist via the UI in Phase 3
-          // (handleVoiceAction shows a coming-soon alert without setting
-          // state). Block submission rather than silently dropping/faking.
-          throw Object.assign(
-            new Error('Voice prompts are coming soon. Remove the voice attachment to post.'),
-            { retryable: false }
-          );
-        }
-
-        if (!promptMediaAttachment.uri || !promptMediaAttachment.mime) {
-          throw Object.assign(
-            new Error('Attached media is unavailable. Please remove and re-attach it.'),
-            { retryable: false }
-          );
-        }
-
-        // Re-validate size at submit time (file may have been replaced/cleared).
-        const submitTimeSize = await getLocalFileSizeBytes(promptMediaAttachment.uri);
-        if (!validatePromptMediaSize(submitTimeSize ?? promptMediaAttachment.fileSize, promptMediaAttachment.kind)) {
-          // validatePromptMediaSize already showed an alert; skip createPrompt.
-          isSubmittingRef.current = false;
-          if (mountedRef.current) setIsSubmitting(false);
-          return;
-        }
-        if (!validatePromptMediaDuration(promptMediaAttachment.kind, promptMediaAttachment.durationMs)) {
-          isSubmittingRef.current = false;
-          if (mountedRef.current) setIsSubmitting(false);
-          return;
-        }
-
-        const limitKind: TodMediaLimitKind = promptMediaAttachment.kind; // 'photo' | 'video'
-        const uploadType: 'photo' | 'video' = promptMediaAttachment.kind;
-
-        const promptMediaStorageId = await uploadMediaToConvex(
-          promptMediaAttachment.uri,
-          () => generateUploadUrl({ authUserId: effectiveUserId }),
-          uploadType,
-          {
-            contentType: promptMediaAttachment.mime,
-            maxBytes: TOD_MEDIA_LIMITS[limitKind].maxBytes,
-            limitMessage: formatTodMediaLimit(limitKind),
-          }
+        // Optimistic path requires uri+mime; reaching here means the
+        // attachment is broken. Surface a clear error rather than
+        // silently dropping the attachment.
+        throw Object.assign(
+          new Error('Attached media is unavailable. Please remove and re-attach it.'),
+          { retryable: false }
         );
-        await trackUploadedStorageId(promptMediaStorageId);
-
-        const durationSec =
-          typeof promptMediaAttachment.durationMs === 'number' &&
-          promptMediaAttachment.durationMs > 0
-            ? Math.max(1, Math.ceil(promptMediaAttachment.durationMs / 1000))
-            : undefined;
-
-        promptMediaArgs.mediaStorageId = promptMediaStorageId;
-        promptMediaArgs.mediaMime = promptMediaAttachment.mime;
-        promptMediaArgs.mediaKind = promptMediaAttachment.kind;
-        if (durationSec !== undefined) promptMediaArgs.durationSec = durationSec;
-        if (typeof promptMediaAttachment.isFrontCamera === 'boolean') {
-          promptMediaArgs.isFrontCamera = promptMediaAttachment.isFrontCamera;
-        }
-
-        debugTodLog('[T/D NEWPOST] prompt_media_uploaded', {
-          kind: promptMediaAttachment.kind,
-          mime: promptMediaAttachment.mime,
-          durationSec,
-          isFrontCamera: promptMediaAttachment.isFrontCamera ?? false,
-          sizeBytes: submitTimeSize ?? promptMediaAttachment.fileSize,
-        });
       }
 
       // TOD-001 FIX: Use authUserId for server-side verification
@@ -901,7 +1006,7 @@ export default function CreateTodScreen() {
           <TouchableOpacity onPress={() => router.back()}>
             <Ionicons name="close" size={24} color={C.text} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>New Post</Text>
+          <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>New Post</Text>
           {/* Spacer for alignment */}
           <View style={{ width: 24 }} />
         </View>
@@ -913,14 +1018,14 @@ export default function CreateTodScreen() {
             onPress={() => setPostType('truth')}
           >
             <Ionicons name="help-circle" size={20} color={postType === 'truth' ? '#FFFFFF' : C.text} />
-            <Text style={[styles.typeLabel, postType === 'truth' && styles.typeLabelActive]}>Truth</Text>
+            <Text style={[styles.typeLabel, postType === 'truth' && styles.typeLabelActive]} maxFontSizeMultiplier={1.15}>Truth</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.typeOption, postType === 'dare' && styles.typeOptionDareActive]}
             onPress={() => setPostType('dare')}
           >
             <Ionicons name="flash" size={20} color={postType === 'dare' ? '#FFFFFF' : C.text} />
-            <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]}>Dare</Text>
+            <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]} maxFontSizeMultiplier={1.15}>Dare</Text>
           </TouchableOpacity>
         </View>
 
@@ -940,6 +1045,7 @@ export default function CreateTodScreen() {
               value={content}
               onChangeText={setContent}
               autoFocus
+              maxFontSizeMultiplier={1.2}
             />
             <View style={styles.inputCardFooter} pointerEvents="box-none">
               {promptMediaAttachment ? (
@@ -992,7 +1098,7 @@ export default function CreateTodScreen() {
 
         {/* 3-Option Visibility Selector */}
         <View style={styles.visibilityContainer}>
-          <Text style={styles.visibilityLabel}>Who can see your identity?</Text>
+          <Text style={styles.visibilityLabel} maxFontSizeMultiplier={1.2}>Who can see your identity?</Text>
           <View style={styles.visibilityOptions}>
             {/* Anonymous */}
             <TouchableOpacity
@@ -1004,7 +1110,7 @@ export default function CreateTodScreen() {
                 size={18}
                 color={visibility === 'anonymous' ? '#FFFFFF' : C.text}
               />
-              <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]}>
+              <Text style={[styles.visibilityText, visibility === 'anonymous' && styles.visibilityTextActive]} maxFontSizeMultiplier={1.15}>
                 Anonymous
               </Text>
             </TouchableOpacity>
@@ -1019,7 +1125,7 @@ export default function CreateTodScreen() {
                 size={18}
                 color={visibility === 'public' ? '#FFFFFF' : C.text}
               />
-              <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]}>
+              <Text style={[styles.visibilityText, visibility === 'public' && styles.visibilityTextActive]} maxFontSizeMultiplier={1.15}>
                 Everyone
               </Text>
             </TouchableOpacity>
@@ -1034,12 +1140,12 @@ export default function CreateTodScreen() {
                 size={18}
                 color={visibility === 'no_photo' ? '#FFFFFF' : C.text}
               />
-              <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]}>
+              <Text style={[styles.visibilityText, visibility === 'no_photo' && styles.visibilityTextActive]} maxFontSizeMultiplier={1.15}>
                 Blur photo
               </Text>
             </TouchableOpacity>
           </View>
-          <Text style={styles.visibilityHint}>
+          <Text style={styles.visibilityHint} maxFontSizeMultiplier={1.15}>
             {visibility === 'anonymous'
               ? 'Your identity is completely hidden'
               : visibility === 'public'
@@ -1074,7 +1180,7 @@ export default function CreateTodScreen() {
             {isSubmitting ? (
               <ActivityIndicator size="small" color="#FFFFFF" />
             ) : (
-              <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]}>
+              <Text style={[styles.postButtonMainText, !canSubmit && styles.postButtonMainTextDisabled]} maxFontSizeMultiplier={1.15}>
                 POST
               </Text>
             )}
@@ -1147,6 +1253,12 @@ export default function CreateTodScreen() {
         visible={showMediaCamera}
         onClose={() => setShowMediaCamera(false)}
         onMediaCaptured={handleMediaCaptured}
+      />
+
+      <VoicePromptRecorder
+        visible={showVoiceRecorder}
+        onClose={handleVoiceRecorderClose}
+        onConfirm={handleVoiceRecorded}
       />
     </KeyboardAvoidingView>
   );

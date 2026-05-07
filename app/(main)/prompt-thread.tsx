@@ -13,7 +13,10 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { TodAvatar } from '@/components/truthdare/TodAvatar';
-import { TodPromptMediaTile } from '@/components/truthdare/TodPromptMediaTile';
+import {
+  TodPromptMediaTile,
+  type TodPromptMediaPreloadStatus,
+} from '@/components/truthdare/TodPromptMediaTile';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
 import { PendingAnswerCard } from '@/components/truthdare/PendingAnswerCard';
 // NOTE: `TodVoicePlayer` (the horizontal pill-shaped voice player) is no
@@ -1632,7 +1635,48 @@ export default function PromptThreadScreen() {
 
   // Handle closing the media viewer. Backend consumption already happened
   // during claim/open, so close is UI-only.
+  // Phase 4 part-2: prompt-owner media consumption tracking. Refs are
+  // declared up here (before handleCloseMediaViewer) because the close
+  // handler reads them on photo close; the markViewed mutation hook is
+  // also hoisted up here for the same reason. The matching `prepare`
+  // hook is co-located so all the new mutations live in one place.
+  const preparePromptMediaMutation = useMutation(api.truthDare.preparePromptMedia);
+  const markPromptMediaViewedMutation = useMutation(api.truthDare.markPromptMediaViewed);
+  const promptOwnerMediaConsumedRef = useRef(false);
+  const promptOwnerMediaImageRenderedRef = useRef(false);
+  // Fire mark-viewed (idempotent on the server) only after the user
+  // actually consumed the media. Called from:
+  //   • handleCloseMediaViewer (photo: image rendered + viewer closed)
+  //   • inline video onPlaybackStatusUpdate (video: didJustFinish)
+  // Owner / voice / non-prompt-owner-viewer branches never invoke it.
+  const fireMarkPromptMediaViewed = useCallback(() => {
+    if (promptOwnerMediaConsumedRef.current) return;
+    if (!promptId || !userId) return;
+    if (!prompt) return;
+    const projection = getPromptMediaProjection(prompt);
+    if (projection.isPromptMediaOwner) return;
+    if (projection.mediaKind !== 'photo' && projection.mediaKind !== 'video') return;
+    promptOwnerMediaConsumedRef.current = true;
+    markPromptMediaViewedMutation({
+      promptId,
+      viewerUserId: userId,
+    }).catch(() => {
+      // Best-effort. Failure leaves the ledger row missing; the user
+      // could re-view next session — acceptable lenient failure mode.
+    });
+  }, [markPromptMediaViewedMutation, prompt, promptId, userId]);
+
   const handleCloseMediaViewer = useCallback(async () => {
+    // Phase 4 part-2: photo consumption fires on close after the image
+    // actually rendered. Video consumption fires from didJustFinish, NOT
+    // here, so closing mid-playback does NOT mark the video viewed.
+    if (
+      viewingMedia?.answerId === '__prompt_owner_media__' &&
+      viewingMedia?.mediaType === 'photo' &&
+      promptOwnerMediaImageRenderedRef.current
+    ) {
+      fireMarkPromptMediaViewed();
+    }
     if (isMountedRef.current) {
       setViewingMedia(null);
       setMediaViewerLoading(false);
@@ -1642,44 +1686,74 @@ export default function PromptThreadScreen() {
       setVideoProgress({ position: 0, duration: 0, isPlaying: false });
     }
 
-  }, []);
+  }, [viewingMedia, fireMarkPromptMediaViewed]);
 
   // Phase 4: open prompt-owner media in the existing fullscreen viewer.
-  // Behavior depends on viewer role:
-  //  - Prompt owner: inline `mediaUrl` is present in the projection and we
-  //    open the viewer directly (no view row consumed).
-  //  - Non-owner photo/video, already viewed: surface a friendly "already
-  //    viewed" message — server-side has redacted the URL anyway.
-  //  - Non-owner photo/video, first open: round-trip through the
-  //    `openPromptMedia` mutation, which inserts the one-time view row and
-  //    returns a fresh URL.
-  //  - Voice: thread tile is non-tappable (see usage below).
+  // This now implements a two-tap preload UX (mirrors the feed) so the
+  // viewer never opens onto a black/loading frame:
+  //   1) idle    → tile shows download/arrow affordance
+  //   2) loading → tile shows inline spinner; URL is being resolved + asset
+  //                warmed in the background; viewer is NOT opened
+  //   3) ready   → tile shows the kind glyph; next tap opens the viewer
+  //                INSTANTLY using the cached resolved data (no extra
+  //                mutation, no extra network roundtrip)
+  //   4) failed  → tile shows refresh affordance; next tap retries
+  //
+  // The state is local to this thread mount (single-prompt screen, so a
+  // simple local entry is enough — no need for a per-promptId map). Voice
+  // is intentionally non-tappable on this surface, so it's not wired here.
+  //
   // The existing viewer modal renders `mediaUrl` + `mediaType` + optional
   // front-camera unmirror, so we reuse it by passing a synthetic answerId
   // marker that never feeds back into any answer-side mutation.
-  const [isOpeningPromptMedia, setIsOpeningPromptMedia] = useState(false);
-  const openPromptMediaMutation = useMutation(api.truthDare.openPromptMedia);
+  type PromptOwnerMediaPreload = {
+    status: TodPromptMediaPreloadStatus;
+    resolvedUrl?: string;
+    resolvedKind?: 'photo' | 'video';
+    resolvedIsFrontCamera?: boolean;
+  };
+  const [promptOwnerMediaPreload, setPromptOwnerMediaPreload] =
+    useState<PromptOwnerMediaPreload>({ status: 'idle' });
+  // Note: `preparePromptMediaMutation` and `markPromptMediaViewedMutation`
+  // are declared higher up (just above handleCloseMediaViewer) because
+  // the close handler also calls markViewed. See the Phase 4 part-2
+  // tracking block earlier in the component for the rationale.
   const handleViewPromptMedia = useCallback(async () => {
     if (!prompt || !promptId) return;
     const projection = getPromptMediaProjection(prompt);
     if (projection.mediaKind !== 'photo' && projection.mediaKind !== 'video') return;
     if (!isMountedRef.current) return;
 
-    // Owner: inline URL is available; open immediately.
-    if (projection.isPromptMediaOwner) {
-      if (!projection.mediaUrl) return;
+    const status = promptOwnerMediaPreload.status;
+
+    // Second tap (or later) on a preloaded tile: open the viewer instantly
+    // with the cached resolved data. Bypasses the already-viewed gate on
+    // purpose — the user already burned the view on the preload tap, we
+    // must let them actually watch what they paid for.
+    if (
+      status === 'ready' &&
+      promptOwnerMediaPreload.resolvedUrl &&
+      promptOwnerMediaPreload.resolvedKind
+    ) {
       setViewingMedia({
         answerId: '__prompt_owner_media__',
-        mediaUrl: projection.mediaUrl,
-        mediaType: projection.mediaKind,
+        mediaUrl: promptOwnerMediaPreload.resolvedUrl,
+        mediaType: promptOwnerMediaPreload.resolvedKind,
         isOwnAnswer: true,
-        isFrontCamera: projection.isFrontCamera,
+        isFrontCamera: !!promptOwnerMediaPreload.resolvedIsFrontCamera,
       });
       return;
     }
 
-    // Non-owner already-viewed: friendly message, no mutation call.
-    if (projection.viewerHasViewedPromptMedia) {
+    // Already preloading: swallow extra taps.
+    if (status === 'loading') return;
+
+    // Non-owner already-viewed (and we don't have a cached URL from this
+    // session): friendly message, no mutation call.
+    if (
+      !projection.isPromptMediaOwner &&
+      projection.viewerHasViewedPromptMedia
+    ) {
       Alert.alert(
         'Already viewed',
         projection.mediaKind === 'video'
@@ -1689,39 +1763,114 @@ export default function PromptThreadScreen() {
       return;
     }
 
-    // Non-owner first open: consume the one-time view via mutation.
-    if (!userId || isOpeningPromptMedia) return;
-    setIsOpeningPromptMedia(true);
+    // First tap (idle) or retry (failed): start the preload.
+    setPromptOwnerMediaPreload({ status: 'loading' });
     try {
-      const result = await openPromptMediaMutation({
-        promptId,
-        viewerUserId: userId,
-      });
-      if (!isMountedRef.current) return;
-      if (result.status === 'ok' && result.mediaUrl) {
-        setViewingMedia({
-          answerId: '__prompt_owner_media__',
-          mediaUrl: result.mediaUrl,
-          mediaType: result.mediaKind as 'photo' | 'video',
-          isOwnAnswer: true,
-          isFrontCamera: result.isFrontCamera ?? false,
-        });
-      } else if (result.status === 'already_viewed') {
-        Alert.alert(
-          'Already viewed',
-          projection.mediaKind === 'video'
-            ? 'You can only watch this video once.'
-            : 'You can only view this photo once.'
-        );
+      let resolvedUrl: string | undefined;
+      let resolvedKind: 'photo' | 'video' = projection.mediaKind;
+      let resolvedIsFrontCamera: boolean = !!projection.isFrontCamera;
+
+      if (projection.isPromptMediaOwner) {
+        // Owner branch: projection already carries the URL; no view consumption.
+        resolvedUrl = projection.mediaUrl ?? undefined;
       } else {
-        Alert.alert("Can't open", 'This media is no longer available.');
+        // Non-owner first-view: round-trip `preparePromptMedia` to resolve
+        // a fresh URL WITHOUT burning the one-time view. The ledger row is
+        // inserted later, by `markPromptMediaViewed`, only after real
+        // consumption (photo: rendered + closed; video: didJustFinish).
+        if (!userId) {
+          if (isMountedRef.current)
+            setPromptOwnerMediaPreload({ status: 'failed' });
+          return;
+        }
+        const result = await preparePromptMediaMutation({
+          promptId,
+          viewerUserId: userId,
+        });
+        if (!isMountedRef.current) return;
+        if (result.status === 'already_viewed') {
+          setPromptOwnerMediaPreload({ status: 'idle' });
+          Alert.alert(
+            'Already viewed',
+            projection.mediaKind === 'video'
+              ? 'You can only watch this video once.'
+              : 'You can only view this photo once.'
+          );
+          return;
+        }
+        if (result.status !== 'ok' || !result.mediaUrl) {
+          setPromptOwnerMediaPreload({ status: 'failed' });
+          Alert.alert("Can't open", 'This media is no longer available.');
+          return;
+        }
+        resolvedUrl = result.mediaUrl;
+        resolvedKind = (result.mediaKind ?? projection.mediaKind) as
+          | 'photo'
+          | 'video';
+        resolvedIsFrontCamera =
+          result.isFrontCamera ?? !!projection.isFrontCamera;
       }
+
+      if (!resolvedUrl) {
+        if (isMountedRef.current)
+          setPromptOwnerMediaPreload({ status: 'failed' });
+        return;
+      }
+
+      // Best-effort asset warm-up. Photos use expo-image's prefetch which
+      // decodes into the disk + memory cache; for video we issue a HEAD so
+      // the OS HTTP cache + CDN edge are warm. Failures are non-fatal —
+      // the URL is still valid and the viewer falls back to its own
+      // loading overlay.
+      try {
+        if (resolvedKind === 'photo') {
+          await Image.prefetch(resolvedUrl);
+        } else if (resolvedKind === 'video') {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 4000);
+          try {
+            await fetch(resolvedUrl, {
+              method: 'HEAD',
+              signal: controller.signal,
+            });
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+      } catch {
+        // swallow prefetch errors; asset will load when the viewer opens.
+      }
+
+      if (!isMountedRef.current) return;
+      setPromptOwnerMediaPreload({
+        status: 'ready',
+        resolvedUrl,
+        resolvedKind,
+        resolvedIsFrontCamera,
+      });
     } catch (err) {
+      if (isMountedRef.current)
+        setPromptOwnerMediaPreload({ status: 'failed' });
       Alert.alert("Can't open", 'Something went wrong. Please try again.');
-    } finally {
-      if (isMountedRef.current) setIsOpeningPromptMedia(false);
     }
-  }, [prompt, promptId, userId, isOpeningPromptMedia, openPromptMediaMutation]);
+  }, [
+    prompt,
+    promptId,
+    userId,
+    promptOwnerMediaPreload,
+    preparePromptMediaMutation,
+  ]);
+
+  // Reset the consumption tracker whenever a fresh viewer session opens
+  // (new mediaUrl / answerId). Must run after both the refs (declared
+  // higher up, before handleCloseMediaViewer) and `viewingMedia` are
+  // available.
+  useEffect(() => {
+    if (viewingMedia?.answerId === '__prompt_owner_media__') {
+      promptOwnerMediaConsumedRef.current = false;
+      promptOwnerMediaImageRenderedRef.current = false;
+    }
+  }, [viewingMedia?.answerId, viewingMedia?.mediaUrl]);
 
   useEffect(() => {
     if (viewingMedia) {
@@ -2130,11 +2279,12 @@ export default function PromptThreadScreen() {
                   style={styles.answerName}
                   numberOfLines={1}
                   ellipsizeMode="tail"
+                  maxFontSizeMultiplier={1.2}
                 >
                   {isAnon ? 'Anonymous' : (authorName || 'User')}
                 </Text>
                 {!isAnon && authorAge ? (
-                  <Text style={styles.answerAgeInline}>{`, ${authorAge}`}</Text>
+                  <Text style={styles.answerAgeInline} maxFontSizeMultiplier={1.15}>{`, ${authorAge}`}</Text>
                 ) : null}
                 {!isAnon && genderAccent ? (
                   <Ionicons
@@ -2170,7 +2320,7 @@ export default function PromptThreadScreen() {
           >
             <View style={styles.answerBodyTextCol}>
               {item.text && item.text.trim().length > 0 && (
-                <Text style={styles.answerText}>{item.text}</Text>
+                <Text style={styles.answerText} maxFontSizeMultiplier={1.2}>{item.text}</Text>
               )}
             </View>
 
@@ -2264,6 +2414,7 @@ export default function PromptThreadScreen() {
                       isThisVoicePlaying && styles.todMediaTileMicrotextActive,
                     ]}
                     numberOfLines={1}
+                    maxFontSizeMultiplier={1.15}
                   >
                     {tileMicrotext}
                   </Text>
@@ -2507,7 +2658,7 @@ export default function PromptThreadScreen() {
           <TouchableOpacity onPress={handleBackToSource} style={styles.backBtn}>
             <Ionicons name="chevron-back" size={24} color={PREMIUM.textPrimary} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Thread</Text>
+          <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>Thread</Text>
         </View>
         <View style={styles.emptyState}>
           <Ionicons name="alert-circle-outline" size={48} color={PREMIUM.textMuted} />
@@ -2668,8 +2819,9 @@ export default function PromptThreadScreen() {
                 autoFocus
                 placeholder="Edit your prompt..."
                 placeholderTextColor={PREMIUM.textMuted}
+                maxFontSizeMultiplier={1.2}
               />
-              <Text style={styles.inlineEditCharCount}>
+              <Text style={styles.inlineEditCharCount} maxFontSizeMultiplier={1.15}>
                 {editPromptText.length}/400
               </Text>
               <View style={styles.inlineEditActions}>
@@ -2678,7 +2830,7 @@ export default function PromptThreadScreen() {
                   onPress={handleCancelEditPrompt}
                   disabled={isSavingPromptEdit}
                 >
-                  <Text style={styles.inlineEditCancelText}>Cancel</Text>
+                  <Text style={styles.inlineEditCancelText} maxFontSizeMultiplier={1.15}>Cancel</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[
@@ -2691,7 +2843,7 @@ export default function PromptThreadScreen() {
                   {isSavingPromptEdit ? (
                     <ActivityIndicator size="small" color="#FFF" />
                   ) : (
-                    <Text style={styles.inlineEditSaveText}>Save</Text>
+                    <Text style={styles.inlineEditSaveText} maxFontSizeMultiplier={1.15}>Save</Text>
                   )}
                 </TouchableOpacity>
               </View>
@@ -2699,9 +2851,25 @@ export default function PromptThreadScreen() {
           );
           if (isEditingPrompt) return editor;
           if (showHeaderMediaTile) {
+            // Phase 4 (preload): voice tiles are non-tappable on this
+            // surface, and an already-viewed non-owner has nothing to
+            // preload — in both cases pass `undefined` so the tile renders
+            // with the legacy single-state visual (kind glyph or "Viewed"
+            // badge). Otherwise drive the two-tap UX from the local
+            // `promptOwnerMediaPreload` state. We also force `ready` (back
+            // to legacy visual) once the user has explicitly tapped to
+            // view, so the spinner doesn't briefly flicker on re-renders.
+            const tilePreloadStatus: TodPromptMediaPreloadStatus | undefined =
+              !tileIsTappable
+                ? undefined
+                : !projection.isPromptMediaOwner &&
+                    projection.viewerHasViewedPromptMedia &&
+                    promptOwnerMediaPreload.status !== 'ready'
+                  ? undefined
+                  : promptOwnerMediaPreload.status;
             return (
               <View style={styles.promptHeaderMediaRow}>
-                <Text style={[styles.promptText, styles.promptTextWithMedia]}>
+                <Text style={[styles.promptText, styles.promptTextWithMedia]} maxFontSizeMultiplier={1.2}>
                   {prompt.text}
                 </Text>
                 <TodPromptMediaTile
@@ -2721,6 +2889,7 @@ export default function PromptThreadScreen() {
                     !!projection.viewerHasViewedPromptMedia &&
                     (promptMediaKind === 'photo' || promptMediaKind === 'video')
                   }
+                  preloadStatus={tilePreloadStatus}
                   onPress={tileIsTappable ? handleViewPromptMedia : undefined}
                   accessibilityLabel={
                     tileIsTappable
@@ -2731,7 +2900,7 @@ export default function PromptThreadScreen() {
               </View>
             );
           }
-          return <Text style={styles.promptText}>{prompt.text}</Text>;
+          return <Text style={styles.promptText} maxFontSizeMultiplier={1.2}>{prompt.text}</Text>;
         })()}
 
         {/* Prompt Reactions Row */}
@@ -2752,7 +2921,7 @@ export default function PromptThreadScreen() {
                   onPress={() => handlePromptReact(prompt.myReaction === emoji ? '' : emoji)}
                 >
                   <Text style={styles.promptReactionEmoji}>{emoji}</Text>
-                  <Text style={styles.promptReactionCount}>{count}</Text>
+                  <Text style={styles.promptReactionCount} maxFontSizeMultiplier={1.15}>{count}</Text>
                 </TouchableOpacity>
               ))}
           </View>
@@ -3096,7 +3265,15 @@ export default function PromptThreadScreen() {
                 viewingMedia.isFrontCamera && styles.unmirrorMedia,
               ]}
               contentFit="contain"
-              onLoad={() => setMediaViewerLoading(false)}
+              onLoad={() => {
+                setMediaViewerLoading(false);
+                // Phase 4 part-2: mark "image actually rendered" — the
+                // gate for photo consumption. Mark-viewed itself fires
+                // later, when the viewer closes (handleCloseMediaViewer).
+                if (viewingMedia?.answerId === '__prompt_owner_media__') {
+                  promptOwnerMediaImageRenderedRef.current = true;
+                }
+              }}
               onError={() => setMediaViewerLoading(false)}
             />
           )}
@@ -3123,6 +3300,16 @@ export default function PromptThreadScreen() {
                       duration: status.durationMillis ?? 0,
                       isPlaying: status.isPlaying ?? false,
                     });
+                  }
+                  // Phase 4 part-2: video consumption fires only on
+                  // playback completion for prompt-owner media. Closing
+                  // mid-playback intentionally does NOT mark it viewed.
+                  if (
+                    status.isLoaded &&
+                    status.didJustFinish &&
+                    viewingMedia?.answerId === '__prompt_owner_media__'
+                  ) {
+                    fireMarkPromptMediaViewed();
                   }
                 }}
                 onError={() => setMediaViewerLoading(false)}

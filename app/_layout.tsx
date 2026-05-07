@@ -160,6 +160,7 @@ import { checkAndHandleResetEpoch } from "@/lib/resetEpochCheck";
 import { usePresenceAndLocation } from "@/hooks/usePresenceAndLocation";
 import { Toast } from "@/components/ui/Toast";
 import { TruthDareUploadManager } from "@/components/truthdare/TruthDareUploadManager";
+import { TruthDarePromptUploadManager } from "@/components/truthdare/TruthDarePromptUploadManager";
 import { safePush } from "@/lib/safeRouter";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { log } from "@/utils/logger";
@@ -924,6 +925,7 @@ export default function RootLayout() {
           <PresenceAndLocationManager />
           <CrossedPathToastManager />
           <TruthDareUploadManager />
+          <TruthDarePromptUploadManager />
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />
             <Stack.Screen name="demo-profile" />

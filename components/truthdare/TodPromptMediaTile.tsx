@@ -1,5 +1,5 @@
 import React from 'react';
-import { StyleSheet, Text, TouchableOpacity, View, ViewStyle, StyleProp } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View, ViewStyle, StyleProp } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -26,6 +26,19 @@ import { LinearGradient } from 'expo-linear-gradient';
  */
 
 type MediaKind = 'photo' | 'video' | 'voice';
+
+/**
+ * Phase 4 (prompt-owner media preload):
+ * Per-tile load state for the two-tap UX. Owners always see `ready` (their
+ * own media). Non-owners see `idle` until they tap once to preload, then
+ * `loading` while the secure URL is resolved + asset is warmed, then
+ * `ready` so a second tap opens the viewer instantly. `failed` flips back
+ * to a retry affordance.
+ *
+ * `undefined` is treated identically to `ready` for backward compatibility
+ * with callers that don't opt into the preload state machine.
+ */
+export type TodPromptMediaPreloadStatus = 'idle' | 'loading' | 'ready' | 'failed';
 
 const PALETTE = {
   bgBase: '#141428',
@@ -68,6 +81,21 @@ export type TodPromptMediaTileProps = {
    * viewed" message instead of opening the viewer.
    */
   showViewedBadge?: boolean;
+  /**
+   * Phase 4 (prompt-owner preload): drives the tile-level two-tap UX.
+   *  - 'idle'    → tile shows a download/arrow affordance ("tap to preload")
+   *  - 'loading' → tile shows an inline ActivityIndicator (no viewer opens)
+   *  - 'ready'   → tile shows the normal kind icon; next tap opens viewer
+   *  - 'failed'  → tile shows a refresh affordance ("tap to retry")
+   *  - undefined → behaves like 'ready' (back-compat with answer-side
+   *                callers that have their own preload pipeline)
+   *
+   * The preload status is purely visual; tap-handling lives in the parent
+   * (feed/thread) so URL resolution + Convex one-time-view recording stays
+   * centralized and never leaks the secure mediaUrl into this component
+   * before the user has explicitly opted in.
+   */
+  preloadStatus?: TodPromptMediaPreloadStatus;
 };
 
 function isMediaKind(kind: unknown): kind is MediaKind {
@@ -101,10 +129,24 @@ export function TodPromptMediaTile({
   covered = false,
   ownerViewCount,
   showViewedBadge = false,
+  preloadStatus,
 }: TodPromptMediaTileProps) {
   if (!hasMedia || !isMediaKind(mediaKind)) return null;
   const kind: MediaKind = mediaKind;
-  const iconName = getIconName(kind);
+  // Treat undefined as 'ready' so legacy callers (no preload pipeline) keep
+  // their existing visuals — only opted-in callers see idle/loading/failed.
+  const effectivePreloadStatus: TodPromptMediaPreloadStatus = preloadStatus ?? 'ready';
+  const isPreloadIdle = effectivePreloadStatus === 'idle';
+  const isPreloadLoading = effectivePreloadStatus === 'loading';
+  const isPreloadFailed = effectivePreloadStatus === 'failed';
+  // When the tile is in idle/loading/failed we swap the kind glyph for a
+  // status glyph so the user has a single, unambiguous affordance: tap to
+  // preload, wait, or retry. The kind glyph returns once we're ready.
+  const iconName: keyof typeof Ionicons.glyphMap = isPreloadIdle
+    ? 'arrow-down-circle'
+    : isPreloadFailed
+      ? 'refresh'
+      : getIconName(kind);
   const displayOwnerViewCount =
     typeof ownerViewCount === 'number' && Number.isFinite(ownerViewCount)
       ? Math.max(0, Math.floor(ownerViewCount))
@@ -152,16 +194,24 @@ export function TodPromptMediaTile({
         />
       )}
       <View style={[styles.iconChip, showThumb && styles.iconChipOnPhoto]}>
-        <Ionicons
-          name={iconName}
-          size={18}
-          color={showThumb ? '#FFF' : PALETTE.coral}
-        />
+        {isPreloadLoading ? (
+          <ActivityIndicator
+            size="small"
+            color={showThumb ? '#FFF' : PALETTE.coral}
+          />
+        ) : (
+          <Ionicons
+            name={iconName}
+            size={18}
+            color={showThumb ? '#FFF' : PALETTE.coral}
+          />
+        )}
       </View>
       {microtext ? (
         <Text
           style={[styles.microtext, showThumb && styles.microtextOnPhoto]}
           numberOfLines={1}
+          maxFontSizeMultiplier={1.15}
         >
           {microtext}
         </Text>
@@ -169,7 +219,7 @@ export function TodPromptMediaTile({
       {/* Phase 4: owner-only unique-viewer count, bottom of the tile. */}
       {ownerCountLabel ? (
         <View style={styles.viewCountBadge} pointerEvents="none">
-          <Text style={styles.viewCountText} numberOfLines={1}>
+          <Text style={styles.viewCountText} numberOfLines={1} maxFontSizeMultiplier={1.15}>
             {ownerCountLabel}
           </Text>
         </View>
@@ -179,7 +229,7 @@ export function TodPromptMediaTile({
       {showViewedBadge && !ownerCountLabel ? (
         <View style={styles.viewedBadge} pointerEvents="none">
           <Ionicons name="checkmark" size={9} color="#FFF" />
-          <Text style={styles.viewedBadgeText} numberOfLines={1}>
+          <Text style={styles.viewedBadgeText} numberOfLines={1} maxFontSizeMultiplier={1.15}>
             Viewed
           </Text>
         </View>
@@ -188,13 +238,21 @@ export function TodPromptMediaTile({
   );
 
   if (interactive) {
+    const preloadVerb = isPreloadIdle
+      ? 'Preload prompt'
+      : isPreloadLoading
+        ? 'Loading prompt'
+        : isPreloadFailed
+          ? 'Retry prompt'
+          : 'Open prompt';
     return (
       <TouchableOpacity
         style={[styles.tile, sizingStyle, style]}
         activeOpacity={0.85}
         onPress={onPress}
         accessibilityRole="button"
-        accessibilityLabel={accessibilityLabel ?? `Open prompt ${kind}`}
+        accessibilityLabel={accessibilityLabel ?? `${preloadVerb} ${kind}`}
+        accessibilityState={isPreloadLoading ? { busy: true } : undefined}
       >
         {inner}
       </TouchableOpacity>
