@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, Dimensions } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 import Animated, {
   useAnimatedStyle,
   SharedValue,
@@ -7,9 +7,6 @@ import Animated, {
   Extrapolation,
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
-
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 interface SwipeOverlayProps {
   direction: 'left' | 'right' | 'up' | null;
@@ -18,7 +15,11 @@ interface SwipeOverlayProps {
   panX?: SharedValue<number>;
   /** Optional: pass panY for position-based opacity interpolation */
   panY?: SharedValue<number>;
-  /** When true, uses premium Phase-2 styling */
+  /**
+   * Preserved for API compatibility. The overlay now renders bare icons with
+   * a soft glyph shadow that reads on both light Phase-1 and dark Phase-2
+   * backgrounds, so this flag no longer alters chrome.
+   */
   dark?: boolean;
 }
 
@@ -27,153 +28,79 @@ function isSharedValue(value: any): value is SharedValue<number> {
   return value !== null && typeof value === 'object' && typeof value.modify === 'function';
 }
 
-// Premium overlay configuration
+// Premium overlay configuration — bare icons (no badge / border / text).
+// Positions are intentionally OPPOSITE to the swipe direction so the icon
+// stays visible while the card translates away:
+//   - right-swipe (heart, green) renders on the LEFT side of the card.
+//   - left-swipe  (close,  red) renders on the RIGHT side of the card.
+//   - up-swipe    (star,  blue) renders centered over the card.
 const OVERLAY_CONFIG = {
   left: {
     icon: 'close' as const,
-    iconColor: '#FFFFFF',
-    tintColor: 'rgba(239, 68, 68, 0.35)', // Red tint
-    borderColor: 'rgba(239, 68, 68, 0.8)',
-    labelColor: '#EF4444',
-    label: 'NOPE',
-    position: 'topLeft' as const,
+    iconColor: '#EF4444', // premium red
+    position: 'right' as const,
   },
   right: {
     icon: 'heart' as const,
-    iconColor: '#FFFFFF',
-    tintColor: 'rgba(34, 197, 94, 0.35)', // Green tint
-    borderColor: 'rgba(34, 197, 94, 0.8)',
-    labelColor: '#22C55E',
-    label: 'LIKE',
-    position: 'topRight' as const,
+    iconColor: '#22C55E', // premium green
+    position: 'left' as const,
   },
   up: {
     icon: 'star' as const,
-    iconColor: '#FFFFFF',
-    tintColor: 'rgba(250, 204, 21, 0.35)', // Gold tint
-    borderColor: 'rgba(250, 204, 21, 0.8)',
-    labelColor: '#FACC15',
-    label: 'STAND OUT',
-    position: 'topCenter' as const,
+    iconColor: '#3B82F6', // premium blue
+    position: 'center' as const,
   },
 };
 
-// Premium animated overlay with tint effect
+const ICON_SIZE_HORIZONTAL = 76;
+const ICON_SIZE_UP = 92;
+
+// Premium animated overlay with icon-only feedback
 function PremiumSwipeOverlay({
   direction,
   opacity,
-  dark = false,
 }: {
   direction: 'left' | 'right' | 'up';
   opacity: SharedValue<number>;
-  dark?: boolean;
 }) {
   const config = OVERLAY_CONFIG[direction];
+  const size = direction === 'up' ? ICON_SIZE_UP : ICON_SIZE_HORIZONTAL;
 
-  // Animated style for the full-screen tint
-  const tintStyle = useAnimatedStyle(() => ({
+  // Animated icon reveal — opacity ramps in, scale settles slightly above 1.
+  const iconStyle = useAnimatedStyle(() => ({
     opacity: interpolate(
       opacity.value,
-      [0, 0.3, 1],
-      [0, 0.4, 0.85],
-      Extrapolation.CLAMP
-    ),
-  }));
-
-  // Animated style for the icon badge
-  const badgeStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      opacity.value,
-      [0, 0.2, 0.6],
-      [0, 0.5, 1],
+      [0, 0.12, 0.55],
+      [0, 0.65, 1],
       Extrapolation.CLAMP
     ),
     transform: [
       {
         scale: interpolate(
           opacity.value,
-          [0, 0.3, 0.7, 1],
-          [0.5, 0.8, 1, 1.05],
+          [0, 0.25, 0.7, 1],
+          [0.78, 0.92, 1, 1.04],
           Extrapolation.CLAMP
         ),
       },
     ],
   }));
-
-  // Animated style for the label
-  const labelStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      opacity.value,
-      [0, 0.4, 0.8],
-      [0, 0.3, 1],
-      Extrapolation.CLAMP
-    ),
-    transform: [
-      {
-        translateY: interpolate(
-          opacity.value,
-          [0, 0.5, 1],
-          [10, 3, 0],
-          Extrapolation.CLAMP
-        ),
-      },
-    ],
-  }));
-
-  // Position styles based on direction
-  const getPositionStyle = () => {
-    switch (config.position) {
-      case 'topLeft':
-        return { top: 80, left: 24 };
-      case 'topRight':
-        return { top: 80, right: 24 };
-      case 'topCenter':
-        return { top: 80, alignSelf: 'center' as const };
-      default:
-        return { top: 80, alignSelf: 'center' as const };
-    }
-  };
 
   return (
     <View style={styles.container} pointerEvents="none">
-      {/* Full-screen color tint overlay */}
       <Animated.View
         style={[
-          styles.tintOverlay,
-          { backgroundColor: config.tintColor },
-          tintStyle,
-        ]}
-      />
-
-      {/* Icon badge positioned at corner/top */}
-      <Animated.View
-        style={[
-          styles.iconBadge,
-          getPositionStyle(),
-          { borderColor: config.borderColor },
-          dark && styles.iconBadgeDark,
-          badgeStyle,
+          styles.iconWrap,
+          getPositionStyle(config.position, size),
+          iconStyle,
         ]}
       >
         <Ionicons
           name={config.icon}
-          size={direction === 'up' ? 36 : 32}
-          color={config.labelColor}
+          size={size}
+          color={config.iconColor}
+          style={styles.iconGlyph}
         />
-      </Animated.View>
-
-      {/* Floating label below badge */}
-      <Animated.View
-        style={[
-          styles.labelContainer,
-          getPositionStyle(),
-          { marginTop: direction === 'up' ? 150 : 145 },
-          labelStyle,
-        ]}
-      >
-        <Text style={[styles.label, { color: config.labelColor }]}>
-          {config.label}
-        </Text>
       </Animated.View>
     </View>
   );
@@ -183,87 +110,66 @@ function PremiumSwipeOverlay({
 function StaticSwipeOverlay({
   direction,
   opacity,
-  dark = false,
 }: {
   direction: 'left' | 'right' | 'up';
   opacity: number;
-  dark?: boolean;
 }) {
-  const config = OVERLAY_CONFIG[direction];
   if (opacity === 0) return null;
-
-  const getPositionStyle = () => {
-    switch (config.position) {
-      case 'topLeft':
-        return { top: 80, left: 24 };
-      case 'topRight':
-        return { top: 80, right: 24 };
-      case 'topCenter':
-        return { top: 80, alignSelf: 'center' as const };
-      default:
-        return { top: 80, alignSelf: 'center' as const };
-    }
-  };
+  const config = OVERLAY_CONFIG[direction];
+  const size = direction === 'up' ? ICON_SIZE_UP : ICON_SIZE_HORIZONTAL;
 
   return (
     <View style={[styles.container, { opacity }]} pointerEvents="none">
-      <View style={[styles.tintOverlay, { backgroundColor: config.tintColor }]} />
-      <View
-        style={[
-          styles.iconBadge,
-          getPositionStyle(),
-          { borderColor: config.borderColor },
-          dark && styles.iconBadgeDark,
-        ]}
-      >
+      <View style={[styles.iconWrap, getPositionStyle(config.position, size)]}>
         <Ionicons
           name={config.icon}
-          size={direction === 'up' ? 36 : 32}
-          color={config.labelColor}
+          size={size}
+          color={config.iconColor}
+          style={styles.iconGlyph}
         />
-      </View>
-      <View
-        style={[
-          styles.labelContainer,
-          getPositionStyle(),
-          { marginTop: direction === 'up' ? 150 : 145 },
-        ]}
-      >
-        <Text style={[styles.label, { color: config.labelColor }]}>
-          {config.label}
-        </Text>
       </View>
     </View>
   );
 }
 
+// Position style is shared by both Premium (animated) and Static overlays.
+// 'left'/'right' anchor the icon to the side opposite the swipe direction so
+// it does NOT translate off-screen with the card. 'center' anchors the icon
+// to the visual center of the card using top:50% + marginTop offset.
+function getPositionStyle(
+  position: 'left' | 'right' | 'center',
+  size: number,
+) {
+  switch (position) {
+    case 'left':
+      return { top: 72, left: 24 };
+    case 'right':
+      return { top: 72, right: 24 };
+    case 'center':
+      return {
+        top: '50%' as const,
+        alignSelf: 'center' as const,
+        marginTop: -size / 2,
+      };
+    default:
+      return { top: 72, alignSelf: 'center' as const };
+  }
+}
+
 export const SwipeOverlay = React.memo(function SwipeOverlay({
   direction,
   opacity,
-  dark = false,
 }: SwipeOverlayProps) {
   if (!direction) return null;
 
   // Handle static number opacity (backward compatibility)
   if (typeof opacity === 'number') {
-    return (
-      <StaticSwipeOverlay
-        direction={direction}
-        opacity={opacity}
-        dark={dark}
-      />
-    );
+    return <StaticSwipeOverlay direction={direction} opacity={opacity} />;
   }
 
   // Handle SharedValue opacity (premium animated version)
   if (isSharedValue(opacity)) {
-    return (
-      <PremiumSwipeOverlay
-        direction={direction}
-        opacity={opacity}
-        dark={dark}
-      />
-    );
+    return <PremiumSwipeOverlay direction={direction} opacity={opacity} />;
   }
 
   return null;
@@ -274,41 +180,18 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     zIndex: 20,
   },
-  // Full-screen tint overlay
-  tintOverlay: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  // Icon badge (positioned at corners/top)
-  iconBadge: {
+  // Bare icon wrapper — no chip, no border, no fill. Position-only.
+  iconWrap: {
     position: 'absolute',
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    borderWidth: 3,
     alignItems: 'center',
     justifyContent: 'center',
-    // Subtle shadow for depth
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
   },
-  iconBadgeDark: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  // Label below icon
-  labelContainer: {
-    position: 'absolute',
-    alignItems: 'center',
-  },
-  label: {
-    fontSize: 16,
-    fontWeight: '800',
-    letterSpacing: 2,
-    textShadowColor: 'rgba(0, 0, 0, 0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+  // Soft drop shadow on the glyph itself keeps the bare icon legible over
+  // busy photos / dark Phase-2 backgrounds without re-introducing a circular
+  // badge. textShadow* applies to Ionicons glyphs (rendered as text).
+  iconGlyph: {
+    textShadowColor: 'rgba(0, 0, 0, 0.45)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 10,
   },
 });
