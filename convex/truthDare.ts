@@ -2998,6 +2998,20 @@ export const getTrendingTruthAndDare = query({
       const isPhotoOrVideo = prompt.mediaKind === 'photo' || prompt.mediaKind === 'video';
       const sanitizedMediaUrl =
         isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner ? undefined : prompt.mediaUrl;
+      // Viewer-state: did the viewer already answer this prompt? Mirrors the
+      // logic in `listActivePromptsWithTop2Answers`. Backend-derived so the
+      // "Answered" indicator persists across sessions/devices/reinstalls.
+      // Uses the `by_prompt_user` index for an O(1) point lookup.
+      let hasAnswered = false;
+      if (viewerDbId) {
+        const myAnswer = await ctx.db
+          .query('todAnswers')
+          .withIndex('by_prompt_user', (q) =>
+            q.eq('promptId', promptId).eq('userId', viewerDbId as unknown as string)
+          )
+          .first();
+        if (myAnswer) hasAnswered = true;
+      }
       return {
         _id: prompt._id,
         type: prompt.type,
@@ -3030,6 +3044,8 @@ export const getTrendingTruthAndDare = query({
         promptMediaViewCount: promptMediaMeta.promptMediaViewCount,
         viewerHasViewedPromptMedia: promptMediaMeta.viewerHasViewedPromptMedia,
         isPromptMediaOwner: promptMediaMeta.isPromptMediaOwner,
+        // Viewer state for "Answered" indicator on Trending cards.
+        hasAnswered,
       };
     };
 

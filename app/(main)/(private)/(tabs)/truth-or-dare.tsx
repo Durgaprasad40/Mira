@@ -260,9 +260,54 @@ const SkeletonCard = React.memo(function SkeletonCard() {
 });
 
 /* ─── Compact Comment Preview Row - Premium styling ─── */
+//
+// Feed/homepage preview line for a single answer/comment. Shape:
+//   text-only:       Name: comment snippet…
+//   text + media:    Name: comment snippet…  ◐   ← per-type colored chip
+//   media-only:      Name  ◐                     ← chip, never the word
+//
+// The trailing media glyph reuses the SAME premium palette and Ionicons
+// names that `components/truthdare/AnswerComposerSheet.tsx` (the answer
+// composer plus-menu) already uses for the same media types — so the
+// homepage preview, the composer, and the answer-card tile all share
+// one visual language:
+//
+//   photo  → camera-outline   coral  (#E94560)
+//   video  → videocam-outline green  (#00B894)
+//   voice  → mic-outline      orange (#FF9800)
+//
+// Each glyph is wrapped in a small rounded tinted chip so it reads as a
+// deliberate badge instead of a free-floating system glyph. Chip tint
+// is the per-type color at ~12% alpha (suffix `1F` on the hex), which
+// gives a subtle colored backdrop against the dark feed card while
+// keeping the foreground glyph crisp at full saturation.
+//
+// Layout notes:
+//   • The chip is a flex sibling AFTER the `numberOfLines={1}` Text
+//     with `flexShrink: 0` — text truncates first, the chip is never
+//     eaten by the ellipsis on narrow Android screens.
+//   • `commentRow` already lays children out in a row with gap:6 so
+//     the chip visually sits one gap-unit after the truncated text.
+type CommentMediaStyleEntry = {
+  icon: keyof typeof Ionicons.glyphMap;
+  color: string;
+};
+
+const COMMENT_MEDIA_ICON_MAP: Record<'photo' | 'video' | 'voice', CommentMediaStyleEntry> = {
+  photo: { icon: 'camera-outline', color: '#E94560' },
+  video: { icon: 'videocam-outline', color: '#00B894' },
+  voice: { icon: 'mic-outline', color: '#FF9800' },
+};
+
 const CommentPreviewRow = React.memo(function CommentPreviewRow({ answer }: { answer: any }) {
-  const isMedia = answer.type === 'photo' || answer.type === 'video' || answer.type === 'voice';
   const identity = resolveAnswerPreviewIdentity(answer);
+  const trimmedText = typeof answer.text === 'string' ? answer.text.trim() : '';
+  const hasText = trimmedText.length > 0;
+
+  const mediaStyleEntry =
+    answer.type === 'photo' || answer.type === 'video' || answer.type === 'voice'
+      ? COMMENT_MEDIA_ICON_MAP[answer.type as 'photo' | 'video' | 'voice']
+      : null;
 
   return (
     <View style={styles.commentRow}>
@@ -278,17 +323,34 @@ const CommentPreviewRow = React.memo(function CommentPreviewRow({ answer }: { an
         textColor={PREMIUM.textPrimary}
         iconSize={10}
       />
-      <Text style={styles.commentText} numberOfLines={1} ellipsizeMode="tail" maxFontSizeMultiplier={1.15}>
+      <Text
+        style={styles.commentText}
+        numberOfLines={1}
+        ellipsizeMode="tail"
+        maxFontSizeMultiplier={1.15}
+      >
         <Text style={styles.commentName}>{identity.displayName}</Text>
-        {'  '}
-        {isMedia ? (
-          <Text style={styles.commentMedia}>
-            {answer.type === 'voice' ? '🎤 Voice' : answer.type === 'video' ? '🎬 Video' : '📷 Photo'}
-          </Text>
-        ) : (
-          <Text style={styles.commentSnippet}>{answer.text || ''}</Text>
-        )}
+        {hasText ? (
+          <>
+            <Text style={styles.commentName}>{': '}</Text>
+            <Text style={styles.commentSnippet}>{trimmedText}</Text>
+          </>
+        ) : null}
       </Text>
+      {mediaStyleEntry ? (
+        <View
+          style={[
+            styles.commentMediaIcon,
+            { backgroundColor: `${mediaStyleEntry.color}1F` },
+          ]}
+        >
+          <Ionicons
+            name={mediaStyleEntry.icon}
+            size={12}
+            color={mediaStyleEntry.color}
+          />
+        </View>
+      ) : null}
     </View>
   );
 });
@@ -381,6 +443,10 @@ type TrendingPromptData = {
   promptMediaViewCount?: number;
   viewerHasViewedPromptMedia?: boolean;
   isPromptMediaOwner?: boolean;
+  // Viewer-state: did the current viewer already answer this prompt?
+  // Backend-derived in `getTrendingTruthAndDare` for the "Answered"
+  // indicator. Optional because legacy/cached responses may omit it.
+  hasAnswered?: boolean;
 };
 
 /* ─── Animated Press Wrapper for premium feel ─── */
@@ -553,9 +619,21 @@ const TrendingCard = React.memo(function TrendingCard({
           <View style={styles.answerBadge}>
             <Ionicons name="chatbubble" size={11} color={PREMIUM.textMuted} />
             <Text style={styles.answerCountText} maxFontSizeMultiplier={1.15}>
-              {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+              {answerCount === 1 ? '1 comment' : `${answerCount} comments`}
             </Text>
           </View>
+          {/* Viewer-state indicator placed inline next to the answer count so
+              the existing trending "Hot" pill on the right is never replaced
+              or hidden. Backend-derived (`prompt.hasAnswered`); no temporary
+              frontend state. */}
+          {prompt.hasAnswered ? (
+            <View style={styles.answeredBadge}>
+              <Ionicons name="checkmark-circle" size={11} color={PREMIUM.coral} />
+              <Text style={styles.answeredBadgeText} maxFontSizeMultiplier={1.15}>
+                Commented
+              </Text>
+            </View>
+          ) : null}
           <View style={styles.trendingBadge}>
             <Ionicons name="flame" size={11} color={PREMIUM.coral} />
             <Text style={styles.trendingBadgeText}>Hot</Text>
@@ -758,9 +836,22 @@ const PromptCard = React.memo(function PromptCard({
           <View style={styles.answerBadge}>
             <Ionicons name="chatbubble" size={11} color={PREMIUM.textMuted} />
             <Text style={styles.answerCountText} maxFontSizeMultiplier={1.15}>
-              {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+              {answerCount === 1 ? '1 comment' : `${answerCount} comments`}
             </Text>
           </View>
+          {/* Viewer-state indicator: shown on the right side of the row when
+              the current viewer has already submitted an answer to this
+              prompt. Backend-derived (`prompt.hasAnswered`) so the badge
+              persists across sessions/devices/reinstalls. Subtle text-only
+              treatment (coral accent) to avoid a heavy badge look. */}
+          {prompt.hasAnswered ? (
+            <View style={[styles.answeredBadge, styles.answeredBadgeRight]}>
+              <Ionicons name="checkmark-circle" size={11} color={PREMIUM.coral} />
+              <Text style={styles.answeredBadgeText} maxFontSizeMultiplier={1.15}>
+                Commented
+              </Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
@@ -2518,6 +2609,25 @@ const styles = StyleSheet.create({
     color: PREMIUM.coral,
     letterSpacing: 0.5,
   },
+  // Subtle viewer-state indicator: same fontSize as the answer count so it
+  // sits at the same typographic level (per Rule 1), but in PREMIUM.coral
+  // for accent. No background fill, no border — keeps it premium and
+  // non-shouty (Rule 3). Reused by both TrendingCard (inline) and PromptCard
+  // (right-aligned via `answeredBadgeRight`).
+  answeredBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  answeredBadgeRight: {
+    marginLeft: 'auto',
+  },
+  answeredBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: PREMIUM.coral,
+    letterSpacing: 0.2,
+  },
 
   // ─── Comment Previews ───
   previewSection: {
@@ -2553,9 +2663,21 @@ const styles = StyleSheet.create({
   commentSnippet: {
     color: PREMIUM.textMuted,
   },
-  commentMedia: {
-    color: PREMIUM.coral,
-    fontWeight: '600',
+  // Trailing media chip wrapping the per-type Ionicons glyph. The chip
+  // is a small rounded square (matches the `todMediaTileIconChip` size
+  // language used on answer-card tiles, scaled down for feed previews)
+  // with a translucent per-type backdrop applied inline at the call
+  // site (`mediaStyleEntry.color + '1F'`). `flexShrink: 0` keeps the
+  // chip at full size while the adjacent `commentText` (flex: 1)
+  // truncates with `ellipsizeMode="tail"` — without this the chip
+  // would be the first thing the layout chops on narrow screens.
+  commentMediaIcon: {
+    flexShrink: 0,
+    width: 20,
+    height: 20,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // ─── Empty State ───
