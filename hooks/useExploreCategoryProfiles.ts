@@ -2,8 +2,9 @@
  * DISCOVER-CATEGORY-FIX: Hook for fetching profiles by category from backend
  *
  * Uses backend Explore assignment to fetch profiles assigned to a category.
- * Relationship categories are exclusive; Right Now categories are a separate
- * exclusive overlay.
+ * Relationship categories are exclusive per viewer-candidate pair and are
+ * chosen from mutual relationship goals; Right Now categories keep their
+ * existing signal priority. Swipe exclusions remain global.
  *
  * Features:
  * - Uses `getExploreCategoryProfiles` query with category-based filtering
@@ -13,13 +14,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
+import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode, convex } from '@/hooks/useConvex';
 import { useExploreProfiles } from '@/hooks/useExploreProfiles';
 import { EXPLORE_CATEGORIES } from '@/components/explore/exploreCategories';
+import {
+  FRONTEND_RELATIONSHIP_INTENT_IDS,
+  normalizeRelationshipIntentValues,
+} from '@/lib/discoveryNaming';
 
 const EMPTY_PROFILES: any[] = [];
+const EMPTY_INTENTS: string[] = [];
 const EXPLORE_CATEGORY_ERROR = 'Unable to load this vibe right now.';
 const EXPLORE_CATEGORY_STALE_ERROR = 'Showing saved results while we reconnect.';
+const RELATIONSHIP_CATEGORY_IDS = new Set<string>(FRONTEND_RELATIONSHIP_INTENT_IDS);
 
 export type ExploreCategoryStatus =
   | 'ok'
@@ -88,6 +96,25 @@ function getExploreCategoryLatestCacheKey(categoryId: string, limit: number, off
   return `${categoryId}:${limit}:${offset}`;
 }
 
+function getMutualRelationshipCategory(
+  viewerRelationshipIntent: readonly string[] | string | undefined | null,
+  candidateRelationshipIntent: readonly string[] | string | undefined | null,
+) {
+  const viewerGoals = new Set<string>(normalizeRelationshipIntentValues(viewerRelationshipIntent));
+  if (viewerGoals.size === 0) return null;
+
+  const candidateGoals = new Set<string>(normalizeRelationshipIntentValues(candidateRelationshipIntent));
+  if (candidateGoals.size === 0) return null;
+
+  for (const categoryId of FRONTEND_RELATIONSHIP_INTENT_IDS) {
+    if (viewerGoals.has(categoryId) && candidateGoals.has(categoryId)) {
+      return categoryId;
+    }
+  }
+
+  return null;
+}
+
 export function useExploreCategoryProfiles({
   categoryId,
   trackShown: _trackShown = false,
@@ -97,6 +124,11 @@ export function useExploreCategoryProfiles({
 }: UseExploreCategoryProfilesOptions): UseExploreCategoryProfilesResult {
   const userId = useAuthStore((s) => s.userId);
   const authReady = useAuthStore((s) => s.authReady);
+  const demoViewerRelationshipIntent = useDemoStore((s) => {
+    const currentDemoUserId = s.currentDemoUserId;
+    if (!currentDemoUserId) return EMPTY_INTENTS;
+    return s.demoProfiles[currentDemoUserId]?.relationshipIntent ?? EMPTY_INTENTS;
+  });
   const allProfiles = useExploreProfiles({ enabled: isDemoMode });
   const category = EXPLORE_CATEGORIES.find((c) => c.id === categoryId);
   const cacheKey = useMemo(
@@ -109,8 +141,19 @@ export function useExploreCategoryProfiles({
   );
 
   const demoProfiles = useMemo(
-    () => allProfiles.filter(category?.predicate ?? (() => false)),
-    [allProfiles, category],
+    () => {
+      if (!category) return EMPTY_PROFILES;
+      if (RELATIONSHIP_CATEGORY_IDS.has(category.id)) {
+        return allProfiles.filter(
+          (profile) => getMutualRelationshipCategory(
+            demoViewerRelationshipIntent,
+            profile?.relationshipIntent,
+          ) === category.id,
+        );
+      }
+      return allProfiles.filter(category.predicate);
+    },
+    [allProfiles, category, demoViewerRelationshipIntent],
   );
 
   const [state, setState] = useState<UseExploreCategoryProfilesResult>(() => {

@@ -59,7 +59,7 @@ const LEGACY_INTENT_MAP: Record<string, string> = {
   'fwb': 'keep_it_casual',
   'figuring_out': 'exploring_vibes',
   'short_to_long': 'see_where_it_goes',
-  'long_to_short': 'see_where_it_goes',
+  'long_to_short': 'open_to_vibes',
   'casual': 'keep_it_casual',
   'serious': 'serious_vibes',
   'marriage': 'serious_vibes',

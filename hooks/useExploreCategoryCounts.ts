@@ -1,9 +1,10 @@
 /**
  * DISCOVER-CATEGORY-FIX: Hook for fetching category counts from backend
  *
- * Uses the new single-category assignment system to get accurate counts
- * per category. This prevents duplicate profiles appearing in multiple
- * categories.
+ * Uses the backend assignment system for accurate category counts.
+ * Relationship categories are exclusive per viewer-candidate pair and are
+ * chosen from mutual relationship goals; Right Now categories keep their
+ * existing signal priority. Swipe exclusions remain global.
  *
  * P1-001 FIX: Uses useQuery() so count reads stay reactive and cached within
  * the active Explore session.
@@ -69,7 +70,7 @@ function normalizeExploreNearbyStatus(
 }
 
 /**
- * Fetch category counts from the backend using the single-category system.
+ * Fetch category counts from the backend using the mutual category system.
  * Returns explicit loading and error state so the homepage can stay truthful.
  *
  * P1-001: Uses useQuery() for reactive caching inside the current Explore session

@@ -1332,10 +1332,10 @@ function createEmptyExploreCounts(): Record<string, number> {
 // ---------------------------------------------------------------------------
 // R3 Explore bucketing
 // ---------------------------------------------------------------------------
-// Product rule: Explore now has two independent layers. A candidate can own
-// exactly one Relationship category and exactly one Right Now category.
-// Relationship counts/listings stay exclusive by intent priority. Right Now
-// counts/listings are a dynamic overlay with their own priority.
+// Product rule: Explore has two independent layers. A candidate can own exactly
+// one Relationship category per viewer-candidate pair and exactly one Right Now
+// category. Relationship counts/listings use mutual intent priority; Right Now
+// counts/listings keep their existing signal priority.
 //
 // NOTE: order matters; do not reorder without product review.
 const RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY: readonly RelationshipExploreCategoryId[] = [
@@ -1390,11 +1390,18 @@ const RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY: readonly RightNowExploreCategoryId[
   }
 })();
 
-function assignRelationshipExploreCategory(
-  candidate: ExploreCandidateBase,
+function assignMutualRelationshipExploreCategory(
+  viewerRelationshipIntent: readonly string[] | string | undefined | null,
+  candidateRelationshipIntent: readonly string[] | string | undefined | null,
 ): RelationshipExploreCategoryId | null {
+  const viewerIntents = new Set(normalizeRelationshipIntentValues(viewerRelationshipIntent));
+  if (viewerIntents.size === 0) return null;
+
+  const candidateIntents = new Set(normalizeRelationshipIntentValues(candidateRelationshipIntent));
+  if (candidateIntents.size === 0) return null;
+
   for (const categoryId of RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY) {
-    if (matchesExploreCategory(candidate, categoryId)) {
+    if (viewerIntents.has(categoryId) && candidateIntents.has(categoryId)) {
       return categoryId;
     }
   }
@@ -1412,10 +1419,16 @@ function assignRightNowExploreCategory(
   return null;
 }
 
-function countExploreCategories(candidates: ExploreCandidateBase[]): Record<string, number> {
+function countExploreCategories(
+  viewer: { relationshipIntent?: string[] } | null,
+  candidates: ExploreCandidateBase[],
+): Record<string, number> {
   const counts = createEmptyExploreCounts();
   for (const candidate of candidates) {
-    const relationshipOwner = assignRelationshipExploreCategory(candidate);
+    const relationshipOwner = assignMutualRelationshipExploreCategory(
+      viewer?.relationshipIntent,
+      candidate.relationshipIntent,
+    );
     if (relationshipOwner) {
       counts[relationshipOwner] += 1;
     }
@@ -1726,7 +1739,14 @@ async function buildExploreCandidates(
 
       if (activeCategoryId) {
         if (isRelationshipExploreCategoryId(activeCategoryId)) {
-          if (assignRelationshipExploreCategory(candidate) !== activeCategoryId) continue;
+          if (
+            assignMutualRelationshipExploreCategory(
+              currentUser.relationshipIntent,
+              candidate.relationshipIntent,
+            ) !== activeCategoryId
+          ) {
+            continue;
+          }
         } else if (isRightNowExploreCategoryId(activeCategoryId)) {
           if (assignRightNowExploreCategory(candidate) !== activeCategoryId) continue;
         } else {
@@ -1916,7 +1936,7 @@ export const getExploreCategoryCounts = query({
       };
     }
 
-    const counts = countExploreCategories(built.candidates);
+    const counts = countExploreCategories(built.currentUser, built.candidates);
 
     return {
       counts,
