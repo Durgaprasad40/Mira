@@ -31,6 +31,10 @@ import {
 import { TodConnectRequestsIndicator } from '@/components/truthdare/TodConnectRequestsIndicator';
 import { TodConnectRequestsSheet } from '@/components/truthdare/TodConnectRequestsSheet';
 import { PendingPromptCard } from '@/components/truthdare/PendingPromptCard';
+import {
+  DraggableTodFab,
+  PHASE2_TOD_FAB_STORAGE_KEYS,
+} from '@/components/truthdare/DraggableTodFab';
 import { useAuthStore } from '@/stores/authStore';
 import {
   TruthDarePendingPromptUpload,
@@ -1977,14 +1981,25 @@ export default function TruthOrDareScreen() {
           <SkeletonCard />
           <SkeletonCard />
         </View>
-        <TouchableOpacity style={styles.fab} onPress={openCreateTod} activeOpacity={0.85}>
+        <DraggableTodFab
+          storageKey={PHASE2_TOD_FAB_STORAGE_KEYS.mainList}
+          buttonSize={56}
+          defaultRight={18}
+          defaultBottom={28}
+          topInset={insets.top + 60}
+          bottomInset={28}
+          positionStyle={styles.fab}
+          onPress={openCreateTod}
+          activeOpacity={0.85}
+          accessibilityLabel="Create Truth or Dare post"
+        >
           <LinearGradient
             colors={[PREMIUM.coral, PREMIUM.coralSoft]}
             style={styles.fabGradient}
           >
             <Ionicons name="create" size={24} color="#FFF" />
           </LinearGradient>
-        </TouchableOpacity>
+        </DraggableTodFab>
       </LinearGradient>
     );
   }
@@ -2079,10 +2094,17 @@ export default function TruthOrDareScreen() {
         removeClippedSubviews={Platform.OS === 'android'}
       />
 
-      <TouchableOpacity
-        style={styles.fab}
+      <DraggableTodFab
+        storageKey={PHASE2_TOD_FAB_STORAGE_KEYS.mainList}
+        buttonSize={56}
+        defaultRight={18}
+        defaultBottom={28}
+        topInset={insets.top + 60}
+        bottomInset={28}
+        positionStyle={styles.fab}
         onPress={openCreateTod}
         activeOpacity={0.85}
+        accessibilityLabel="Create Truth or Dare post"
       >
         <LinearGradient
           colors={[PREMIUM.coral, PREMIUM.coralSoft]}
@@ -2090,7 +2112,7 @@ export default function TruthOrDareScreen() {
         >
           <Ionicons name="create" size={24} color="#FFF" />
         </LinearGradient>
-      </TouchableOpacity>
+      </DraggableTodFab>
 
       <TodConnectRequestsSheet
         visible={requestInboxVisible}

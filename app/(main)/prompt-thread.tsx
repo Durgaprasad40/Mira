@@ -19,6 +19,10 @@ import {
 } from '@/components/truthdare/TodPromptMediaTile';
 import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
 import { PendingAnswerCard } from '@/components/truthdare/PendingAnswerCard';
+import {
+  DraggableTodFab,
+  PHASE2_TOD_FAB_STORAGE_KEYS,
+} from '@/components/truthdare/DraggableTodFab';
 // NOTE: `TodVoicePlayer` (the horizontal pill-shaped voice player) is no
 // longer rendered in this thread/response card. Voice playback now happens
 // inside the same compact 84×84 media tile used for photo/video — see
@@ -3055,22 +3059,28 @@ export default function PromptThreadScreen() {
       {/* FAB (only if not expired, hasn't commented, and NOT prompt owner) */}
       {/* SELF-COMMENT RESTRICTION: Owner cannot answer their own prompt */}
       {!isExpired && !hasSubmittedOrPendingAnswer && !isPromptOwner && (
-        <View style={[styles.commentFab, { bottom: Math.max(insets.bottom, 12) + 8 }]}>
-          <TouchableOpacity
-            style={styles.fabBtn}
-            onPress={openComposer}
-            activeOpacity={0.8}
+        <DraggableTodFab
+          storageKey={PHASE2_TOD_FAB_STORAGE_KEYS.promptThread}
+          buttonSize={56}
+          defaultRight={16}
+          defaultBottom={Math.max(insets.bottom, 12) + 8}
+          topInset={insets.top + 60}
+          bottomInset={Math.max(insets.bottom, 12) + 8}
+          positionStyle={[styles.commentFab, { bottom: Math.max(insets.bottom, 12) + 8 }]}
+          touchableStyle={styles.fabBtn}
+          onPress={openComposer}
+          activeOpacity={0.8}
+          accessibilityLabel="Add your response"
+        >
+          <LinearGradient
+            colors={[PREMIUM.coral, PREMIUM.coralSoft] as const}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.fabGradient}
           >
-            <LinearGradient
-              colors={[PREMIUM.coral, PREMIUM.coralSoft] as const}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.fabGradient}
-            >
-              <Ionicons name="add" size={28} color="#FFF" />
-            </LinearGradient>
-          </TouchableOpacity>
-        </View>
+            <Ionicons name="add" size={28} color="#FFF" />
+          </LinearGradient>
+        </DraggableTodFab>
       )}
 
       {/* Premium Comment Menu Modal — Centered popup.
