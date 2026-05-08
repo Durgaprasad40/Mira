@@ -7,8 +7,10 @@
 
 export const DEFAULT_MAX_DISTANCE_KM = 50;
 
+/** Phase-1 Vibes / Explore Nearby threshold in km */
+export const EXPLORE_NEARBY_RADIUS_KM = 5;
 /** "Near Me" threshold in km for Explore categories */
-export const NEAR_ME_DISTANCE_KM = 5;
+export const NEAR_ME_DISTANCE_KM = EXPLORE_NEARBY_RADIUS_KM;
 
 export type ProfileWithDistance = {
   distance?: number | null;

@@ -181,6 +181,7 @@ export default defineSchema({
       v.literal('personal_growth'), v.literal('learning_new_skills'), v.literal('mindfulness'), v.literal('tech_enthusiast'), v.literal('startups'),
       v.literal('coding'), v.literal('community_service'), v.literal('sustainability'), v.literal('plant_parenting')
     )),
+    freeTonightExpiresAt: v.optional(v.number()),
     minAge: v.number(),
     maxAge: v.number(),
     maxDistance: v.number(),
@@ -446,6 +447,7 @@ export default defineSchema({
           v.literal('personal_growth'), v.literal('learning_new_skills'), v.literal('mindfulness'), v.literal('tech_enthusiast'), v.literal('startups'),
           v.literal('coding'), v.literal('community_service'), v.literal('sustainability'), v.literal('plant_parenting')
         ))),
+        freeTonightExpiresAt: v.optional(v.number()),
         minAge: v.optional(v.number()),
         maxAge: v.optional(v.number()),
         maxDistance: v.optional(v.number()),

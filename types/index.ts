@@ -276,6 +276,7 @@ export interface UserProfile {
   lookingFor: Gender[];
   relationshipIntent: RelationshipIntent[];
   activities: ActivityFilter[];
+  freeTonightExpiresAt?: number;
   minAge: number;
   maxAge: number;
   maxDistance: number; // in miles
@@ -946,6 +947,7 @@ export interface OnboardingState {
   lookingFor: Gender[];
   relationshipIntent: RelationshipIntent[];
   activities: ActivityFilter[];
+  freeTonightExpiresAt?: number;
   minAge: number;
   maxAge: number;
   maxDistance: number;

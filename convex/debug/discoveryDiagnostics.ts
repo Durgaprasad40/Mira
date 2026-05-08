@@ -17,7 +17,7 @@
  *   - Nearby           → convex/crossedPaths.ts :: getNearbyUsers
  *   - Discover         → convex/discover.ts     :: getDiscoverProfiles
  *   - Explore          → convex/discover.ts     :: buildExploreCandidates
- *                                                + assignExploreCategory
+ *                                                + mutual relationship / right-now assignment
  *   - Deep Connect     → convex/privateDiscover.ts :: getProfiles
  *   - Shared relations → convex/discoveryExclusions.ts :: loadDiscoveryExclusions
  *
@@ -31,6 +31,9 @@ import { v } from 'convex/values';
 import { query } from '../_generated/server';
 import type { Id } from '../_generated/dataModel';
 import { loadDiscoveryExclusions } from '../discoveryExclusions';
+import { normalizeRelationshipIntentValues } from '../../lib/discoveryNaming';
+import { EXPLORE_NEARBY_RADIUS_KM } from '../../lib/distanceRules';
+import { isFreeTonightActive } from '../../lib/freeTonight';
 
 // ---------------------------------------------------------------------------
 // Constants mirrored from production (intentionally duplicated to keep this
@@ -44,12 +47,10 @@ const PASS_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const ONLINE_NOW_MS = 10 * 60 * 1000;
 const ACTIVE_TODAY_MS = 24 * 60 * 60 * 1000;
 
-// 13-category exclusive Explore priority list (mirrors EXPLORE_ASSIGNMENT_PRIORITY
-// in convex/discover.ts). See that file for the canonical definition.
-const EXPLORE_ASSIGNMENT_PRIORITY: readonly string[] = [
-  // A. Free tonight
-  'free_tonight',
-  // B. Relationship intent
+// Explore priority lists mirror convex/discover.ts. Relationship categories are
+// assigned from mutual viewer-candidate goals; Right Now categories are assigned
+// from existing activity/distance signals.
+const RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY: readonly string[] = [
   'serious_vibes',
   'keep_it_casual',
   'exploring_vibes',
@@ -59,7 +60,10 @@ const EXPLORE_ASSIGNMENT_PRIORITY: readonly string[] = [
   'open_to_anything',
   'single_parent',
   'new_to_dating',
-  // C. Right Now (residual)
+];
+
+const RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY: readonly string[] = [
+  'free_tonight',
   'nearby',
   'online_now',
   'active_today',
@@ -153,11 +157,31 @@ function orientationAllowsCandidateGender(args: {
   return true;
 }
 
-// Mirrors matchesExploreCategory in convex/discover.ts.
-function exploreCandidateMatchesCategory(
+function getMutualRelationshipExploreAssignment(
+  viewerRelationshipIntent: readonly string[] | string | undefined | null,
+  candidateRelationshipIntent: readonly string[] | string | undefined | null,
+) {
+  const normalizedViewerGoals = normalizeRelationshipIntentValues(viewerRelationshipIntent);
+  const normalizedCandidateGoals = normalizeRelationshipIntentValues(candidateRelationshipIntent);
+  const viewerGoalSet = new Set<string>(normalizedViewerGoals);
+  const candidateGoalSet = new Set<string>(normalizedCandidateGoals);
+  const commonGoals = RELATIONSHIP_EXPLORE_ASSIGNMENT_PRIORITY.filter(
+    (goal) => viewerGoalSet.has(goal) && candidateGoalSet.has(goal),
+  );
+
+  return {
+    normalizedViewerGoals,
+    normalizedCandidateGoals,
+    commonGoals,
+    assignedRelationshipCategory: commonGoals[0] ?? null,
+  };
+}
+
+// Mirrors right-now assignment in convex/discover.ts.
+function exploreCandidateMatchesRightNowCategory(
   candidate: {
     activities: string[];
-    relationshipIntent: string[];
+    freeTonightExpiresAt?: number;
     distanceKm?: number;
     isActiveNow: boolean;
     wasActiveToday: boolean;
@@ -165,36 +189,24 @@ function exploreCandidateMatchesCategory(
   categoryId: string,
 ): boolean {
   const acts = candidate.activities;
-  const intents = candidate.relationshipIntent;
-  const intentHas = (k: string) => intents.includes(k);
   switch (categoryId) {
-    case 'serious_vibes': return intentHas('serious_vibes');
-    case 'keep_it_casual': return intentHas('keep_it_casual');
-    case 'exploring_vibes': return intentHas('exploring_vibes');
-    case 'see_where_it_goes': return intentHas('see_where_it_goes');
-    case 'open_to_vibes': return intentHas('open_to_vibes');
-    case 'just_friends': return intentHas('just_friends');
-    case 'open_to_anything': return intentHas('open_to_anything');
-    case 'single_parent': return intentHas('single_parent');
-    case 'new_to_dating': return intentHas('new_to_dating');
     case 'nearby':
-      return typeof candidate.distanceKm === 'number' && candidate.distanceKm <= 5;
+      return typeof candidate.distanceKm === 'number' && candidate.distanceKm <= EXPLORE_NEARBY_RADIUS_KM;
     case 'online_now': return candidate.isActiveNow === true;
     case 'active_today': return candidate.wasActiveToday === true;
-    case 'free_tonight': return acts.includes('free_tonight');
+    case 'free_tonight': return isFreeTonightActive(acts, candidate.freeTonightExpiresAt);
     default: return false;
   }
 }
 
-function assignExploreCategory(candidate: {
+function assignRightNowExploreCategory(candidate: {
   activities: string[];
-  relationshipIntent: string[];
   distanceKm?: number;
   isActiveNow: boolean;
   wasActiveToday: boolean;
 }): string | null {
-  for (const id of EXPLORE_ASSIGNMENT_PRIORITY) {
-    if (exploreCandidateMatchesCategory(candidate, id)) return id;
+  for (const id of RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY) {
+    if (exploreCandidateMatchesRightNowCategory(candidate, id)) return id;
   }
   return null;
 }
@@ -525,9 +537,8 @@ export const getDiscoveryDiagnostics = query({
       exploreReasons.push('candidate missing primaryPhotoUrl and displayPrimaryPhotoUrl');
     }
 
-    // Exclusive category assignment — if null, candidate is NEVER shown on
-    // any Explore tile (even without an active categoryId filter the UI
-    // groups by category).
+    // Explore has two category layers. Relationship tiles use mutual goals;
+    // Right Now tiles use activity/distance signals.
     const candDistKm =
       typeof viewer.latitude === 'number' &&
       typeof viewer.longitude === 'number' &&
@@ -548,17 +559,23 @@ export const getDiscoveryDiagnostics = query({
       activities: Array.isArray(candidate.activities)
         ? (candidate.activities as string[])
         : [],
-      relationshipIntent: Array.isArray(candidate.relationshipIntent)
-        ? (candidate.relationshipIntent as string[])
-        : [],
+      freeTonightExpiresAt: (candidate as any).freeTonightExpiresAt,
       distanceKm: candDistKm,
       isActiveNow: lastActive > 0 && now - lastActive <= ONLINE_NOW_MS,
       wasActiveToday: lastActive > 0 && now - lastActive <= ACTIVE_TODAY_MS,
     };
-    const assignedCategory = assignExploreCategory(exploreCandidateShape);
-    if (!assignedCategory) {
+    const relationshipAssignment = getMutualRelationshipExploreAssignment(
+      Array.isArray(viewer.relationshipIntent) ? (viewer.relationshipIntent as string[]) : [],
+      Array.isArray(candidate.relationshipIntent) ? (candidate.relationshipIntent as string[]) : [],
+    );
+    const assignedRightNowCategory = assignRightNowExploreCategory(exploreCandidateShape);
+    const assignedExploreCategories = [
+      relationshipAssignment.assignedRelationshipCategory,
+      assignedRightNowCategory,
+    ].filter(Boolean);
+    if (assignedExploreCategories.length === 0) {
       exploreReasons.push(
-        'no Explore category assignable (candidate has no matching activity, no listed relationshipIntent, no free_tonight flag, and no nearby/online/active-today signal)',
+        'no Explore category assignable (no mutual relationship goal and no Right Now signal)',
       );
     }
 
@@ -620,6 +637,7 @@ export const getDiscoveryDiagnostics = query({
         minAge: viewer.minAge,
         maxAge: viewer.maxAge,
         lookingFor: viewer.lookingFor,
+        relationshipIntent: viewer.relationshipIntent,
         age: myAge,
       },
       candidate: {
@@ -645,11 +663,14 @@ export const getDiscoveryDiagnostics = query({
         maxAge: candidate.maxAge,
         lookingFor: candidate.lookingFor,
         activities: candidate.activities,
+        freeTonightExpiresAt: (candidate as any).freeTonightExpiresAt,
         relationshipIntent: candidate.relationshipIntent,
         age: candAge,
         photoCount,
         safePublicPhotoCount: safePublicPhotos.length,
-        exploreCategory: assignedCategory,
+        exploreCategory: assignedExploreCategories[0] ?? null,
+        exploreRelationshipCategory: relationshipAssignment.assignedRelationshipCategory,
+        exploreRightNowCategory: assignedRightNowCategory,
       },
       pair: {
         isBlocked,
@@ -671,6 +692,11 @@ export const getDiscoveryDiagnostics = query({
       explore: {
         eligible: exploreReasons.length === 0,
         reasons: exploreReasons,
+        normalizedViewerRelationshipGoals: relationshipAssignment.normalizedViewerGoals,
+        normalizedCandidateRelationshipGoals: relationshipAssignment.normalizedCandidateGoals,
+        commonRelationshipGoals: relationshipAssignment.commonGoals,
+        assignedRelationshipCategory: relationshipAssignment.assignedRelationshipCategory,
+        assignedRightNowCategory,
       },
       deepConnect: {
         eligible: deepConnectReasons.length === 0,

@@ -10,6 +10,10 @@ import {
   normalizeRelationshipIntentValues,
 } from "../lib/discoveryNaming";
 import {
+  FREE_TONIGHT_ACTIVITY_ID,
+  FREE_TONIGHT_MAX_DURATION_MS,
+} from "../lib/freeTonight";
+import {
   CURRENT_PHASE2_SETUP_VERSION,
   PHASE2_SECTION1_PROMPT_IDS,
   PHASE2_SECTION2_PROMPT_IDS,
@@ -64,6 +68,37 @@ function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | un
 
 function normalizeRelationshipIntentForResponse(intent: string[] | undefined): string[] {
   return sanitizeRelationshipIntent(intent) ?? [];
+}
+
+function validatedFreeTonightExpiry(
+  activities: readonly string[] | undefined,
+  requestedExpiresAt: number | undefined,
+): number | undefined {
+  if (!activities?.includes(FREE_TONIGHT_ACTIVITY_ID)) {
+    return undefined;
+  }
+
+  const now = Date.now();
+  if (typeof requestedExpiresAt !== "number" || !Number.isFinite(requestedExpiresAt)) {
+    throw new Error("Free Tonight expiry is required when selecting Free Tonight.");
+  }
+  if (requestedExpiresAt <= now) {
+    throw new Error("Free Tonight expiry must be in the future.");
+  }
+
+  return Math.min(requestedExpiresAt, now + FREE_TONIGHT_MAX_DURATION_MS);
+}
+
+function applyFreeTonightExpiry(
+  cleanUpdates: Record<string, unknown>,
+  requestedExpiresAt: number | undefined,
+) {
+  if (!Array.isArray(cleanUpdates.activities)) return;
+
+  cleanUpdates.freeTonightExpiresAt = validatedFreeTonightExpiry(
+    cleanUpdates.activities as string[],
+    requestedExpiresAt,
+  );
 }
 
 function normalizeOnboardingDraft<T extends Record<string, any> | null | undefined>(draft: T): T {
@@ -188,6 +223,7 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     lookingFor: user.lookingFor ?? [],
     relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
     activities: user.activities ?? [],
+    freeTonightExpiresAt: user.freeTonightExpiresAt,
     minAge: user.minAge,
     maxAge: user.maxAge,
     maxDistance: user.maxDistance,
@@ -477,6 +513,7 @@ export const getUserById = query({
       lookingFor: user.lookingFor,
       relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
       activities: user.activities,
+      freeTonightExpiresAt: user.freeTonightExpiresAt,
       profilePrompts: user.profilePrompts ?? [],
       photos: orderedPhotos,
       photoBlurred: user.photoBlurred === true,
@@ -641,6 +678,7 @@ export const updateProfile = mutation({
         ),
       ),
     ),
+    freeTonightExpiresAt: v.optional(v.number()),
     pets: v.optional(
       v.array(
         v.union(
@@ -691,6 +729,7 @@ export const updateProfile = mutation({
       school,
       pets,
       insect,
+      freeTonightExpiresAt,
       ...otherUpdates
     } = args;
 
@@ -742,6 +781,7 @@ export const updateProfile = mutation({
         cleanUpdates[key] = value;
       }
     }
+    applyFreeTonightExpiry(cleanUpdates, freeTonightExpiresAt);
 
     await ctx.db.patch(userId, cleanUpdates);
     return { success: true };
@@ -1861,6 +1901,7 @@ export const completeOnboarding = mutation({
         ),
       ),
     ),
+    freeTonightExpiresAt: v.optional(v.number()),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
@@ -1885,7 +1926,7 @@ export const completeOnboarding = mutation({
     photoStorageIds: v.optional(v.array(v.id("_storage"))),
   },
   handler: async (ctx, args) => {
-    const { userId, token, photoStorageIds, pets, insect, ...updates } = args;
+    const { userId, token, photoStorageIds, pets, insect, freeTonightExpiresAt, ...updates } = args;
 
     // P0 SECURITY FIX: Validate session token to prevent unauthorized onboarding
     // This ensures only the authenticated user can complete their own onboarding
@@ -1947,6 +1988,7 @@ export const completeOnboarding = mutation({
         cleanUpdates.relationshipIntent as string[]
       );
     }
+    applyFreeTonightExpiry(cleanUpdates, freeTonightExpiresAt);
 
     if (cleanUpdates.profilePrompts) {
       cleanUpdates.profilePrompts = sanitizeProfilePrompts(

@@ -50,6 +50,7 @@ import {
   WorkStyleValue,
   CoreValueValue,
 } from '@/lib/constants';
+import { FREE_TONIGHT_ACTIVITY_ID, getNextLocalFreeTonightExpiry } from '@/lib/freeTonight';
 import type { ActivityFilter } from '@/types';
 
 // Section-based prompt types
@@ -1236,6 +1237,9 @@ export default function EditProfileScreen() {
 
       // Activities/Interests - always save (empty array is valid)
       patch.activities = activities;
+      patch.freeTonightExpiresAt = activities.includes(FREE_TONIGHT_ACTIVITY_ID)
+        ? getNextLocalFreeTonightExpiry()
+        : undefined;
       if (__DEV__) {
         console.log('[PROFILE_INTERESTS] Saving to demo store:', {
           count: activities.length,
@@ -1321,6 +1325,9 @@ export default function EditProfileScreen() {
       const activitiesPayload = shouldSaveInterests
         ? (activities as any) // Send current state (could be empty if user cleared)
         : undefined; // Omit field - don't touch backend
+      const freeTonightExpiresAtPayload = shouldSaveInterests && activities.includes(FREE_TONIGHT_ACTIVITY_ID)
+        ? getNextLocalFreeTonightExpiry()
+        : undefined;
 
       if (__DEV__) {
         console.log('[EDIT_PROFILE_SAVE_GUARD] Interests save decision:', {
@@ -1382,7 +1389,8 @@ export default function EditProfileScreen() {
         !sameStringArray((currentUser as any)?.pets ?? [], nextPets ?? []) ||
         ((currentUser as any)?.insect ?? null) !== (nextInsect ?? null) ||
         // Only consider activities when we intend to save them (otherwise preserve backend state).
-        (shouldSaveInterests ? !sameStringArray((currentUser as any)?.activities ?? [], activities as any) : false);
+        (shouldSaveInterests ? !sameStringArray((currentUser as any)?.activities ?? [], activities as any) : false) ||
+        (interestsDirtyRef.current && activities.includes(FREE_TONIGHT_ACTIVITY_ID));
 
       if (!userId) {
         console.warn('[EDIT_PROFILE] Cannot update profile - no userId');
@@ -1406,6 +1414,7 @@ export default function EditProfileScreen() {
           pets: nextPets,
           insect: nextInsect,
           activities: activitiesPayload,
+          freeTonightExpiresAt: freeTonightExpiresAtPayload,
         });
       } else {
         if (__DEV__) {

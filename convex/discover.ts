@@ -28,6 +28,8 @@ import {
   normalizeExploreCategoryId,
   normalizeRelationshipIntentValues,
 } from '../lib/discoveryNaming';
+import { EXPLORE_NEARBY_RADIUS_KM } from '../lib/distanceRules';
+import { isFreeTonightActive } from '../lib/freeTonight';
 import {
   CandidateProfile,
   CurrentUser,
@@ -1232,18 +1234,20 @@ type ExploreCandidateBase = {
   lookingFor: string[];
   relationshipIntent: string[];
   activities: string[];
+  freeTonightExpiresAt?: number;
   profilePrompts?: { question: string; answer: string }[];
   photoBlurred: boolean;
   isIncognito: boolean;
   createdAt: number;
   rankingLastActive: number;
   rankingScore: number;
+  nearbyDistanceKm?: number;
   sourceUserId: Id<'users'>;
   primaryPhotoUrl?: string;
   displayPrimaryPhotoUrl?: string;
 };
 
-type ExploreProfileResult = Omit<ExploreCandidateBase, 'rankingScore' | 'rankingLastActive' | 'sourceUserId' | 'primaryPhotoUrl' | 'displayPrimaryPhotoUrl'> & {
+type ExploreProfileResult = Omit<ExploreCandidateBase, 'rankingScore' | 'rankingLastActive' | 'nearbyDistanceKm' | 'sourceUserId' | 'primaryPhotoUrl' | 'displayPrimaryPhotoUrl'> & {
   photos: { url: string }[];
 };
 
@@ -1275,13 +1279,8 @@ function normalizePublicExploreCategoryId(value: string | undefined): ExploreCat
   return undefined;
 }
 
-function candidateMatchesAnyIntent(candidate: { relationshipIntent: string[] }, targets: string[]): boolean {
-  const normalizedCandidateIntents = normalizeRelationshipIntentValues(candidate.relationshipIntent);
-  return targets.some((intent) => normalizedCandidateIntents.includes(intent as any));
-}
-
-function isNearMeCandidate(candidate: { distance?: number }): boolean {
-  return typeof candidate.distance === 'number' && candidate.distance <= 5;
+function isNearMeCandidate(candidate: { nearbyDistanceKm?: number }): boolean {
+  return typeof candidate.nearbyDistanceKm === 'number' && candidate.nearbyDistanceKm <= EXPLORE_NEARBY_RADIUS_KM;
 }
 
 function isOnlineNowCandidate(candidate: { isActiveNow: boolean }): boolean {
@@ -1292,26 +1291,8 @@ function isActiveTodayCandidate(candidate: { wasActiveToday: boolean }): boolean
   return candidate.wasActiveToday === true;
 }
 
-function matchesExploreCategory(candidate: ExploreCandidateBase, categoryId: ExploreCategoryId): boolean {
+function matchesRightNowExploreCategory(candidate: ExploreCandidateBase, categoryId: RightNowExploreCategoryId): boolean {
   switch (categoryId) {
-    case 'serious_vibes':
-      return candidateMatchesAnyIntent(candidate, ['serious_vibes']);
-    case 'keep_it_casual':
-      return candidateMatchesAnyIntent(candidate, ['keep_it_casual']);
-    case 'exploring_vibes':
-      return candidateMatchesAnyIntent(candidate, ['exploring_vibes']);
-    case 'see_where_it_goes':
-      return candidateMatchesAnyIntent(candidate, ['see_where_it_goes']);
-    case 'open_to_vibes':
-      return candidateMatchesAnyIntent(candidate, ['open_to_vibes']);
-    case 'just_friends':
-      return candidateMatchesAnyIntent(candidate, ['just_friends']);
-    case 'open_to_anything':
-      return candidateMatchesAnyIntent(candidate, ['open_to_anything']);
-    case 'single_parent':
-      return candidateMatchesAnyIntent(candidate, ['single_parent']);
-    case 'new_to_dating':
-      return candidateMatchesAnyIntent(candidate, ['new_to_dating']);
     case 'nearby':
       return isNearMeCandidate(candidate);
     case 'online_now':
@@ -1319,7 +1300,7 @@ function matchesExploreCategory(candidate: ExploreCandidateBase, categoryId: Exp
     case 'active_today':
       return isActiveTodayCandidate(candidate);
     case 'free_tonight':
-      return candidate.activities.includes('free_tonight');
+      return isFreeTonightActive(candidate.activities, candidate.freeTonightExpiresAt);
     default:
       return false;
   }
@@ -1412,7 +1393,7 @@ function assignRightNowExploreCategory(
   candidate: ExploreCandidateBase,
 ): RightNowExploreCategoryId | null {
   for (const categoryId of RIGHT_NOW_EXPLORE_ASSIGNMENT_PRIORITY) {
-    if (matchesExploreCategory(candidate, categoryId)) {
+    if (matchesRightNowExploreCategory(candidate, categoryId)) {
       return categoryId;
     }
   }
@@ -1726,12 +1707,14 @@ async function buildExploreCandidates(
         lookingFor: candidateLookingFor,
         relationshipIntent: normalizedCandidateRelationshipIntent,
         activities: candidateActivities,
+        freeTonightExpiresAt: user.freeTonightExpiresAt,
         profilePrompts: user.profilePrompts,
         photoBlurred: user.photoBlurred === true,
         isIncognito: user.incognitoMode === true,
         createdAt: user.createdAt ?? user._creationTime,
         rankingLastActive: user.lastActive ?? 0,
         rankingScore: buildExploreRankingScore(user, currentUser, 1),
+        nearbyDistanceKm: rawDistance,
         sourceUserId: user._id,
         primaryPhotoUrl: user.primaryPhotoUrl,
         displayPrimaryPhotoUrl: user.displayPrimaryPhotoUrl,
@@ -1759,7 +1742,7 @@ async function buildExploreCandidates(
 
   candidates.sort((a, b) => {
     if (activeCategoryId === 'nearby') {
-      return (a.distance ?? 999) - (b.distance ?? 999);
+      return (a.nearbyDistanceKm ?? 999) - (b.nearbyDistanceKm ?? 999);
     }
     if (activeCategoryId === 'online_now' || activeCategoryId === 'active_today') {
       return b.rankingLastActive - a.rankingLastActive;
@@ -1808,7 +1791,7 @@ async function hydrateExploreProfiles(
 
       if (publicPhotos.length === 0) continue;
 
-      const { rankingScore, rankingLastActive, sourceUserId, primaryPhotoUrl, displayPrimaryPhotoUrl, ...safeCandidate } = candidate;
+      const { rankingScore, rankingLastActive, nearbyDistanceKm, sourceUserId, primaryPhotoUrl, displayPrimaryPhotoUrl, ...safeCandidate } = candidate;
       results.push({
         ...safeCandidate,
         photos: publicPhotos,

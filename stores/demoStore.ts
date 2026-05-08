@@ -98,6 +98,7 @@ export interface DemoProfile {
   lastSeenArea?: string;
   relationshipIntent?: string[];
   activities?: string[];
+  freeTonightExpiresAt?: number;
   profilePrompts?: { question: string; answer: string }[];
   photos: { url: string }[];
   lastLocationUpdatedAt?: number;
@@ -213,6 +214,7 @@ export interface DemoUserProfile {
   lookingFor?: string[];
   relationshipIntent?: string[];
   activities?: string[];
+  freeTonightExpiresAt?: number;
   profilePrompts?: { question: string; answer: string }[];
   minAge?: number;
   maxAge?: number;

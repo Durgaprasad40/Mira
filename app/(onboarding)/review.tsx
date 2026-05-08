@@ -58,6 +58,7 @@ import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { saveAuthBootCache } from "@/stores/authBootCache";
 import { useScreenTrace } from "@/lib/devTrace";
+import { FREE_TONIGHT_ACTIVITY_ID, getNextLocalFreeTonightExpiry } from "@/lib/freeTonight";
 
 /**
  * Parse "YYYY-MM-DD" string to local Date object.
@@ -325,6 +326,9 @@ export default function ReviewScreen() {
           lookingFor: lookingFor as string[],
           relationshipIntent: sanitizeRelationshipIntent(relationshipIntent as string[]),
           activities: activities as string[],
+          freeTonightExpiresAt: activities.includes(FREE_TONIGHT_ACTIVITY_ID as any)
+            ? getNextLocalFreeTonightExpiry()
+            : undefined,
           profilePrompts,
           seedQuestions,
           minAge,
@@ -417,6 +421,9 @@ export default function ReviewScreen() {
           return sanitized.length > 0 ? sanitized : undefined;
         })(),
         activities: activities.length > 0 ? activities : undefined,
+        freeTonightExpiresAt: activities.includes(FREE_TONIGHT_ACTIVITY_ID as any)
+          ? getNextLocalFreeTonightExpiry()
+          : undefined,
         minAge,
         maxAge,
         maxDistance,

@@ -1,4 +1,5 @@
-import { isWithinAllowedDistance, NEAR_ME_DISTANCE_KM } from "@/lib/distanceRules";
+import { isWithinAllowedDistance, EXPLORE_NEARBY_RADIUS_KM } from "@/lib/distanceRules";
+import { isFreeTonightActive } from "@/lib/freeTonight";
 
 export type ExploreCategory = {
   id: string;
@@ -179,7 +180,7 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     icon: "📍",
     color: TILE_COLORS.emerald,
     kind: "relationship",
-    predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, NEAR_ME_DISTANCE_KM),
+    predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, EXPLORE_NEARBY_RADIUS_KM),
   },
   {
     id: "online_now",
@@ -206,7 +207,7 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     icon: "🌙",
     color: TILE_COLORS.indigo,
     kind: "relationship",
-    predicate: (p) => p?.activities?.includes("free_tonight"),
+    predicate: (p) => isFreeTonightActive(p?.activities, p?.freeTonightExpiresAt),
   },
 ];
 
