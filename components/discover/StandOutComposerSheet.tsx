@@ -189,6 +189,8 @@ export function StandOutComposerSheet({
   // Send is always enabled — backend allows message-less stand-outs and the
   // current Phase-1/Phase-2 mutations both accept `message` as optional.
   const charCount = message.length;
+  const hasMessage = message.trim().length > 0;
+  const sendLabel = hasMessage ? 'Send Stand Out' : 'Send Stand Out without message';
   const charCountColor =
     charCount >= STANDOUT_COMPOSER_MAX_CHARS - 12
       ? '#E94560'
@@ -318,7 +320,7 @@ export function StandOutComposerSheet({
                   activeOpacity={0.9}
                   onPress={handleSend}
                   accessibilityRole="button"
-                  accessibilityLabel={`Send Stand Out${
+                  accessibilityLabel={`${sendLabel}${
                     targetName ? ` to ${targetName}` : ''
                   }`}
                   style={styles.sendWrap}
@@ -335,7 +337,14 @@ export function StandOutComposerSheet({
                       color="#FFFFFF"
                       style={{ marginRight: 8 }}
                     />
-                    <Text style={styles.sendText}>Send Stand Out</Text>
+                    <Text
+                      style={styles.sendText}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.82}
+                    >
+                      {sendLabel}
+                    </Text>
                   </LinearGradient>
                 </TouchableOpacity>
               </View>
@@ -452,6 +461,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
   },
   sendWrap: {
+    flexShrink: 1,
     borderRadius: 999,
     overflow: 'hidden',
     shadowColor: '#2196F3',

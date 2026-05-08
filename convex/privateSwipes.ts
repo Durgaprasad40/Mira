@@ -117,6 +117,76 @@ function normalizeStandOutMessage(message: string | undefined): string | undefin
   return softMaskText(trimmed);
 }
 
+async function upsertPhase2LikeNotificationForAction(
+  ctx: MutationCtx,
+  args: {
+    fromUserId: Id<'users'>;
+    toUserId: Id<'users'>;
+    likeId: Id<'privateLikes'>;
+    action: 'like' | 'super_like';
+    now: number;
+    push?: boolean;
+  }
+): Promise<void> {
+  if (!(await shouldCreatePhase2DeepConnectNotification(ctx, args.toUserId))) {
+    return;
+  }
+
+  const title =
+    args.action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜';
+  const body = 'Check your likes in Deep Connect to see who!';
+  const source = args.action === 'super_like' ? 'stand_out' : 'deep_connect';
+  const data = {
+    otherUserId: args.fromUserId as string,
+    source,
+    action: args.action,
+    likeId: args.likeId as string,
+  };
+  const dedupeKey = `p2_like:${args.fromUserId}:${args.toUserId}`;
+  const expiresAt = args.now + 7 * 24 * 60 * 60 * 1000;
+
+  const existing = await ctx.db
+    .query('privateNotifications')
+    .withIndex('by_user_dedupe', (q) =>
+      q.eq('userId', args.toUserId).eq('dedupeKey', dedupeKey)
+    )
+    .first();
+
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      type: 'phase2_like',
+      title,
+      body,
+      data,
+      phase: 'phase2',
+      createdAt: args.now,
+      expiresAt,
+    });
+  } else {
+    await ctx.db.insert('privateNotifications', {
+      userId: args.toUserId,
+      type: 'phase2_like',
+      title,
+      body,
+      data,
+      phase: 'phase2',
+      dedupeKey,
+      createdAt: args.now,
+      expiresAt,
+    });
+  }
+
+  if (args.push) {
+    await dispatchPrivatePush(ctx, {
+      userId: args.toUserId,
+      type: 'phase2_like',
+      title,
+      body,
+      data,
+    });
+  }
+}
+
 function normalizeStandOutReply(replyText: string): string {
   const trimmed = replyText.trim();
   if (trimmed.length === 0) {
@@ -520,6 +590,106 @@ export const swipe = mutation({
 
     // FIX 2: Idempotency safety - return success instead of throwing error
     if (existingLike) {
+      if (action === 'super_like' && existingLike.action === 'like') {
+        const toUser = await ctx.db.get(toUserId);
+        if (!isPhase2UserEligible(toUser)) {
+          throw new Error('Target user not available in Phase-2');
+        }
+        if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
+          throw new Error('Cannot like this user');
+        }
+
+        const normalizedStandOutMessage = normalizeStandOutMessage(message);
+        await assertStandOutQuotaAvailable(ctx, fromUserId, now);
+
+        const likePatch: {
+          action: 'super_like';
+          createdAt: number;
+          message?: string;
+        } = {
+          action: 'super_like',
+          createdAt: now,
+        };
+        if (normalizedStandOutMessage) {
+          likePatch.message = normalizedStandOutMessage;
+        }
+        await ctx.db.patch(existingLike._id, likePatch);
+
+        const { user1Id, user2Id } = getPhase2UserPair(fromUserId, toUserId);
+        const existingMatch = await ctx.db
+          .query('privateMatches')
+          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+          .first();
+
+        if (existingMatch?.isActive === true) {
+          if (existingMatch.matchSource !== 'super_like') {
+            await ctx.db.patch(existingMatch._id, { matchSource: 'super_like' });
+          }
+
+          const ensured = await ensurePhase2MatchAndConversation(ctx, {
+            userAId: fromUserId,
+            userBId: toUserId,
+            now,
+            source: 'deep_connect',
+            matchKind: 'super_like',
+            connectionSource: 'desire_super_like',
+          });
+
+          const existingConversation = await ctx.db.get(ensured.conversationId);
+          if (existingConversation?.connectionSource !== 'desire_super_like') {
+            await ctx.db.patch(ensured.conversationId, {
+              connectionSource: 'desire_super_like',
+            });
+          }
+
+          if (normalizedStandOutMessage) {
+            await insertStandOutTextMessageIfMissing(ctx, {
+              conversationId: ensured.conversationId,
+              senderId: fromUserId,
+              recipientId: toUserId,
+              content: normalizedStandOutMessage,
+              createdAt: now,
+              clientMessageId: `standout:${existingLike._id}:upgrade`,
+            });
+          }
+
+          return {
+            success: true,
+            isMatch: true,
+            matchId: ensured.matchId,
+            conversationId: ensured.conversationId,
+            alreadyMatched: true,
+            alreadySent: true,
+            upgradedToStandOut: true,
+            likeId: existingLike._id,
+            existingAction: 'like',
+            action: 'super_like',
+            source: ensured.source,
+          };
+        }
+
+        await upsertPhase2LikeNotificationForAction(ctx, {
+          fromUserId,
+          toUserId,
+          likeId: existingLike._id,
+          action: 'super_like',
+          now,
+          push: true,
+        });
+
+        return {
+          success: true,
+          isMatch: false,
+          alreadyMatched: false,
+          alreadySent: true,
+          upgradedToStandOut: true,
+          likeId: existingLike._id,
+          existingAction: 'like',
+          action: 'super_like',
+          source: 'deep_connect',
+        };
+      }
+
       if (action === 'like' || action === 'super_like') {
         const { user1Id, user2Id } = getPhase2UserPair(fromUserId, toUserId);
         const existingMatch = await ctx.db

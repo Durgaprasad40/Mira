@@ -415,7 +415,8 @@ export default function Phase2FullProfileScreen() {
             `/(main)/match-celebration?matchId=${matchResult.matchId}&userId=${profileUserId}&mode=phase2&conversationId=${matchResult.conversationId || ''}&source=${matchResult.source || 'deep_connect'}&alreadyMatched=${matchResult.alreadyMatched ? '1' : '0'}` as any
           );
         } else {
-          Toast.show('Stand Out sent! They will see your message.');
+          const hasMessage = standOutResult.message.trim().length > 0;
+          Toast.show(hasMessage ? 'Stand Out sent! They will see your message.' : 'Stand Out sent.');
           router.back();
         }
       } catch (error: any) {

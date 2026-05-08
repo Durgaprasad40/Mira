@@ -601,6 +601,66 @@ const CATEGORY_TAG_LABELS: Record<string, string> = {
   free_tonight: "Free tonight",
 };
 
+// ─────────────────────────────────────────────────────────────────────────
+// Shared swipe direction classifier — used by BOTH the live overlay preview
+// (UI thread, inside panGesture.onUpdate worklet) and the final commit
+// decision (JS thread, inside handlePanEnd) so the icon the user sees can
+// never disagree with the action that fires on release.
+//
+// Returns "left" | "right" | "up" | null. `null` is the diagonal/ambiguous
+// dead-zone — neither axis dominates, so no overlay icon is shown and on
+// release the gesture resets without committing an action.
+//
+// Direction rules (identical for preview and commit; only the distance/
+// velocity thresholds differ):
+//   - "up"    : dy < 0 AND |dy| ≥ |dx| * dominanceRatio AND
+//               (|dy| ≥ distanceY OR |vy| ≥ velocityY).
+//   - "right" : dx > 0 AND |dx| ≥ |dy| * dominanceRatio AND
+//               (|dx| ≥ distanceX OR vx ≥ velocityX).
+//   - "left"  : dx < 0 AND |dx| ≥ |dy| * dominanceRatio AND
+//               (|dx| ≥ distanceX OR -vx ≥ velocityX).
+// dominanceRatio = 1.25 means the winning axis must be at least 25 % larger
+// than the other; 30°-ish diagonal swipes fail the test → null.
+//
+// This function is a Reanimated worklet (annotated below) so it is usable
+// from inside Gesture.Pan().onUpdate() on the UI thread, while still being
+// callable as a normal function on the JS thread from handlePanEnd.
+function classifySwipeDirection(
+  dx: number,
+  dy: number,
+  vx: number,
+  vy: number,
+  distanceX: number,
+  distanceY: number,
+  velocityX: number,
+  velocityY: number,
+  dominanceRatio: number,
+): "left" | "right" | "up" | null {
+  'worklet';
+  const absX = dx < 0 ? -dx : dx;
+  const absY = dy < 0 ? -dy : dy;
+  const absVy = vy < 0 ? -vy : vy;
+
+  // Upward intent first: dy must be negative AND vertical clearly dominates.
+  if (dy < 0 && absY >= absX * dominanceRatio) {
+    if (absY >= distanceY || absVy >= velocityY) {
+      return "up";
+    }
+  }
+
+  // Horizontal intent: horizontal must clearly dominate vertical.
+  if (absX >= absY * dominanceRatio) {
+    if (dx > 0 && (absX >= distanceX || vx >= velocityX)) {
+      return "right";
+    }
+    if (dx < 0 && (absX >= distanceX || -vx >= velocityX)) {
+      return "left";
+    }
+  }
+
+  return null;
+}
+
 // 🔒 LOCKED: Do not change Discover stack orchestration (Phase-1/2 modes, queue) without audit approval
 export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader, exploreCategoryId, profileActionScope, onStackEmpty }: DiscoverCardStackProps) {
   const dark = theme === "dark";
@@ -3054,17 +3114,43 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       resetPosition();
       return;
     }
-    if (dx < -thresholdX || vx < -velocityX) {
-      animateSwipeRef.current("left", vx);
-      return;
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+    const absVy = Math.abs(vy);
+    const isUpward = dy < 0;
+
+    // Single source of truth: same classifier the live preview uses, but
+    // gated by COMMIT thresholds (full thresholdX / thresholdY / velocity).
+    // dominanceRatio 1.25 enforces that diagonal/ambiguous gestures resolve
+    // to null (deadzone) rather than firing the wrong action.
+    const direction = classifySwipeDirection(
+      dx,
+      dy,
+      vx,
+      vy,
+      thresholdX,
+      thresholdY,
+      velocityX,
+      velocityY,
+      1.25,
+    );
+
+    if (__DEV__) {
+      // Dev-only: one log per release, NOT per frame. No PII.
+      console.log("[SWIPE_CLASSIFY]", {
+        dx: Math.round(dx),
+        dy: Math.round(dy),
+        vx: Number(vx.toFixed(2)),
+        vy: Number(vy.toFixed(2)),
+        direction,
+        phase: isPhase2 ? "phase2" : "phase1",
+      });
     }
-    if (dx > thresholdX || vx > velocityX) {
-      animateSwipeRef.current("right", vx);
-      return;
-    }
-    if (dy < -thresholdY || vy < -velocityY) {
+
+    if (direction === "up") {
       // Up swipe opens the inline Stand Out composer sheet over the current
-      // card (no separate route / no white-page transition).
+      // card (no separate route / no white-page transition). Phase-2 routes
+      // the standout/super-like through the same composer flow.
       resetPosition();
       const c = currentRef.current;
       if (!hasReachedStandOutLimit() && c) {
@@ -3072,12 +3158,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       }
       return;
     }
+
+    if (direction === "left") {
+      animateSwipeRef.current("left", vx);
+      return;
+    }
+
+    if (direction === "right") {
+      animateSwipeRef.current("right", vx);
+      return;
+    }
+
+    // direction === null → diagonal/ambiguous deadzone OR insufficient
+    // distance/velocity. Fall through to profile-open / pull-refresh checks
+    // so existing gentle-pull behaviours are preserved.
+
     // P1-FIX: Hardened pull-up gesture for profile open
     // Must be: intentionally vertical, sufficient distance, not too far (Stand Out territory)
-    const absX = Math.abs(dx);
-    const absY = Math.abs(dy);
-    const absVy = Math.abs(vy);
-    const isUpward = dy < 0;
     const isPrimarilyVertical = absY > absX * 2; // Must be clearly vertical (2:1 ratio)
     const hasMinDistance = absY >= profileOpenMinDistance;
     const isBelowStandOut = absY < profileOpenMaxDistance;
@@ -3126,16 +3223,41 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         currentPanX.value = event.translationX;
         currentPanY.value = event.translationY;
 
-        // Calculate overlay opacity (UI thread)
-        const absX = Math.abs(event.translationX);
-        const absY = Math.abs(event.translationY);
-        overlayOpacity.value = Math.min(Math.max(absX, absY) / 60, 1);
+        // Live preview classifier — SAME function handlePanEnd uses, but with
+        // smaller PREVIEW thresholds so the icon reveals naturally during the
+        // drag. The dominance ratio (1.25) and direction rules are identical,
+        // so what the user sees mid-gesture cannot disagree with the action
+        // that actually fires on release.
+        const previewDistanceX = thresholdX * 0.35;
+        const previewDistanceY = thresholdY * 0.35;
+        const scaledVx = event.velocityX / 1000;
+        const scaledVy = event.velocityY / 1000;
 
-        // Calculate new direction
-        let newDir: "left" | "right" | "up" | null = null;
-        if (event.translationY < -15 && absY > absX) newDir = "up";
-        else if (event.translationX < -10) newDir = "left";
-        else if (event.translationX > 10) newDir = "right";
+        const newDir = classifySwipeDirection(
+          event.translationX,
+          event.translationY,
+          scaledVx,
+          scaledVy,
+          previewDistanceX,
+          previewDistanceY,
+          velocityX,
+          velocityY,
+          1.25,
+        );
+
+        // Axis-aware opacity: ramp by the dominant axis of the chosen zone.
+        // When direction is null (diagonal deadzone) opacity stays 0, so the
+        // overlay is fully invisible until intent is unambiguous — fixes
+        // "icon flickers between left/right during a slow upward drag".
+        const absX = event.translationX < 0 ? -event.translationX : event.translationX;
+        const absY = event.translationY < 0 ? -event.translationY : event.translationY;
+        let progress = 0;
+        if (newDir === "up") {
+          progress = absY / thresholdY;
+        } else if (newDir === "left" || newDir === "right") {
+          progress = absX / thresholdX;
+        }
+        overlayOpacity.value = progress > 1 ? 1 : progress < 0 ? 0 : progress;
 
         // Update React state only when direction changes (via JS thread)
         runOnJS(updateOverlayDirection)(newDir);
@@ -3154,7 +3276,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         // Gesture was cancelled/interrupted
       }),
     // P0-001 FIX: Using stable ref pattern - onPanEndWrapper has empty deps so it never changes
-    [panAX, panAY, panBX, panBY, activeSlotShared, overlayOpacity, updateOverlayDirection, onPanEndWrapper]
+    [panAX, panAY, panBX, panBY, activeSlotShared, overlayOpacity, thresholdX, thresholdY, velocityX, velocityY, updateOverlayDirection, onPanEndWrapper]
   );
 
   // Handle stand-out result from route screen
