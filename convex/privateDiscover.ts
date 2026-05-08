@@ -18,6 +18,92 @@ const MAX_PENDING_DELETION_ROWS = 5000;
 const IMPRESSION_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 const MAX_IMPRESSIONS_PER_WINDOW = 300;
 
+// P1-1: Phase-2 deck pagination caps.
+// Bound the candidate slice we pull per request so a request never
+// .collect()s the entire enabled-private-profile table. We pull the most
+// recently-active enabled profiles using the new compound
+// by_enabled_updatedAt index, so the cap retains the most-recently-active
+// users while bounding memory + CPU. Tail of the distribution beyond this
+// cap is excluded from a single request window; mitigated by 4h
+// impression suppression and updatedAt-desc ordering rotating older
+// profiles back into view over time.
+const MAX_PHASE2_CANDIDATES = 1500;
+// Server-side hard cap on requested limit; protects against client over-asks.
+const MAX_PHASE2_RESULT_LIMIT = 100;
+
+// P2-3: Phase-2 fallback pool helpers (inlined to avoid cross-file
+// dependency churn). Mirrors the Phase-1 `qualifiesForFallback` pattern.
+// When the strict ranked pool is too small (typically because the viewer
+// applied narrow intent filters), we may relax the strict intent-key
+// match constraint and admit candidates that still share strong
+// compatibility signals. Hard safety / privacy exclusions (block, report,
+// matched, swiped, deletion-pending, hideFromDeepConnect, !isSetupComplete,
+// suppression) are NEVER bypassed — those are enforced separately at the
+// fallback-block call-site below.
+//
+// Strong-signal categories (each contributes 1 toward the threshold):
+//   1. >=1 shared private intent key (relaxed: any overlap, not exact key).
+//   2. >=2 shared private desire tags.
+//   3. >=3 shared hobbies.
+//   4. Same smoking value.
+//   5. Same drinking value.
+//   6. Same city value.
+const PHASE2_FALLBACK_MIN_SIGNALS = 2;
+
+function arrayOverlapCount(
+  a: ReadonlyArray<string> | undefined | null,
+  b: ReadonlyArray<string> | undefined | null,
+): number {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || b.length === 0) return 0;
+  const setB = new Set(b);
+  let count = 0;
+  for (const x of a) if (setB.has(x)) count += 1;
+  return count;
+}
+
+function countPhase2FallbackSignals(
+  viewer: {
+    privateIntentKeys?: string[];
+    privateDesireTagKeys?: string[];
+    hobbies?: string[];
+    smoking?: string;
+    drinking?: string;
+    city?: string;
+  },
+  candidate: {
+    privateIntentKeys?: string[];
+    privateDesireTagKeys?: string[];
+    hobbies?: string[];
+    smoking?: string;
+    drinking?: string;
+    city?: string;
+  },
+): number {
+  let signals = 0;
+  if (arrayOverlapCount(viewer.privateIntentKeys, candidate.privateIntentKeys) >= 1) signals += 1;
+  if (arrayOverlapCount(viewer.privateDesireTagKeys, candidate.privateDesireTagKeys) >= 2) signals += 1;
+  if (arrayOverlapCount(viewer.hobbies, candidate.hobbies) >= 3) signals += 1;
+  if (
+    typeof viewer.smoking === 'string' &&
+    typeof candidate.smoking === 'string' &&
+    viewer.smoking.length > 0 &&
+    viewer.smoking === candidate.smoking
+  ) signals += 1;
+  if (
+    typeof viewer.drinking === 'string' &&
+    typeof candidate.drinking === 'string' &&
+    viewer.drinking.length > 0 &&
+    viewer.drinking === candidate.drinking
+  ) signals += 1;
+  if (
+    typeof viewer.city === 'string' &&
+    typeof candidate.city === 'string' &&
+    viewer.city.length > 0 &&
+    viewer.city === candidate.city
+  ) signals += 1;
+  return signals;
+}
+
 /** Haversine distance in km (rounded), matches users.getUserById / discover helpers */
 function distanceKmBetween(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
@@ -217,10 +303,19 @@ export const getProfiles = query({
     const swipedUserIds = new Set(myPrivateSwipes.map((s) => s.toUserId as string));
     const reportedUserIds = new Set(myReports.map((r) => r.reportedUserId as string));
 
+    // P1-1: Bounded, recency-ordered candidate fetch.
+    // Replaces the prior unbounded .collect() over the entire enabled
+    // private-profile table. Uses the new compound index
+    // by_enabled_updatedAt to pull at most MAX_PHASE2_CANDIDATES rows
+    // ordered by updatedAt desc. Hard safety / privacy filters below
+    // (self / setup-incomplete / blocked / reported / matched / swiped /
+    // conversation-partner / deletion-pending / hideFromDeepConnect /
+    // intent-key match / suppression) are unchanged.
     const profiles = await ctx.db
       .query('userPrivateProfiles')
-      .withIndex('by_enabled', (q) => q.eq('isPrivateEnabled', true))
-      .collect();
+      .withIndex('by_enabled_updatedAt', (q) => q.eq('isPrivateEnabled', true))
+      .order('desc')
+      .take(MAX_PHASE2_CANDIDATES);
 
     // Viewer private profile signals (Phase-2 only) for compatibility-aware ranking.
     // NOTE: This does NOT affect eligibility filtering; it only improves ordering.
@@ -258,6 +353,25 @@ export const getProfiles = query({
     // - Users with pending deletion
     // - Users who opted out of Deep Connect discovery (hideFromDeepConnect === true; missing = visible)
     // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
+    //
+    // P1-2 RECIPROCITY DECISION (intentional non-reciprocal Phase-2 design).
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase-1 (public Discover) enforces reciprocal age / gender / orientation
+    // / distance / lookingFor preferences in `convex/discover.ts`. Phase-2
+    // (Deep Connect) intentionally does NOT enforce reciprocal demographic
+    // preferences. Phase-2 is an intent + vibes pool: shared private intent
+    // keys, desire tags, hobbies, lifestyle alignment, and text affinity are
+    // the primary matching signals. Re-applying public-side demographic
+    // reciprocity here would defeat the product premise (people opt-in to a
+    // looser, intent-driven private surface) and would also re-introduce
+    // information that Phase-2 deliberately hides from peers (e.g. exact
+    // city). Hard SAFETY / PRIVACY exclusions remain enforced above:
+    // self, !isSetupComplete, blocked (either direction via blockedUserIds),
+    // existing conversation partner, matched, unmatched, swiped, reported,
+    // pending-deletion, hideFromDeepConnect, viewer's intent-key filter, and
+    // 4-hour impression suppression below. Underage / invalid / banned /
+    // inactive / privacy-hidden / unsafe-photo users are excluded upstream
+    // (they never get isSetupComplete=true on userPrivateProfiles).
     const eligible = profiles.filter(
       (p) => {
         const profileIntentKeys = getProfileIntentKeys(
@@ -337,8 +451,69 @@ export const getProfiles = query({
     // Combine: unsuppressed first, then suppressed at back
     const ranked = [...unsuppressed, ...suppressed];
 
-    const limit = args.limit ?? 50;
-    const limited = ranked.slice(0, limit);
+    // P2-5: Server-side cap on requested limit. Frontend may ask for up to
+    // 80 per request; we hard-cap at MAX_PHASE2_RESULT_LIMIT = 100.
+    const requestedLimit = Math.max(1, args.limit ?? 50);
+    const limit = Math.min(requestedLimit, MAX_PHASE2_RESULT_LIMIT);
+
+    // P2-3: Phase-2 fallback pool.
+    // ─────────────────────────────────────────────────────────────────────
+    // If the strict ranked pool comes up short (typically because the viewer
+    // applied narrow intent filters via requestedIntentKeySet), append a
+    // fallback block of profiles that:
+    //   * pass ALL hard safety / privacy exclusions (re-applied below — we
+    //     re-evaluate against the same Sets used for `eligible`),
+    //   * relax ONLY the intent-key match constraint, and
+    //   * still share at least PHASE2_FALLBACK_MIN_SIGNALS strong
+    //     compatibility signals with the viewer (countPhase2FallbackSignals).
+    // The fallback block is always rendered AFTER the strict ranked pool,
+    // is de-duplicated against it, and never bypasses block / report /
+    // matched / swiped / conversation-partner / deletion-pending /
+    // hideFromDeepConnect / setup-incomplete / suppression rules.
+    const fallbackBlock: typeof ranked = [];
+    if (
+      viewerSignals &&
+      requestedIntentKeySet &&
+      ranked.length < limit
+    ) {
+      const rankedIds = new Set(
+        ranked.map(({ profile }) => profile.userId as string)
+      );
+      const fallbackCandidates: typeof ranked = [];
+      for (const p of profiles) {
+        // Re-apply ALL hard exclusions; ONLY intent-key match is relaxed.
+        if (p.userId === viewerUserId) continue;
+        if (!p.isSetupComplete) continue;
+        if (blockedUserIds.has(p.userId as string)) continue;
+        if (conversationPartnerIds.has(p.userId as string)) continue;
+        if (matchedUserIds.has(p.userId as string)) continue;
+        if (unmatchedUserIds.has(p.userId as string)) continue;
+        if (swipedUserIds.has(p.userId as string)) continue;
+        if (reportedUserIds.has(p.userId as string)) continue;
+        if (deletedUserIds.has(p.userId as string)) continue;
+        if (p.hideFromDeepConnect === true) continue;
+        if (rankedIds.has(p.userId as string)) continue;
+
+        if (countPhase2FallbackSignals(viewerSignals as any, p as any) < PHASE2_FALLBACK_MIN_SIGNALS) continue;
+
+        const metrics = metricsMap.get(p.userId as string);
+        const score = computeFinalScore(p, metrics, viewerId, viewerSignals);
+        fallbackCandidates.push({ profile: p, score });
+      }
+      fallbackCandidates.sort((a, b) => b.score - a.score);
+      // Suppression order preserved within the fallback block: not-recently-seen
+      // first, then recently-seen at the end (mirrors the strict-pool ordering).
+      const fbUnsuppressed = fallbackCandidates.filter(
+        ({ profile }) => !recentlySeen.has(profile.userId as string)
+      );
+      const fbSuppressed = fallbackCandidates.filter(
+        ({ profile }) => recentlySeen.has(profile.userId as string)
+      );
+      fallbackBlock.push(...fbUnsuppressed, ...fbSuppressed);
+    }
+
+    const combined = [...ranked, ...fallbackBlock];
+    const limited = combined.slice(0, limit);
 
     const viewerUserDoc = await ctx.db.get(viewerUserId);
     const ownerIds = [...new Set(limited.map(({ profile: p }) => p.userId as string))];

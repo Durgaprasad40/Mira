@@ -1279,7 +1279,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     () =>
       convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery && !phase2QueryPaused
         ? {
-            limit: 50,
+            // P2-5: Pull a deeper Phase-2 slice per request. Backend safely
+            // caps via MAX_PHASE2_RESULT_LIMIT, queue front-buffer stays at 3,
+            // and we don't prefetch additional images here.
+            limit: 80,
             ...(typeof userId === "string" && userId.trim().length > 0 ? { authUserId: userId } : {}),
             ...(intentFilters.length > 0 ? { intentKeys: intentFilters } : {}),
           }

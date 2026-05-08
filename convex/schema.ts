@@ -1575,7 +1575,11 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_user', ['userId'])
-    .index('by_enabled', ['isPrivateEnabled']),
+    .index('by_enabled', ['isPrivateEnabled'])
+    // P1-1: Phase-2 deck pagination support. Lets privateDiscover.getProfiles
+    // fetch a bounded, recency-ordered candidate slice instead of collect()ing
+    // the entire enabled-private-profile table per request.
+    .index('by_enabled_updatedAt', ['isPrivateEnabled', 'updatedAt']),
 
   userPrivateProfileAuditLog: defineTable({
     userId: v.id('users'),
