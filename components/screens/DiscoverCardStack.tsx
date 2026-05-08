@@ -826,7 +826,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   );
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
-  const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
   const standOutsRemaining = useDiscoverStore((s) => s.standOutsRemaining);
   const hasReachedLikeLimit = useDiscoverStore((s) => s.hasReachedLikeLimit);
   const hasReachedStandOutLimit = useDiscoverStore((s) => s.hasReachedStandOutLimit);
@@ -834,7 +833,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
   const checkAndResetIfNewDay = useDiscoverStore((s) => s.checkAndResetIfNewDay);
 
-  // Phase-1 live pagination: merge Convex pages in-session (offset batches of PHASE1_PAGE_SIZE)
+  // Phase-1 live pagination: merge Convex pages in-session.
+  // P2-4: First page is intentionally larger than subsequent pages so fast
+  // swipers do not outrun pagination on cold-start. Subsequent pages stay at
+  // PHASE1_PAGE_SIZE to keep network usage incremental.
+  const PHASE1_FIRST_PAGE_SIZE = 30;
   const PHASE1_PAGE_SIZE = 20;
   const PHASE1_LOAD_MORE_THRESHOLD = 5;
   const [phase1FetchOffset, setPhase1FetchOffset] = useState(0);
@@ -1102,7 +1105,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         ? {
             token: token!.trim(),
             sortBy: (sortBy || "recommended") as any,
-            limit: PHASE1_PAGE_SIZE,
+            // P2-4: First page uses larger size to give the deck enough
+            // cushion before background pagination kicks in.
+            limit: phase1FetchOffset === 0 ? PHASE1_FIRST_PAGE_SIZE : PHASE1_PAGE_SIZE,
             offset: phase1FetchOffset,
             filterVersion,
           }
@@ -1178,7 +1183,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       }
       return next;
     });
-    phase1HasMoreRef.current = phase1Page.length >= PHASE1_PAGE_SIZE;
+    // P2-4: First page is sized to PHASE1_FIRST_PAGE_SIZE; later pages to
+    // PHASE1_PAGE_SIZE. Compare returned page length against whichever was
+    // requested so hasMore is detected correctly on cold-start.
+    const expectedPageSize =
+      phase1FetchOffset === 0 ? PHASE1_FIRST_PAGE_SIZE : PHASE1_PAGE_SIZE;
+    phase1HasMoreRef.current = phase1Page.length >= expectedPageSize;
     phase1LoadMoreInFlightRef.current = false;
   }, [phase1Profiles, phase1FetchOffset, isPhase2, isDemoMode, externalProfiles]);
 
@@ -1199,7 +1209,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (unshown > PHASE1_LOAD_MORE_THRESHOLD) return;
 
     phase1LoadMoreInFlightRef.current = true;
-    setPhase1FetchOffset((o) => o + PHASE1_PAGE_SIZE);
+    // P2-4: Bump by the size of the page we just consumed. After the cold
+    // first page (size 30) we advance by 30; thereafter we advance by 20.
+    setPhase1FetchOffset((o) =>
+      o + (o === 0 ? PHASE1_FIRST_PAGE_SIZE : PHASE1_PAGE_SIZE),
+    );
   }, [index, phase1SessionProfiles, isPhase2, isDemoMode, externalProfiles]);
 
   // Clear prefetch cache once useQuery returns real data (subscription is active)
@@ -4150,9 +4164,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     ? phase2BottomLayout.transitionHintBottom
     : Math.max(insets.bottom + SPACING.xl, DISCOVER_TRANSITION_HINT_MIN_BOTTOM);
 
-  const likesLeft = likesRemaining();
-  const standOutsLeft = standOutsRemaining();
-
   return (
     <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
       {isPhase2 && (
@@ -4186,26 +4197,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </TouchableOpacity>
             {!isPhase2 && <HeaderAvatarButton dark={dark} />}
           </View>
-        </View>
-      )}
-
-      {/* GROWTH: Daily swipe counter - shows remaining likes with scarcity urgency */}
-      {!isPhase2 && likesLeft < 25 && (
-        <View style={[styles.swipeCounterPill, { top: floatingPillTop, right: SPACING.base }]}>
-          <Ionicons
-            name={likesLeft <= 5 ? "flame" : "heart"}
-            size={SIZES.icon.xs}
-            color={likesLeft <= 5 ? "#EF4444" : "#EC4899"}
-          />
-          <Text
-            {...DISCOVER_TEXT_PROPS}
-            style={[
-              styles.swipeCounterText,
-              likesLeft <= 5 && styles.swipeCounterTextUrgent,
-            ]}
-          >
-            {likesLeft <= 5 ? `Only ${likesLeft} left!` : `${likesLeft} profiles left`}
-          </Text>
         </View>
       )}
 
@@ -4469,8 +4460,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             color={isPhase2 ? COLORS.white : P1_ICON_STANDOUT}
           />
           {/* Numeric "remaining" badge intentionally hidden in both phases.
-              standOutsLeft is still computed and passed to /stand-out via
-              router.push, and hasReachedStandOutLimit() still gates onPress. */}
+              hasReachedStandOutLimit() still gates onPress. */}
         </AnimatedActionButton>
 
         {/* Like (heart) - Medium feedback with stronger scale */}
@@ -5727,29 +5717,6 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     lineHeight: lineHeight(DISCOVER_FONT_15, 1.35),
     color: "rgba(255, 255, 255, 0.6)",
-  },
-
-  // GROWTH: Daily swipe counter pill
-  swipeCounterPill: {
-    position: "absolute",
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
-    paddingHorizontal: SPACING.sm + SPACING.xxs,
-    paddingVertical: SPACING.xs + SPACING.xxs,
-    borderRadius: SIZES.radius.md,
-    gap: SPACING.xs,
-    zIndex: 5,
-  },
-  swipeCounterText: {
-    fontSize: FONT_SIZE.sm,
-    fontWeight: "600",
-    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
-    color: "#F472B6",
-  },
-  swipeCounterTextUrgent: {
-    color: "#EF4444",
-    fontWeight: "700",
   },
 
   // Match Reminder Pill (Phase-2 Only)
