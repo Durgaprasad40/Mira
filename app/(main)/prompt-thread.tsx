@@ -1,9 +1,10 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput, Animated, Pressable, BackHandler,
+  NativeSyntheticEvent, TextLayoutEventData, TextStyle, StyleProp,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { Audio, Video, ResizeMode } from 'expo-av';
+import { Audio, AVPlaybackStatus, Video, ResizeMode } from 'expo-av';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -270,6 +271,192 @@ const debugTodWarn = (...args: unknown[]) => {
     console.warn(...args);
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────
+// Card-body tile geometry
+// ─────────────────────────────────────────────────────────────────────────
+// These match the visual sizes of `TodPromptMediaTile` (used in the hero
+// card) and the `todMediaTile` style (used inside answer/comment cards).
+// Kept at module scope so the wrap-around layout helper below can reserve
+// the right gutter without re-measuring at runtime.
+const PROMPT_MEDIA_TILE_SIZE = 68;
+const PROMPT_MEDIA_TILE_GAP = 12;
+const ANSWER_MEDIA_TILE_SIZE = 68;
+const ANSWER_MEDIA_TILE_GAP = 10;
+
+// ─────────────────────────────────────────────────────────────────────────
+// WrappedMediaText
+// ─────────────────────────────────────────────────────────────────────────
+// Renders text that wraps "around" a media tile anchored to the top-right
+// of the body — emulating CSS `float: right` (which React Native does
+// not support natively).
+//
+// Two-pass approach (the only stable way to do this with onTextLayout):
+//
+//   Pass 1 — measurement (splitIndex === null):
+//     A SINGLE Text element renders the full string with `paddingRight`
+//     reserved for the media. `onTextLayout` reports every visual line.
+//     We sum the character count of the lines whose bottom edge sits
+//     at or above the media bottom — those are the lines that visually
+//     wrap beside the media. We commit that count as `splitIndex`.
+//
+//   Pass 2 — stable split (splitIndex !== null):
+//     Two Text elements are rendered:
+//       • Text #1: the prefix up to `splitIndex`, with `paddingRight`
+//         (so it occupies the narrow gutter to the LEFT of the media).
+//       • Text #2: the suffix after `splitIndex`, with NO paddingRight
+//         (so it expands to the FULL card width once it sits below
+//         the media's bottom edge in normal flow).
+//     **No `onTextLayout` listener is attached in pass 2** — that's the
+//     key to avoiding the infinite oscillation a naive implementation
+//     suffers (truncated Text #1 reports "all lines fit beside media"
+//     and pushes splitIndex back to text.length, then back, forever).
+//
+// State is keyed by (text + mediaHeight + paddingRight). When any of
+// those change, the keyed measurement is implicitly invalidated and we
+// fall back to pass 1 — no useEffect needed, no stale-frame flicker on
+// FlatList recycling.
+//
+// `minHeight: mediaHeight` on the wrapper guarantees the absolutely-
+// positioned media never overflows the body when text is short.
+type WrappedMediaTextProps = {
+  text: string;
+  textStyle: StyleProp<TextStyle>;
+  mediaHeight: number;
+  paddingRight: number;
+  maxFontSizeMultiplier?: number;
+  // The absolutely-positioned media node (the tile / TouchableOpacity /
+  // TodPromptMediaTile). The wrapper takes care of positioning.
+  mediaNode: React.ReactNode;
+};
+
+type WrappedMediaMeasurement = {
+  key: string;
+  index: number;
+};
+
+function WrappedMediaText({
+  text,
+  textStyle,
+  mediaHeight,
+  paddingRight,
+  maxFontSizeMultiplier,
+  mediaNode,
+}: WrappedMediaTextProps) {
+  const [measurement, setMeasurement] =
+    useState<WrappedMediaMeasurement | null>(null);
+
+  // The measurement is only valid for the exact (text + geometry) tuple
+  // it was taken under. Encoding the tuple as a key lets us derive a
+  // valid `splitIndex` synchronously without useEffect — avoiding the
+  // 1-frame stale render that would otherwise show a previous item's
+  // split when FlatList recycles a row.
+  const currentKey = `${text}::${mediaHeight}::${paddingRight}`;
+  const splitIndex =
+    measurement && measurement.key === currentKey ? measurement.index : null;
+
+  const handleTextLayout = useCallback(
+    (e: NativeSyntheticEvent<TextLayoutEventData>) => {
+      const lines = e.nativeEvent.lines;
+      if (!lines || lines.length === 0) return;
+
+      // Sum char counts for every line whose bottom edge sits at or
+      // above the media's bottom. The +1 tolerance absorbs sub-pixel
+      // rounding so we don't demote the last beside-line by mistake.
+      let cumChar = 0;
+      for (const line of lines) {
+        const lineBottom = line.y + line.height;
+        if (lineBottom <= mediaHeight + 1) {
+          cumChar += (line.text ?? '').length;
+        } else {
+          break;
+        }
+      }
+
+      const finalIndex = Math.min(Math.max(cumChar, 0), text.length);
+      setMeasurement((prev) => {
+        if (prev && prev.key === currentKey && prev.index === finalIndex) {
+          return prev;
+        }
+        return { key: currentKey, index: finalIndex };
+      });
+    },
+    [currentKey, mediaHeight, text.length],
+  );
+
+  // ── Pass 1: measurement. Render full text in one Text with paddingRight.
+  //
+  // IMPORTANT: the absolute media wrapper is rendered LAST so the
+  // TouchableOpacity tile sits on TOP of the Text in z-order. React
+  // Native Text defaults to `pointerEvents="auto"` and the Text view's
+  // bounding box still spans the full container width even with
+  // `paddingRight` (padding only reserves CONTENT space, not the
+  // touch-target rectangle). If the Text were rendered after the media,
+  // it would sit above the tile and silently swallow every tap on the
+  // tile, breaking audio playback / photo + video open. Rendering the
+  // media last fixes this without disabling Text taps elsewhere.
+  if (splitIndex === null) {
+    return (
+      <View style={[wrappedMediaTextStyles.wrapper, { minHeight: mediaHeight }]}>
+        <Text
+          style={[textStyle, { paddingRight }]}
+          onTextLayout={handleTextLayout}
+          maxFontSizeMultiplier={maxFontSizeMultiplier}
+        >
+          {text}
+        </Text>
+        <View style={wrappedMediaTextStyles.mediaAnchor} pointerEvents="box-none">
+          {mediaNode}
+        </View>
+      </View>
+    );
+  }
+
+  // ── Pass 2: stable split. NO onTextLayout — no oscillation.
+  const beforeText = text.slice(0, splitIndex);
+  const afterRaw = text.slice(splitIndex);
+  // Strip a single leading whitespace if the split landed on a space
+  // (common at soft line breaks) so the full-width continuation
+  // doesn't start with an awkward leading space.
+  const afterText = afterRaw.replace(/^\s/, '');
+
+  // Same z-order rule as pass 1: text first, absolute media last so the
+  // tile remains the topmost element and reliably receives taps.
+  return (
+    <View style={[wrappedMediaTextStyles.wrapper, { minHeight: mediaHeight }]}>
+      {!!beforeText && (
+        <Text
+          style={[textStyle, { paddingRight }]}
+          maxFontSizeMultiplier={maxFontSizeMultiplier}
+        >
+          {beforeText}
+        </Text>
+      )}
+      {!!afterText && (
+        <Text style={textStyle} maxFontSizeMultiplier={maxFontSizeMultiplier}>
+          {afterText}
+        </Text>
+      )}
+      <View style={wrappedMediaTextStyles.mediaAnchor} pointerEvents="box-none">
+        {mediaNode}
+      </View>
+    </View>
+  );
+}
+
+const wrappedMediaTextStyles = StyleSheet.create({
+  wrapper: {
+    position: 'relative',
+  },
+  mediaAnchor: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    // `box-none` (above) keeps the wrapper non-blocking for taps that
+    // miss the media tile, so the surrounding card's onPress / long-press
+    // handlers still receive events.
+  },
+});
 
 export default function PromptThreadScreen() {
   const router = useRouter();
@@ -591,12 +778,17 @@ export default function PromptThreadScreen() {
   // Lifecycle invariants enforced below:
   //  - `playingVoiceId` is the answer ID of the currently-playing voice,
   //    or `null` when nothing is playing.
-  //  - `playingVoiceSoundRef` holds the live `Audio.Sound` instance and
-  //    is cleared whenever the sound is unloaded.
-  //  - On `didJustFinish`, both refs reset so the next tap creates a
-  //    fresh sound from position 0 (no "stuck completed" state).
-  //  - Unmount and screen blur both stop and unload the active sound,
-  //    so leaving the screen never leaves audio playing.
+  //  - `playingVoiceSoundRef` holds the live `Audio.Sound` instance that
+  //    is currently playing, and is cleared on stop / pause.
+  //  - `audioCacheRef` keeps every `Audio.Sound` we have loaded so far,
+  //    keyed by its source URL. Stopping a tile *pauses* and rewinds the
+  //    sound but keeps it in the cache so the next tap plays without
+  //    re-downloading or re-decoding the audio. All cached sounds are
+  //    unloaded on unmount.
+  //  - On `didJustFinish`, the playhead is reset to 0 and the sound
+  //    stays in the cache so a second tap restarts instantly.
+  //  - Unmount and screen blur stop active playback; unmount also
+  //    fully unloads the cache so we never leak Audio.Sound instances.
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
   // Live playback position / duration (in ms) for the currently-playing
   // voice tile. Both reset to 0 whenever playback stops, finishes, or a
@@ -605,20 +797,34 @@ export default function PromptThreadScreen() {
   const [voicePosMs, setVoicePosMs] = useState(0);
   const [voiceDurMs, setVoiceDurMs] = useState(0);
   const playingVoiceSoundRef = useRef<Audio.Sound | null>(null);
+  // Cache of preloaded Audio.Sound instances keyed by media URL. Once a
+  // sound is created we keep it loaded so subsequent taps on the same
+  // voice tile play without the createAsync round-trip.
+  const audioCacheRef = useRef<Map<string, Audio.Sound>>(new Map());
 
   const stopVoicePlayback = useCallback(async () => {
     const sound = playingVoiceSoundRef.current;
     playingVoiceSoundRef.current = null;
     if (sound) {
+      // Detach the periodic status callback first so a paused/cached
+      // sound doesn't keep pushing updates into stale React state.
       try {
-        await sound.stopAsync();
+        sound.setOnPlaybackStatusUpdate(null);
       } catch {
-        // ignore — sound may already be stopped
+        // ignore
       }
       try {
-        await sound.unloadAsync();
+        await sound.pauseAsync();
       } catch {
-        // ignore — sound may already be unloaded
+        // ignore — sound may already be paused or unloaded
+      }
+      try {
+        // Rewind so the next tap on this tile starts from 0:00. We
+        // intentionally do NOT unload — the sound stays in
+        // `audioCacheRef` for instant replay.
+        await sound.setPositionAsync(0);
+      } catch {
+        // ignore — sound may have been unloaded between calls
       }
     }
     if (isMountedRef.current) {
@@ -631,8 +837,8 @@ export default function PromptThreadScreen() {
   const handleToggleVoiceTile = useCallback(
     async (answerId: string, audioUrl: string) => {
       // Tapping the currently-playing tile pauses & resets it. A
-      // subsequent tap reloads from position 0 — same UX as a simple
-      // play/stop control.
+      // subsequent tap restarts from position 0 — same UX as a simple
+      // play/stop control. The cached sound stays loaded.
       if (playingVoiceId === answerId) {
         await stopVoicePlayback();
         return;
@@ -642,60 +848,97 @@ export default function PromptThreadScreen() {
       // new one — only one voice plays at a time on this screen.
       await stopVoicePlayback();
 
+      // Status callback shared between cache hits and misses. Pushes
+      // live position/duration into state and resets the tile when
+      // playback finishes. We deliberately keep the Audio.Sound loaded
+      // in `audioCacheRef` so the next tap plays instantly.
+      const handleStatus = (status: AVPlaybackStatus) => {
+        if (!status.isLoaded) return;
+        const pos = status.positionMillis ?? 0;
+        const dur = status.durationMillis ?? 0;
+        if (isMountedRef.current) {
+          setVoicePosMs(pos);
+          if (dur > 0) setVoiceDurMs(dur);
+        }
+        if (status.didJustFinish) {
+          const finished = playingVoiceSoundRef.current;
+          playingVoiceSoundRef.current = null;
+          if (finished) {
+            // Detach this callback and rewind so the cached sound is
+            // ready for an instant restart on the next tap.
+            try {
+              finished.setOnPlaybackStatusUpdate(null);
+            } catch {
+              // ignore
+            }
+            finished.setPositionAsync(0).catch(() => {});
+          }
+          if (isMountedRef.current) {
+            setPlayingVoiceId(null);
+            setVoicePosMs(0);
+            setVoiceDurMs(0);
+          }
+        }
+      };
+
       try {
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
           playsInSilentModeIOS: true,
         });
-        const { sound } = await Audio.Sound.createAsync(
-          { uri: audioUrl },
+
+        let sound: Audio.Sound | null = audioCacheRef.current.get(audioUrl) ?? null;
+
+        if (sound) {
+          // Cache hit — rewind, attach the live status callback, play.
+          // No network round-trip, no decoding, plays in a few ms.
+          try {
+            await sound.setPositionAsync(0);
+          } catch {
+            // ignore — fresh play below will replace stale state
+          }
+          sound.setOnPlaybackStatusUpdate(handleStatus);
+          await sound.playAsync();
+        } else {
+          // Cache miss — create the sound, store it, and start playing.
           // `progressUpdateIntervalMillis` throttles the status callback
           // to ~4Hz — smooth enough for a moving progress bar / clock
           // without flooding React with re-renders. `shouldPlay: true`
           // begins playback immediately on load.
-          { shouldPlay: true, progressUpdateIntervalMillis: 250 },
-          (status) => {
-            if (!status.isLoaded) return;
+          const created = await Audio.Sound.createAsync(
+            { uri: audioUrl },
+            { shouldPlay: true, progressUpdateIntervalMillis: 250 },
+            handleStatus,
+          );
+          sound = created.sound;
+          audioCacheRef.current.set(audioUrl, sound);
+        }
 
-            // Push live position / duration into state so the tile's
-            // progress bar + clock can update while audio plays.
-            const pos = status.positionMillis ?? 0;
-            const dur = status.durationMillis ?? 0;
-            if (isMountedRef.current) {
-              setVoicePosMs(pos);
-              if (dur > 0) setVoiceDurMs(dur);
-            }
-
-            if (status.didJustFinish) {
-              // Auto-reset: unload, clear refs, drop the playing flag,
-              // and zero the progress so the next tap starts at 0:00.
-              const finished = playingVoiceSoundRef.current;
-              playingVoiceSoundRef.current = null;
-              finished?.unloadAsync().catch(() => {});
-              if (isMountedRef.current) {
-                setPlayingVoiceId(null);
-                setVoicePosMs(0);
-                setVoiceDurMs(0);
-              }
-            }
-          },
-        );
         playingVoiceSoundRef.current = sound;
         if (isMountedRef.current) {
           setPlayingVoiceId(answerId);
           setVoicePosMs(0);
-          // Seed duration from the status snapshot so the clock displays
-          // a useful total even before the first periodic callback fires.
-          // Fall back to the answer's `durationSec` × 1000 in the render
-          // path when this is still 0.
         } else {
-          // Component unmounted between createAsync resolving and now —
-          // bail out without leaking the sound.
-          sound.unloadAsync().catch(() => {});
+          // Component unmounted between play resolving and now — pause
+          // and detach so playback doesn't leak audibly. The unmount
+          // cleanup effect will fully unload the cache below.
+          try {
+            sound.setOnPlaybackStatusUpdate(null);
+          } catch {
+            // ignore
+          }
+          sound.pauseAsync().catch(() => {});
           playingVoiceSoundRef.current = null;
         }
       } catch (err) {
         console.error('[T/D voice tile] playback failed:', err);
+        // If we created a sound just now and it's somehow broken,
+        // remove it from the cache so the next tap re-creates it.
+        const stale = audioCacheRef.current.get(audioUrl);
+        if (stale && stale === playingVoiceSoundRef.current) {
+          audioCacheRef.current.delete(audioUrl);
+          stale.unloadAsync().catch(() => {});
+        }
         playingVoiceSoundRef.current = null;
         if (isMountedRef.current) {
           setPlayingVoiceId(null);
@@ -709,15 +952,21 @@ export default function PromptThreadScreen() {
 
   // Hard cleanup on unmount — guarantees no orphan Audio.Sound survives
   // a screen pop. `stopVoicePlayback` is intentionally not used here so
-  // the cleanup runs synchronously inside the effect teardown.
+  // the cleanup runs synchronously inside the effect teardown. Every
+  // cached sound is unloaded; the active sound (if any) is also stopped
+  // first to avoid a frame of audible playback during teardown.
   useEffect(() => {
     return () => {
-      const sound = playingVoiceSoundRef.current;
+      const playing = playingVoiceSoundRef.current;
       playingVoiceSoundRef.current = null;
-      if (sound) {
-        sound.stopAsync().catch(() => {});
-        sound.unloadAsync().catch(() => {});
+      if (playing) {
+        playing.stopAsync().catch(() => {});
       }
+      const cache = audioCacheRef.current;
+      cache.forEach((s) => {
+        s.unloadAsync().catch(() => {});
+      });
+      cache.clear();
     };
   }, []);
 
@@ -1251,7 +1500,7 @@ export default function PromptThreadScreen() {
   const handleMenuEdit = useCallback(() => {
     if (menuIsOwnAnswer && !menuIsExpired) {
       if (hasActiveUploadForCurrentUser) {
-        Alert.alert('Upload in progress', 'Please wait for your current answer upload to finish before editing.');
+        Alert.alert('Upload in progress', 'Please wait for your current comment upload to finish before editing.');
         handleCloseMenu();
         return;
       }
@@ -1902,7 +2151,7 @@ export default function PromptThreadScreen() {
       }
 
       if (hasActiveUploadForCurrentUser) {
-        Alert.alert('Upload in progress', 'Please wait for your current answer upload to finish before sending another response.');
+        Alert.alert('Upload in progress', 'Please wait for your current comment upload to finish before sending another response.');
         return;
       }
 
@@ -2053,7 +2302,7 @@ export default function PromptThreadScreen() {
   const canReplyInline = !isExpired && !hasSubmittedOrPendingAnswer && !isPromptOwner;
   const openComposer = useCallback(() => {
     if (hasActiveUploadForCurrentUser) {
-      Alert.alert('Upload in progress', 'Please wait for your current answer upload to finish before sending another response.');
+      Alert.alert('Upload in progress', 'Please wait for your current comment upload to finish before sending another response.');
       return;
     }
     setShowUnifiedComposer(true);
@@ -2310,31 +2559,21 @@ export default function PromptThreadScreen() {
             </View>
           </View>
 
-          {/* Body row: text column on the left, optional compact media
-              thumbnail (56×56) anchored to the upper-right via
-              `alignItems: 'flex-start'`. The reaction strip has moved to
-              the unified bottom action row below, so the text column no
-              longer needs to stretch to the tile's height — the card now
-              hugs actual content instead of reserving an 84-dp media block. */}
-          <View
-            style={[
-              styles.answerBodyRow,
-              !showTile && styles.answerBodyRowNoTile,
-            ]}
-          >
-            <View style={styles.answerBodyTextCol}>
-              {item.text && item.text.trim().length > 0 && (
-                <Text style={styles.answerText} maxFontSizeMultiplier={1.2}>{item.text}</Text>
-              )}
-            </View>
+          {/* Body: media tile (if any) anchors to the top-right of the
+              body. Text wraps "around" the tile for lines that fit
+              beside the media height, then continues at full card width
+              below the media. This avoids squeezing text into a narrow
+              left column AND avoids leaving wasted space beside / below
+              a tile when the text is short. Edit pencil intentionally
+              NOT rendered on the card — edit lives in the long-press
+              action sheet so the card surface stays clean. */}
+          {(() => {
+            const trimmedAnswerText = item.text && item.text.trim().length > 0 ? item.text : '';
+            const hasAnswerText = !!trimmedAnswerText;
+            const hasAnswerTile = !!(showTile && tileIconName);
+            if (!hasAnswerText && !hasAnswerTile) return null;
 
-            {/* Edit pencil intentionally NOT rendered on the card.
-                Edit is now exposed only via the long-press action sheet
-                (Cancel | Edit | Delete), which keeps the card surface
-                clean and removes a visual affordance that competed with
-                the media tile. See the comment-menu Modal below. */}
-
-            {showTile && tileIconName && (
+            const tileNode = hasAnswerTile ? (
               <TouchableOpacity
                 style={[
                   styles.todMediaTile,
@@ -2442,8 +2681,44 @@ export default function PromptThreadScreen() {
                   </View>
                 )}
               </TouchableOpacity>
-            )}
-          </View>
+            ) : null;
+
+            if (hasAnswerText && hasAnswerTile) {
+              // Wrap-around path: text fills the width to the left of
+              // the tile for the lines that fit beside it, then
+              // continues full width below the tile.
+              return (
+                <View style={styles.answerBodyRow}>
+                  <WrappedMediaText
+                    text={trimmedAnswerText}
+                    textStyle={styles.answerText}
+                    mediaHeight={ANSWER_MEDIA_TILE_SIZE}
+                    paddingRight={ANSWER_MEDIA_TILE_SIZE + ANSWER_MEDIA_TILE_GAP}
+                    maxFontSizeMultiplier={1.2}
+                    mediaNode={tileNode}
+                  />
+                </View>
+              );
+            }
+
+            if (hasAnswerTile) {
+              // Media-only comment: tile sits right-aligned by itself so
+              // the action row tucks naturally underneath without a
+              // wasted full-width gap to its left.
+              return (
+                <View style={[styles.answerBodyRow, styles.answerBodyRowMediaOnly]}>
+                  {tileNode}
+                </View>
+              );
+            }
+
+            // Text-only comment: text uses the full card width.
+            return (
+              <View style={[styles.answerBodyRow, styles.answerBodyRowNoTile]}>
+                <Text style={styles.answerText} maxFontSizeMultiplier={1.2}>{trimmedAnswerText}</Text>
+              </View>
+            );
+          })()}
 
           {/* Voice playback now happens inside the compact tile above —
               the old horizontal `TodVoicePlayer` block was removed so
@@ -2871,37 +3146,42 @@ export default function PromptThreadScreen() {
                     promptOwnerMediaPreload.status !== 'ready'
                   ? undefined
                   : promptOwnerMediaPreload.status;
+            const promptTileNode = (
+              <TodPromptMediaTile
+                hasMedia={promptHasMedia}
+                mediaUrl={promptMediaUrl}
+                mediaKind={promptMediaKind}
+                durationSec={promptDurationSec}
+                covered
+                ownerViewCount={
+                  projection.isPromptMediaOwner &&
+                  (promptMediaKind === 'photo' || promptMediaKind === 'video')
+                    ? projection.promptMediaViewCount
+                    : undefined
+                }
+                showViewedBadge={
+                  !projection.isPromptMediaOwner &&
+                  !!projection.viewerHasViewedPromptMedia &&
+                  (promptMediaKind === 'photo' || promptMediaKind === 'video')
+                }
+                preloadStatus={tilePreloadStatus}
+                onPress={tileIsTappable ? handleViewPromptMedia : undefined}
+                accessibilityLabel={
+                  tileIsTappable
+                    ? `Open prompt ${promptMediaKind}`
+                    : `Prompt ${promptMediaKind} attachment`
+                }
+              />
+            );
             return (
-              <View style={styles.promptHeaderMediaRow}>
-                <Text style={[styles.promptText, styles.promptTextWithMedia]} maxFontSizeMultiplier={1.2}>
-                  {prompt.text}
-                </Text>
-                <TodPromptMediaTile
-                  hasMedia={promptHasMedia}
-                  mediaUrl={promptMediaUrl}
-                  mediaKind={promptMediaKind}
-                  durationSec={promptDurationSec}
-                  covered
-                  ownerViewCount={
-                    projection.isPromptMediaOwner &&
-                    (promptMediaKind === 'photo' || promptMediaKind === 'video')
-                      ? projection.promptMediaViewCount
-                      : undefined
-                  }
-                  showViewedBadge={
-                    !projection.isPromptMediaOwner &&
-                    !!projection.viewerHasViewedPromptMedia &&
-                    (promptMediaKind === 'photo' || promptMediaKind === 'video')
-                  }
-                  preloadStatus={tilePreloadStatus}
-                  onPress={tileIsTappable ? handleViewPromptMedia : undefined}
-                  accessibilityLabel={
-                    tileIsTappable
-                      ? `Open prompt ${promptMediaKind}`
-                      : `Prompt ${promptMediaKind} attachment`
-                  }
-                />
-              </View>
+              <WrappedMediaText
+                text={prompt.text}
+                textStyle={styles.promptText}
+                mediaHeight={PROMPT_MEDIA_TILE_SIZE}
+                paddingRight={PROMPT_MEDIA_TILE_SIZE + PROMPT_MEDIA_TILE_GAP}
+                maxFontSizeMultiplier={1.2}
+                mediaNode={promptTileNode}
+              />
             );
           }
           return <Text style={styles.promptText} maxFontSizeMultiplier={1.2}>{prompt.text}</Text>;
@@ -3703,19 +3983,11 @@ const styles = StyleSheet.create({
     color: PREMIUM.textPrimary,
     lineHeight: 26,
   },
-  // Phase 4: prompt header layout when prompt-owner media is attached.
-  // Text takes the remaining width on the left, the 68×68 media tile sits
-  // on the right with a small left margin so it never crowds the text on
-  // narrow Android screens.
-  promptHeaderMediaRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  promptTextWithMedia: {
-    flex: 1,
-    minWidth: 0,
-  },
+  // Phase 4 wrap-around: prompt header now uses the WrappedMediaText
+  // helper which absolutely-positions the 68×68 media tile at top-right
+  // and splits long text into two Texts so the prefix wraps in the
+  // narrower left gutter beside the media and the remainder reflows
+  // back to full card width once it clears the media's bottom edge.
   // Inline Edit Styles
   inlineEditContainer: {
     marginBottom: 8,
@@ -4033,23 +4305,20 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
 
-  // Body row: text column on the left + optional 56×56 media thumbnail
-  // anchored to the upper-right via `alignItems: 'flex-start'`. The text
-  // column hugs its content height — no longer stretched to the tile —
-  // so cards with short text are no longer artificially tall.
+  // Body wrapper: just spacing before the bottom action row. Internal
+  // layout is delegated to WrappedMediaText (text + media branch) or to
+  // a single Text / single tile (the other two branches).
   answerBodyRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
     marginBottom: 8,
-    gap: 10,
   },
-  // No tile → no need for the trailing gap before the bottom action row.
+  // No tile → tighter trailing gap before the bottom action row.
   answerBodyRowNoTile: {
     marginBottom: 6,
   },
-  answerBodyTextCol: {
-    flex: 1,
-    minWidth: 0,
+  // Media-only (no text) → right-align the compact tile so it reads as
+  // a supplementary attachment instead of floating inside an empty row.
+  answerBodyRowMediaOnly: {
+    alignItems: 'flex-end',
   },
   // Reaction strip lives inside the bottom action row (left cluster).
   // `flexShrink: 1` lets it absorb width when many reactions are present
