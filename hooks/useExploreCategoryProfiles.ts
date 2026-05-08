@@ -261,6 +261,30 @@ export function useExploreCategoryProfiles({
         const nextStatus = normalizeExploreCategoryStatus(result?.status, nextProfiles.length > 0);
         const nextHasMore = offset + nextProfiles.length < nextTotalCount;
 
+        // Fire-and-forget: record that these profiles were shown to the
+        // viewer in this Vibes/Explore category. Powers the 4-hour
+        // push-to-back suppression in convex/discover.ts. We do NOT await
+        // and we silently swallow errors so this never blocks rendering.
+        // Mirrors the Phase-2 recordDeepConnectImpressions pattern.
+        if (nextStatus === 'ok' && nextProfiles.length > 0 && categoryId && userId) {
+          const viewedUserIds = nextProfiles
+            .map((p: any) => p?.id)
+            .filter((id: any): id is string => typeof id === 'string' && id.length > 0);
+          if (viewedUserIds.length > 0) {
+            convex
+              .mutation(api.discover.recordExploreImpression, {
+                viewedUserIds: viewedUserIds as any,
+                categoryId,
+                authUserId: userId,
+              })
+              .catch((error) => {
+                if (__DEV__) {
+                  console.warn('[EXPLORE_IMPRESSION_FAIL]', (error as any)?.message ?? error);
+                }
+              });
+          }
+        }
+
         const nextState = {
           profiles: nextProfiles,
           totalCount: nextTotalCount,

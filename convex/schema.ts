@@ -2561,4 +2561,27 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_viewer', ['viewerId']),
+
+  // Vibes / Explore Category Viewer Impressions (per-viewer, per-category
+  // repetition suppression). Mirrors phase2ViewerImpressions in spirit but
+  // scopes suppression by (viewerId, viewedUserId, categoryId) so that
+  // re-entering an Explore category or paginating does not immediately
+  // re-show the same profiles. Suppression window is 4 hours and is applied
+  // as "push to back" ordering inside getExploreCategoryProfiles — never as
+  // a hard exclusion (deck availability is preserved). Hard safety/privacy
+  // filters (self, blocked, reported, hidden/paused, banned/inactive,
+  // underage, privacy-hidden, unsafe photos, non-reciprocal demographic
+  // constraints) remain enforced upstream in buildExploreCandidates and are
+  // not affected by this table.
+  exploreViewerImpressions: defineTable({
+    viewerId: v.id('users'),       // Who was viewing
+    viewedUserId: v.id('users'),   // Who was shown
+    categoryId: v.string(),        // Explore/Vibes category id (e.g. 'nearby')
+    lastSeenAt: v.number(),        // When last shown to this viewer in this category
+    seenCount: v.number(),         // How many times shown to this viewer in this category
+  })
+    // Suppression read path: by viewer + category + lastSeenAt cutoff.
+    .index('by_viewer_category_lastSeenAt', ['viewerId', 'categoryId', 'lastSeenAt'])
+    // Upsert path: locate existing (viewer, viewed, category) row.
+    .index('by_pair_category', ['viewerId', 'viewedUserId', 'categoryId']),
 });

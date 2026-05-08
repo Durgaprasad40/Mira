@@ -19,7 +19,7 @@
  * - do not modify directly
  */
 import { v } from 'convex/values';
-import { query, QueryCtx } from './_generated/server';
+import { mutation, query, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import {
@@ -51,6 +51,32 @@ import type { Phase1DiscoverEmptyReason } from '../lib/phase1DiscoverQuery';
 // Flip to `false` (or remove all gated logs) once reverse-visibility is
 // validated on both test devices. See [DISCOVER_AUDIT] tags below.
 const DISCOVER_AUDIT_ENABLED = false;
+
+// ---------------------------------------------------------------------------
+// Vibes / Explore Category candidate fan-out and impression-suppression caps.
+// These constants bound the per-query candidate scan inside
+// getExploreCategoryProfiles and govern the 4-hour repetition-suppression
+// window applied to recently-shown profiles. Hard safety/privacy filters in
+// buildExploreCandidates are unaffected by these values.
+// ---------------------------------------------------------------------------
+
+// Hard ceiling on per-gender candidate scan in getExploreCategoryProfiles.
+// The existing maxPerGender heuristic (baseWindow * fetchMultiplier / genders)
+// can grow with offset / category fetchMultiplier. We cap it via Math.min so
+// query cost stays bounded and reviewable. 1500 matches the Phase-2
+// MAX_PHASE2_CANDIDATES sibling cap used in privateDiscover.ts.
+const MAX_EXPLORE_CANDIDATES = 1500;
+
+// Vibes/Explore impression-suppression window. Recently-seen profiles in a
+// given category are pushed to the back of the deck (never hard-excluded) so
+// that re-entering a category or paginating does not immediately re-show the
+// same faces. Mirrors Phase-2 SUPPRESSION_WINDOW_MS (4 hours).
+const EXPLORE_SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
+
+// Per-call bound on how many viewedUserIds the recordExploreImpression
+// mutation will accept in a single batch. Keeps mutation cost predictable
+// and matches the maximum page size the client typically requests.
+const MAX_EXPLORE_IMPRESSION_BATCH = 100;
 
 // ---------------------------------------------------------------------------
 // Phase-1 Discover: structured empty result (Step 8 — distinguish empty reasons)
@@ -1851,7 +1877,15 @@ export const getExploreCategoryProfiles = query({
 
     const baseWindow = Math.max(offset + limit, 24);
     const fetchMultiplier = categoryId ? 30 : ((relationshipIntent && relationshipIntent.length > 0) || (activities && activities.length > 0) || sortByInterests ? 24 : 16);
-    const maxPerGender = Math.max(Math.ceil((baseWindow * fetchMultiplier) / Math.max((genderFilter?.length ?? 0) || 1, 1)), 140);
+    // Bounded candidate fan-out: existing heuristic floored at 140, then
+    // capped at MAX_EXPLORE_CANDIDATES so the per-gender scan cannot grow
+    // unbounded with offset / multiplier. Ranking/filter behavior is
+    // unchanged — this only limits how many rows are read per gender bucket.
+    const heuristicMaxPerGender = Math.max(
+      Math.ceil((baseWindow * fetchMultiplier) / Math.max((genderFilter?.length ?? 0) || 1, 1)),
+      140,
+    );
+    const maxPerGender = Math.min(heuristicMaxPerGender, MAX_EXPLORE_CANDIDATES);
 
     const built = await buildExploreCandidates(ctx, {
       rawUserId: userId,
@@ -1883,14 +1917,118 @@ export const getExploreCategoryProfiles = query({
       });
     }
 
-    const pageWindow = rankedCandidates.slice(offset, offset + limit * 3);
+    // Vibes/Explore impression suppression — push-to-back ordering scoped by
+    // (viewerId, categoryId). Profiles shown to this viewer in this category
+    // within the last 4 hours are reordered to the BACK of the deck so the
+    // immediate strict page does not repeat them, while still keeping them
+    // available if the viewer paginates deep. Hard safety/privacy filters in
+    // buildExploreCandidates are unaffected — suppression is ordering-only.
+    // Suppression is gated on a categoryId being present (the table key
+    // requires it). Without a categoryId we fall through unchanged.
+    let orderedCandidates: typeof rankedCandidates = rankedCandidates;
+    if (categoryId && built.currentUser?._id) {
+      const suppressionCutoff = Date.now() - EXPLORE_SUPPRESSION_WINDOW_MS;
+      const viewerId = built.currentUser._id as Id<'users'>;
+      const recentImpressions = await ctx.db
+        .query('exploreViewerImpressions')
+        .withIndex('by_viewer_category_lastSeenAt', (q) =>
+          q
+            .eq('viewerId', viewerId)
+            .eq('categoryId', categoryId)
+            .gt('lastSeenAt', suppressionCutoff)
+        )
+        .collect();
+      if (recentImpressions.length > 0) {
+        const recentlySeen = new Set(
+          recentImpressions.map((imp) => imp.viewedUserId as string)
+        );
+        const fresh: typeof rankedCandidates = [];
+        const stale: typeof rankedCandidates = [];
+        for (const candidate of rankedCandidates) {
+          if (recentlySeen.has(candidate.id as string)) {
+            stale.push(candidate);
+          } else {
+            fresh.push(candidate);
+          }
+        }
+        orderedCandidates = fresh.concat(stale);
+      }
+    }
+
+    const pageWindow = orderedCandidates.slice(offset, offset + limit * 3);
     const hydratedProfiles = await hydrateExploreProfiles(ctx, pageWindow);
 
     return {
       profiles: hydratedProfiles.slice(0, limit),
-      totalCount: rankedCandidates.length,
+      totalCount: orderedCandidates.length,
       status: 'ok' as const,
     };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// recordExploreImpression — records that the given Vibes/Explore category
+// candidate profiles were shown to the viewer. Called fire-and-forget from
+// the client after a successful getExploreCategoryProfiles fetch. Used by
+// the 4-hour push-to-back suppression in getExploreCategoryProfiles above.
+// Safe: silently returns on auth failure or empty input. Hard-capped batch
+// size keeps mutation cost predictable.
+// ---------------------------------------------------------------------------
+
+export const recordExploreImpression = mutation({
+  args: {
+    viewedUserIds: v.array(v.id('users')),
+    categoryId: v.string(),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    if (!args.categoryId || args.categoryId.trim().length === 0) return;
+
+    // Resolve viewer from server-side auth first, then authUserId fallback.
+    let viewerId: Id<'users'> | null = null;
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      viewerId = await resolveUserIdByAuthId(ctx, identity.subject);
+    }
+    if (!viewerId && args.authUserId?.trim()) {
+      viewerId = await resolveUserIdByAuthId(ctx, args.authUserId.trim());
+    }
+    if (!viewerId) return;
+    const resolvedViewerId: Id<'users'> = viewerId;
+
+    const dedupedIds = [...new Set(args.viewedUserIds)]
+      .filter((viewedUserId) => viewedUserId !== resolvedViewerId)
+      .slice(0, MAX_EXPLORE_IMPRESSION_BATCH);
+    if (dedupedIds.length === 0) return;
+
+    const now = Date.now();
+
+    for (const viewedUserId of dedupedIds) {
+      const existing = await ctx.db
+        .query('exploreViewerImpressions')
+        .withIndex('by_pair_category', (q) =>
+          q
+            .eq('viewerId', resolvedViewerId)
+            .eq('viewedUserId', viewedUserId)
+            .eq('categoryId', args.categoryId)
+        )
+        .first();
+
+      if (existing) {
+        await ctx.db.patch(existing._id, {
+          lastSeenAt: now,
+          seenCount: existing.seenCount + 1,
+        });
+      } else {
+        await ctx.db.insert('exploreViewerImpressions', {
+          viewerId: resolvedViewerId,
+          viewedUserId,
+          categoryId: args.categoryId,
+          lastSeenAt: now,
+          seenCount: 1,
+        });
+      }
+    }
   },
 });
 
