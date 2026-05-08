@@ -59,7 +59,7 @@ export function AnswerComposerSheet({
             </TouchableOpacity>
           </View>
           <Text style={styles.promptText} numberOfLines={2}>{prompt.text}</Text>
-          <Text style={styles.subtitle}>Choose how you want to answer</Text>
+          <Text style={styles.subtitle}>Choose how you want to comment</Text>
           <View style={styles.optionsRow}>
             {OPTIONS.map((opt) => (
               <TouchableOpacity key={opt.key} style={styles.optionBtn} onPress={handlers[opt.key]} activeOpacity={0.7}>
@@ -70,7 +70,7 @@ export function AnswerComposerSheet({
               </TouchableOpacity>
             ))}
           </View>
-          <Text style={styles.hint}>{mediaLimitHint} One answer per prompt.</Text>
+          <Text style={styles.hint}>{mediaLimitHint} One comment per prompt.</Text>
         </View>
       </TouchableOpacity>
     </Modal>

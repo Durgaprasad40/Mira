@@ -14,6 +14,7 @@ import {
   Pressable,
   Dimensions,
   BackHandler,
+  useWindowDimensions,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -204,6 +205,14 @@ const debugTodWarn = (...args: unknown[]) => {
 export default function CreateTodScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  // Compact-mode trigger for short windows (e.g., OnePlus CPH2691 reports
+  // h=792dp at density 480 with display zoom override). Below this threshold
+  // the natural composer content (~530dp) does not fit above the soft keyboard
+  // (~299dp) on Android with `adjustResize`, hiding the inline POST button.
+  // Samsung devices typically report >=800dp here so they keep the original
+  // spacing.
+  const { height: winHeightDp } = useWindowDimensions();
+  const isCompact = winHeightDp < 800;
   const [postType, setPostType] = useState<PostType>('truth');
   const [content, setContent] = useState('');
   const [visibility, setVisibility] = useState<VisibilityMode>('anonymous');
@@ -989,7 +998,12 @@ export default function CreateTodScreen() {
   return (
     <KeyboardAvoidingView
       style={[styles.container, { paddingTop: insets.top }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      // Android: rely on the activity's `windowSoftInputMode="adjustResize"`
+      // (set in AndroidManifest) to handle keyboard insets natively. Using
+      // `behavior="height"` here on Android caused a double-shrink on devices
+      // that report a short logical window (e.g., OnePlus CPH2691 @ h792dp),
+      // pushing the inline POST button below the keyboard.
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
     >
       <ScrollView
@@ -1012,7 +1026,12 @@ export default function CreateTodScreen() {
         </View>
 
         {/* Truth/Dare selector */}
-        <View style={styles.typeSelector}>
+        <View
+          style={[
+            styles.typeSelector,
+            isCompact && { paddingTop: 12, paddingBottom: 6 },
+          ]}
+        >
           <TouchableOpacity
             style={[styles.typeOption, postType === 'truth' && styles.typeOptionActive]}
             onPress={() => setPostType('truth')}
@@ -1030,10 +1049,15 @@ export default function CreateTodScreen() {
         </View>
 
         {/* Input */}
-        <View style={styles.inputContainer}>
+        <View
+          style={[
+            styles.inputContainer,
+            isCompact && { paddingTop: 4, paddingBottom: 4 },
+          ]}
+        >
           <View style={styles.inputCard}>
             <TextInput
-              style={styles.textInput}
+              style={[styles.textInput, isCompact && { minHeight: 84 }]}
               placeholder={
                 postType === 'truth'
                   ? 'Ask a truth question...'
@@ -1097,8 +1121,18 @@ export default function CreateTodScreen() {
         </View>
 
         {/* 3-Option Visibility Selector */}
-        <View style={styles.visibilityContainer}>
-          <Text style={styles.visibilityLabel} maxFontSizeMultiplier={1.2}>Who can see your identity?</Text>
+        <View
+          style={[
+            styles.visibilityContainer,
+            isCompact && { paddingTop: 8, paddingBottom: 6 },
+          ]}
+        >
+          <Text
+            style={[styles.visibilityLabel, isCompact && { marginBottom: 6 }]}
+            maxFontSizeMultiplier={1.2}
+          >
+            Who can see your identity?
+          </Text>
           <View style={styles.visibilityOptions}>
             {/* Anonymous */}
             <TouchableOpacity
@@ -1145,7 +1179,10 @@ export default function CreateTodScreen() {
               </Text>
             </TouchableOpacity>
           </View>
-          <Text style={styles.visibilityHint} maxFontSizeMultiplier={1.15}>
+          <Text
+            style={[styles.visibilityHint, isCompact && { marginTop: 4 }]}
+            maxFontSizeMultiplier={1.15}
+          >
             {visibility === 'anonymous'
               ? 'Your identity is completely hidden'
               : visibility === 'public'
@@ -1172,7 +1209,11 @@ export default function CreateTodScreen() {
               not attached to the keyboard. Scrolls with the rest of the
               composer content. */}
           <TouchableOpacity
-            style={[styles.postButtonMain, !canSubmit && styles.postButtonMainDisabled]}
+            style={[
+              styles.postButtonMain,
+              isCompact && { marginTop: 8, marginBottom: 8, paddingVertical: 13 },
+              !canSubmit && styles.postButtonMainDisabled,
+            ]}
             onPress={handleSubmit}
             disabled={!canSubmit}
             activeOpacity={0.8}

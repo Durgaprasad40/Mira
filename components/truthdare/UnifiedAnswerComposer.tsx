@@ -6,7 +6,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal, TextInput,
-  KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
+  KeyboardAvoidingView, Keyboard, Platform, Alert, ActivityIndicator,
+  ScrollView, useWindowDimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
@@ -53,7 +54,6 @@ const MEDIA_CAMERA_COLOR = '#E94560'; // pink/red
 const MEDIA_VOICE_COLOR = '#FF9800'; // orange/yellow
 const IDENTITY_OPTION_ICON_SIZE = SIZES.icon.sm;
 const VISIBILITY_ICON_SIZE = SIZES.icon.xs;
-const FOOTER_ICON_SIZE = SIZES.icon.xs;
 const SUBMIT_ICON_SIZE = moderateScale(18, 0.25);
 const FULLSCREEN_CLOSE_ICON_SIZE = moderateScale(26, 0.25);
 const CONFIRM_ICON_SIZE = SIZES.icon.xl;
@@ -135,6 +135,11 @@ export function UnifiedAnswerComposer({
   isSubmitting,
 }: UnifiedAnswerComposerProps) {
   const insets = useSafeAreaInsets();
+  // Batch 1: responsive compact mode for small Android screens (e.g. OnePlus
+  // CPH2691 reports h≈792dp). Mirrors `incognito-create-tod.tsx`'s pattern so
+  // the composer behaves the same way under tight keyboard-open layouts.
+  const { height: winHeightDp } = useWindowDimensions();
+  const isCompact = winHeightDp < 800;
 
   // Text state
   const [text, setText] = useState(initialText || '');
@@ -173,6 +178,28 @@ export function UnifiedAnswerComposer({
   // P1-001: Media confirmation modal state
   const [showMediaConfirmModal, setShowMediaConfirmModal] = useState(false);
 
+  // Batch 2: + attachment menu visibility (Gallery / Camera / Voice).
+  // Replaces the always-visible 3-button row. UI-only: handlers below
+  // (`pickFromGallery`, `openMediaCamera`, `startRecording`) are unchanged.
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+
+  // Batch 4 fix: track keyboard open/close so we can collapse the sheet's
+  // safe-area paddingBottom when the keyboard is up. Without this the
+  // sheet keeps `insets.bottom + SPACING.base` of padding under the Post
+  // footer, which the KAV's "padding" behavior then sits on top of —
+  // producing the visible blank dark strip between Post and the keyboard.
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, () => setKeyboardOpen(true));
+    const hideSub = Keyboard.addListener(hideEvt, () => setKeyboardOpen(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
   // Refs
   const recordingRef = useRef<Audio.Recording | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
@@ -197,6 +224,7 @@ export function UnifiedAnswerComposer({
       setMediaVisibility('private');
       setFullscreenMedia(null);
       setShowMediaCamera(false);
+      setShowAttachMenu(false);
       debugTodLog('[T/D COMPOSER] open', {
         mode: promptType,
         hasExistingAnswer: !!initialText || !!initialAttachment,
@@ -599,7 +627,7 @@ export function UnifiedAnswerComposer({
     });
 
     if (!hasText) {
-      Alert.alert('Text Required', 'Please add some text to your answer.');
+      Alert.alert('Text Required', 'Please add some text to your comment.');
       return;
     }
 
@@ -636,10 +664,37 @@ export function UnifiedAnswerComposer({
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
       <KeyboardAvoidingView
         style={styles.overlay}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        // Batch 4 fix: lift the WHOLE composer (header + ScrollView +
+        // Reply-as + Post) as one unit when the keyboard opens. We use
+        // `behavior="padding"` on both platforms because transparent
+        // RN Modals on Android frequently fall back to `adjustPan`
+        // even when the manifest declares `adjustResize`, which only
+        // pans the focused TextInput and leaves the sticky footer
+        // (Post button) below the keyboard. With "padding" the KAV
+        // adds a bottom-pad equal to the keyboard height, pushing the
+        // sheet upward in one piece. We avoid `behavior="height"` —
+        // that one *did* double-shrink with adjustResize and previously
+        // hid the footer on small Android screens.
+        behavior="padding"
         keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
       >
-        <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, SPACING.base) + SPACING.base }]}>
+        <View
+          style={[
+            styles.sheet,
+            {
+              // Batch 4 fix: when the keyboard is open, the KAV's "padding"
+              // behavior already lifts the sheet to sit just above the
+              // keyboard. Adding the system safe-area inset on top of that
+              // produces the visible empty dark strip below Post. Collapse
+              // to a tiny breathing-room pad while typing; restore the full
+              // safe-area pad when the keyboard is closed so Post still
+              // clears the system nav bar at rest.
+              paddingBottom: keyboardOpen
+                ? SPACING.xs
+                : Math.max(insets.bottom, SPACING.base) + SPACING.base,
+            },
+          ]}
+        >
           {/* Header */}
           <View style={styles.header}>
             <View style={[styles.badge, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
@@ -651,107 +706,160 @@ export function UnifiedAnswerComposer({
             </TouchableOpacity>
           </View>
 
-          <View style={styles.content}>
-            {/* Text Input */}
-            <TextInput
-              style={styles.textInput}
-              placeholder="Write your answer..."
-              placeholderTextColor={C.textLight}
-              value={text}
-              onChangeText={setText}
-              multiline
-              maxLength={MAX_TEXT_CHARS}
-              maxFontSizeMultiplier={TEXT_MAX_SCALE}
-              autoComplete="off"
-              textContentType="none"
-              importantForAutofill="noExcludeDescendants"
-            />
-            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.charCount}>{text.length}/{MAX_TEXT_CHARS}</Text>
-
-            {/* Attachment Preview */}
-            {attachment && (
-              <View style={styles.attachmentPreview}>
-                {attachment.kind === 'audio' && (
-                  <View style={styles.audioPreview}>
-                    <TouchableOpacity onPress={playAudioPreview} style={styles.audioPlayBtn}>
-                      <Ionicons
-                        name={isPlayingPreview ? 'pause-circle' : 'play-circle'}
-                        size={AUDIO_PREVIEW_ICON_SIZE}
-                        color={C.primary}
-                      />
-                    </TouchableOpacity>
-                    <View style={styles.audioWaveform}>
-                      {Array.from({ length: 12 }).map((_, i) => (
-                        <View
-                          key={i}
-                          style={[styles.audioBar, { height: moderateScale(6 + (i % 4) * 5, 0.3) }]}
-                        />
-                      ))}
-                    </View>
-                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.audioDuration}>
-                      {formatTime(Math.ceil((attachment.durationMs || 0) / 1000))}
-                    </Text>
-                    <TouchableOpacity onPress={removeAttachment} style={styles.removeBtn}>
-                      <Ionicons name="close-circle" size={AUDIO_REMOVE_ICON_SIZE} color={C.textLight} />
-                    </TouchableOpacity>
-                  </View>
+          {/* Batch 1: middle content is now a ScrollView so it can shrink and
+              scroll when the keyboard reduces available height. The footer
+              (Post button) remains sibling of this ScrollView and therefore
+              sticky at the bottom of the sheet, always visible above the
+              keyboard. `keyboardShouldPersistTaps="handled"` lets users tap
+              attachment buttons / chips while the keyboard is open. */}
+          <ScrollView
+            style={styles.contentScroll}
+            contentContainerStyle={[styles.content, isCompact && styles.contentCompact]}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Batch 2: text input wrapped in a card with charCount + plus
+                button as a single bottom-right control. Replaces the old
+                always-visible 3-button Gallery/Camera/Voice row. */}
+            <View style={[styles.inputCard, isCompact && styles.inputCardCompact]}>
+              <TextInput
+                style={[styles.textInput, isCompact && styles.textInputCompact]}
+                placeholder="Write your comment..."
+                placeholderTextColor={C.textLight}
+                value={text}
+                onChangeText={setText}
+                multiline
+                maxLength={MAX_TEXT_CHARS}
+                maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                autoComplete="off"
+                textContentType="none"
+                importantForAutofill="noExcludeDescendants"
+              />
+              <View style={styles.inputCardFooter}>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.inputCardCharCount}>
+                  {text.length}/{MAX_TEXT_CHARS}
+                </Text>
+                {!attachment && !isRecording && (
+                  <TouchableOpacity
+                    onPress={() => setShowAttachMenu((v) => !v)}
+                    style={[styles.plusBtn, showAttachMenu && styles.plusBtnActive]}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Ionicons
+                      name={showAttachMenu ? 'close' : 'add'}
+                      size={moderateScale(20, 0.25)}
+                      color={showAttachMenu ? '#FFF' : C.primary}
+                    />
+                  </TouchableOpacity>
                 )}
+              </View>
+            </View>
 
-                {attachment.kind === 'photo' && (() => {
-                  const shouldUnmirror = attachment.isFrontCamera === true;
-                  // P3-004: Gate noisy render-time log with __DEV__
-                  debugTodLog(`[T/D Composer] previewRender kind=photo isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
-                  return (
-                    <TouchableOpacity
-                      style={styles.mediaPreview}
-                      onPress={() => setFullscreenMedia({ uri: attachment.uri, type: 'photo', isFrontCamera: attachment.isFrontCamera })}
-                      activeOpacity={0.8}
-                    >
-                      <Image source={{ uri: attachment.uri }} style={[styles.mediaThumbnail, shouldUnmirror && styles.unmirrorMedia]} />
-                      <View style={styles.mediaOverlay}>
-                        <Ionicons name="expand-outline" size={MEDIA_OVERLAY_ICON_SIZE} color="#FFF" />
-                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaLabel}>Tap to preview</Text>
-                      </View>
-                      <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                        <Ionicons name="close-circle" size={REMOVE_MEDIA_ICON_SIZE} color="#FFF" />
-                      </TouchableOpacity>
-                    </TouchableOpacity>
-                  );
-                })()}
-
-                {attachment.kind === 'video' && (() => {
-                  const shouldUnmirror = attachment.isFrontCamera === true;
-                  // P3-004: Gate noisy render-time log with __DEV__
-                  debugTodLog(`[T/D Composer] previewRender kind=video isFrontCamera=${attachment.isFrontCamera} applyUnmirror=${shouldUnmirror}`);
-                  return (
-                    <TouchableOpacity
-                      style={styles.mediaPreview}
-                      onPress={() => setFullscreenMedia({ uri: attachment.uri, type: 'video', isFrontCamera: attachment.isFrontCamera })}
-                      activeOpacity={0.8}
-                    >
-                      <Video
-                        source={{ uri: attachment.uri }}
-                        style={[styles.mediaThumbnail, shouldUnmirror && styles.unmirrorMedia]}
-                        resizeMode={ResizeMode.COVER}
-                        shouldPlay={false}
-                        isMuted
-                      />
-                      <View style={styles.mediaOverlay}>
-                        <Ionicons name="play-circle" size={VIDEO_OVERLAY_ICON_SIZE} color="#FFF" />
-                        <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.mediaLabel}>Tap to preview</Text>
-                      </View>
-                      <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                        <Ionicons name="close-circle" size={REMOVE_MEDIA_ICON_SIZE} color="#FFF" />
-                      </TouchableOpacity>
-                    </TouchableOpacity>
-                  );
-                })()}
+            {/* Compact + menu — only when no attachment, not recording, and
+                user tapped +. Auto-closes once a choice is made. Handlers
+                are unchanged: pickFromGallery / openMediaCamera /
+                startRecording. */}
+            {showAttachMenu && !attachment && !isRecording && (
+              <View style={styles.attachMenu}>
+                <TouchableOpacity
+                  style={[styles.attachMenuItem, styles.attachMenuItemGallery]}
+                  onPress={() => { setShowAttachMenu(false); setLastMediaIntent('gallery'); pickFromGallery(); }}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="images" size={moderateScale(18, 0.25)} color={MEDIA_GALLERY_COLOR} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachMenuLabel}>Gallery</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.attachMenuItem, styles.attachMenuItemCamera]}
+                  onPress={() => { setShowAttachMenu(false); setLastMediaIntent('camera'); openMediaCamera(); }}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="camera" size={moderateScale(18, 0.25)} color={MEDIA_CAMERA_COLOR} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachMenuLabel}>Camera</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.attachMenuItem, styles.attachMenuItemVoice]}
+                  onPress={() => { setShowAttachMenu(false); setLastMediaIntent('voice'); startRecording(); }}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="mic" size={moderateScale(18, 0.25)} color={MEDIA_VOICE_COLOR} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachMenuLabel}>Voice</Text>
+                </TouchableOpacity>
               </View>
             )}
 
+            {/* Compact attachment chip — replaces the heavy media tile.
+                Tap chip body → existing preview logic (fullscreen for
+                photo/video, inline player toggle for voice). X removes
+                via existing removeAttachment(). */}
+            {attachment && (() => {
+              const isAudio = attachment.kind === 'audio';
+              const isPhoto = attachment.kind === 'photo';
+              const chipIcon: keyof typeof Ionicons.glyphMap = isAudio
+                ? (isPlayingPreview ? 'pause-circle' : 'play-circle')
+                : isPhoto
+                ? 'image'
+                : 'videocam';
+              const chipAccent = isAudio
+                ? MEDIA_VOICE_COLOR
+                : isPhoto
+                ? MEDIA_GALLERY_COLOR
+                : MEDIA_CAMERA_COLOR;
+              const chipLabel = isAudio
+                ? `Voice · ${formatTime(Math.ceil((attachment.durationMs || 0) / 1000))}`
+                : isPhoto
+                ? 'Photo attached'
+                : 'Video attached';
+              const handleChipPress = () => {
+                if (isAudio) {
+                  playAudioPreview();
+                } else {
+                  setFullscreenMedia({
+                    uri: attachment.uri,
+                    type: attachment.kind as 'photo' | 'video',
+                    isFrontCamera: attachment.isFrontCamera,
+                  });
+                }
+              };
+              debugTodLog(`[T/D Composer] chipRender kind=${attachment.kind} isFrontCamera=${attachment.isFrontCamera}`);
+              return (
+                <TouchableOpacity
+                  style={[styles.attachmentChip, { borderColor: chipAccent + '55', backgroundColor: chipAccent + '14' }]}
+                  onPress={handleChipPress}
+                  activeOpacity={0.8}
+                >
+                  <View style={[styles.attachmentChipIcon, { backgroundColor: chipAccent + '22' }]}>
+                    <Ionicons name={chipIcon} size={moderateScale(18, 0.25)} color={chipAccent} />
+                  </View>
+                  <Text
+                    maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                    style={styles.attachmentChipLabel}
+                    numberOfLines={1}
+                  >
+                    {chipLabel}
+                  </Text>
+                  <Text
+                    maxFontSizeMultiplier={TEXT_MAX_SCALE}
+                    style={styles.attachmentChipHint}
+                    numberOfLines={1}
+                  >
+                    {isAudio ? (isPlayingPreview ? 'Tap to pause' : 'Tap to play') : 'Tap to preview'}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={removeAttachment}
+                    style={styles.attachmentChipRemove}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="close" size={moderateScale(16, 0.25)} color={C.textLight} />
+                  </TouchableOpacity>
+                </TouchableOpacity>
+              );
+            })()}
+
             {/* Recording indicator */}
             {isRecording && (
-              <View style={styles.recordingIndicator}>
+              <View style={[styles.recordingIndicator, isCompact && styles.recordingIndicatorCompact]}>
                 <View style={styles.recordingDot} />
                 <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.recordingText}>Recording... {formatTime(recordSeconds)}</Text>
                 <TouchableOpacity onPress={stopRecording} style={styles.stopRecordBtn}>
@@ -760,126 +868,64 @@ export function UnifiedAnswerComposer({
               </View>
             )}
 
-            {/* Attachment buttons */}
-            {/* Media chooser: colorful tiles + dynamic helper line below (UI-only state) */}
-            {!attachment && !isRecording && (
-              <View style={styles.attachmentBlock}>
-                <View style={styles.attachmentButtons}>
-                  <TouchableOpacity
-                    style={[styles.attachBtn, styles.attachBtnGallery]}
-                    onPress={() => { setLastMediaIntent('gallery'); pickFromGallery(); }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="images" size={ATTACH_ICON_SIZE} color={MEDIA_GALLERY_COLOR} />
-                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Gallery</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.attachBtn, styles.attachBtnCamera]}
-                    onPress={() => { setLastMediaIntent('camera'); openMediaCamera(); }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="camera" size={ATTACH_ICON_SIZE} color={MEDIA_CAMERA_COLOR} />
-                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Camera</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.attachBtn, styles.attachBtnVoice]}
-                    onPress={() => { setLastMediaIntent('voice'); startRecording(); }}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="mic" size={ATTACH_ICON_SIZE} color={MEDIA_VOICE_COLOR} />
-                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachBtnText}>Voice</Text>
-                  </TouchableOpacity>
-                </View>
-                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.attachmentHelperText}>
-                  {lastMediaIntent === 'gallery'
-                    ? 'Choose a photo or video from your gallery.'
-                    : lastMediaIntent === 'camera'
-                    ? 'Take a photo or record a short video.'
-                    : lastMediaIntent === 'voice'
-                    ? 'Record a voice reply up to 60 seconds.'
-                    : 'Optional: add a photo, video, or voice.'}
-                </Text>
-              </View>
-            )}
-
             {/* Identity Picker - only show for new answers */}
             {/* Identity Correction: side-by-side compact tiles with dynamic description below */}
             {/* Backend values unchanged: anonymous / no_photo / profile */}
+            {/* Batch 4: Reply-as is now text-only chips. Icons were
+                removed for a cleaner, premium look. Identity values
+                (anonymous / no_photo / profile) and handlers are
+                UNCHANGED. Selected chip uses primary tint + glow; the
+                helper line below changes copy per selection. */}
             {isNewAnswer && (
-              <View style={styles.identitySection}>
-                <View style={styles.identityHeader}>
-                  <View style={styles.identityHeaderText}>
-                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityTitle}>Reply as</Text>
-                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identitySubtitle}>Choose how they'll see you</Text>
-                  </View>
-                </View>
-                <View style={styles.identityTilesRow}>
-                  {/* Anonymous (DEFAULT) */}
+              <View style={styles.identityRow}>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityRowLabel}>Reply as</Text>
+                <View style={styles.identityChipsRow}>
                   <TouchableOpacity
-                    style={[styles.identityTile, identityMode === 'anonymous' && styles.identityTileActive]}
+                    style={[styles.identityChip, identityMode === 'anonymous' && styles.identityChipActive]}
                     onPress={() => setIdentityMode('anonymous')}
                     activeOpacity={0.7}
                   >
-                    <Ionicons
-                      name="eye-off"
-                      size={IDENTITY_OPTION_ICON_SIZE}
-                      color={identityMode === 'anonymous' ? C.primary : C.textLight}
-                    />
                     <Text
                       maxFontSizeMultiplier={TEXT_MAX_SCALE}
                       numberOfLines={1}
-                      style={[styles.identityTileLabel, identityMode === 'anonymous' && styles.identityTileLabelActive]}
+                      style={[styles.identityChipLabel, identityMode === 'anonymous' && styles.identityChipLabelActive]}
                     >
                       Anonymous
                     </Text>
                   </TouchableOpacity>
-
-                  {/* Blur photo (no_photo) */}
                   <TouchableOpacity
-                    style={[styles.identityTile, identityMode === 'no_photo' && styles.identityTileActive]}
+                    style={[styles.identityChip, identityMode === 'no_photo' && styles.identityChipActive]}
                     onPress={() => setIdentityMode('no_photo')}
                     activeOpacity={0.7}
                   >
-                    <Ionicons
-                      name="image-outline"
-                      size={IDENTITY_OPTION_ICON_SIZE}
-                      color={identityMode === 'no_photo' ? C.primary : C.textLight}
-                    />
                     <Text
                       maxFontSizeMultiplier={TEXT_MAX_SCALE}
                       numberOfLines={1}
-                      style={[styles.identityTileLabel, identityMode === 'no_photo' && styles.identityTileLabelActive]}
+                      style={[styles.identityChipLabel, identityMode === 'no_photo' && styles.identityChipLabelActive]}
                     >
                       Blur photo
                     </Text>
                   </TouchableOpacity>
-
-                  {/* Full profile */}
                   <TouchableOpacity
-                    style={[styles.identityTile, identityMode === 'profile' && styles.identityTileActive]}
+                    style={[styles.identityChip, identityMode === 'profile' && styles.identityChipActive]}
                     onPress={() => setIdentityMode('profile')}
                     activeOpacity={0.7}
                   >
-                    <Ionicons
-                      name="person"
-                      size={IDENTITY_OPTION_ICON_SIZE}
-                      color={identityMode === 'profile' ? C.primary : C.textLight}
-                    />
                     <Text
                       maxFontSizeMultiplier={TEXT_MAX_SCALE}
                       numberOfLines={1}
-                      style={[styles.identityTileLabel, identityMode === 'profile' && styles.identityTileLabelActive]}
+                      style={[styles.identityChipLabel, identityMode === 'profile' && styles.identityChipLabelActive]}
                     >
                       Full profile
                     </Text>
                   </TouchableOpacity>
                 </View>
-                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityDescription}>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.identityHelperText}>
                   {identityMode === 'anonymous'
                     ? 'No name, no photo'
                     : identityMode === 'no_photo'
-                    ? 'They see your name; photo is blurred'
-                    : 'Name, age, and clear photo'}
+                    ? 'Blurred photo, name hidden'
+                    : 'Name and photo visible'}
                 </Text>
               </View>
             )}
@@ -889,8 +935,8 @@ export function UnifiedAnswerComposer({
             {/* P1-005 FIX: Include voice messages in visibility options */}
             {/* P1-002 FIX: Clearer labels with icons */}
             {isNewAnswer && attachment && (
-              <View style={styles.visibilitySection}>
-                <View style={styles.visibilityHeader}>
+              <View style={[styles.visibilitySection, isCompact && styles.visibilitySectionCompact]}>
+                <View style={[styles.visibilityHeader, isCompact && styles.visibilityHeaderCompact]}>
                   <Ionicons name="eye-outline" size={VISIBILITY_ICON_SIZE} color={C.textLight} />
                   <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityTitle}>Who can view your {attachment.kind === 'audio' ? 'voice message' : attachment.kind}?</Text>
                 </View>
@@ -898,6 +944,7 @@ export function UnifiedAnswerComposer({
                   <TouchableOpacity
                     style={[
                       styles.segmentBtn,
+                      isCompact && styles.segmentBtnCompact,
                       mediaVisibility === 'private' && styles.segmentBtnActive,
                     ]}
                     onPress={() => setMediaVisibility('private')}
@@ -916,6 +963,7 @@ export function UnifiedAnswerComposer({
                   <TouchableOpacity
                     style={[
                       styles.segmentBtn,
+                      isCompact && styles.segmentBtnCompact,
                       mediaVisibility === 'public' && styles.segmentBtnActive,
                     ]}
                     onPress={() => setMediaVisibility('public')}
@@ -932,21 +980,23 @@ export function UnifiedAnswerComposer({
                     ]}>Everyone</Text>
                   </TouchableOpacity>
                 </View>
-                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.visibilityHelperText}>
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={[styles.visibilityHelperText, isCompact && styles.visibilityHelperTextCompact]}>
                   {mediaVisibility === 'private'
                     ? 'Only the prompt creator can view this'
                     : 'Anyone viewing this thread can see it'}
                 </Text>
               </View>
             )}
-          </View>
+          </ScrollView>
 
-          {/* Footer */}
-          <View style={styles.footer}>
-            <View style={styles.viewModeHint}>
-              <Ionicons name="eye-outline" size={FOOTER_ICON_SIZE} color={C.textLight} />
-              <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.viewModeText}>Tap to view</Text>
-            </View>
+          {/* Footer — sticky bottom, sibling of ScrollView. Stays above
+              the keyboard on every device because the ScrollView
+              absorbs the shrink, not the footer. Batch 4 fix: removed
+              the noisy "Tap to view" hint and the borderTop divider so
+              Post feels visually attached to the last content row
+              (Reply-as helper text, or "Who can view your media?" when
+              media is attached). */}
+          <View style={[styles.footer, isCompact && styles.footerCompact]}>
             <TouchableOpacity
               style={[styles.submitBtn, !canSubmit && styles.submitBtnDisabled]}
               onPress={handleSubmit}
@@ -1069,7 +1119,12 @@ const styles = StyleSheet.create({
     backgroundColor: C.background,
     borderTopLeftRadius: SHEET_RADIUS,
     borderTopRightRadius: SHEET_RADIUS,
-    maxHeight: '90%',
+    // Batch 4: drop ~10% off the visible height. Removing `minHeight`
+    // lets the sheet contract when the keyboard opens (so Post stays
+    // above the keyboard) and avoids the oversized look on tall
+    // devices. `maxHeight` still caps it so the header/handle stays
+    // clear of the status bar.
+    maxHeight: '85%',
   },
   header: {
     flexDirection: 'row',
@@ -1084,19 +1139,226 @@ const styles = StyleSheet.create({
   badgeText: { fontSize: FONT_SIZE.xs, lineHeight: lineHeight(FONT_SIZE.xs, 1.2), fontWeight: '700', color: '#FFF' },
   promptPreview: { flex: 1, fontSize: FONT_SIZE.body2, lineHeight: lineHeight(FONT_SIZE.body2, 1.35), color: C.textLight },
 
-  content: { paddingHorizontal: SPACING.base, paddingVertical: SPACING.md },
+  // Batch 4: trim vertical paddings so the ScrollView content sits
+  // closer to the sticky footer (Post). Bottom padding intentionally
+  // small — the footer's own paddingTop provides the visible gap.
+  content: { paddingHorizontal: SPACING.base, paddingTop: SPACING.md, paddingBottom: SPACING.sm },
 
+  // Batch 3: premium input card. textInput is transparent inside the
+  // card so charCount + plus button feel like one unit.
+  // Batch 4: bring the input card back to a normal premium height
+  // (96→80) so the composer is not oversized; keep transparent input,
+  // soft shadow, and the + button anchored bottom-right.
   textInput: {
-    backgroundColor: C.surface,
-    borderRadius: SIZES.radius.md,
-    padding: SPACING.md,
+    backgroundColor: 'transparent',
+    paddingHorizontal: 0,
+    paddingTop: 0,
+    paddingBottom: SPACING.sm,
     fontSize: FONT_SIZE.md,
     color: C.text,
-    lineHeight: lineHeight(FONT_SIZE.md, 1.35),
+    lineHeight: lineHeight(FONT_SIZE.md, 1.4),
     minHeight: moderateScale(80, 0.25),
     textAlignVertical: 'top',
   },
-  charCount: { fontSize: FONT_SIZE.sm, lineHeight: lineHeight(FONT_SIZE.sm, 1.2), color: C.textLight, textAlign: 'right', marginTop: SPACING.xxs, marginBottom: SPACING.sm },
+  inputCard: {
+    backgroundColor: C.surface,
+    borderRadius: moderateScale(14, 0.25),
+    paddingHorizontal: SPACING.md + 2,
+    paddingTop: SPACING.md - 2,
+    paddingBottom: SPACING.sm,
+    borderWidth: 1,
+    borderColor: C.textLight + '1F',
+    marginBottom: SPACING.sm + 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 1,
+  },
+  inputCardCompact: {
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.sm + 4,
+    paddingBottom: SPACING.sm,
+    marginBottom: SPACING.sm + 2,
+  },
+  inputCardFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: SPACING.xs,
+    minHeight: moderateScale(36, 0.25),
+  },
+  inputCardCharCount: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
+    color: C.textLight,
+    fontWeight: '500',
+  },
+  plusBtn: {
+    width: moderateScale(36, 0.25),
+    height: moderateScale(36, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: C.primary + '1F',
+    borderWidth: 1.5,
+    borderColor: C.primary + '66',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  plusBtnActive: {
+    backgroundColor: C.primary,
+    borderColor: C.primary,
+    shadowColor: C.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+
+  // + menu (Gallery / Camera / Voice) — compact horizontal row, only
+  // shown when user taps +. Auto-closes once a choice is made.
+  attachMenu: {
+    flexDirection: 'row',
+    gap: SPACING.sm + 2,
+    marginBottom: SPACING.md,
+  },
+  attachMenuItem: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.xs + 2,
+    paddingVertical: SPACING.md - 2,
+    paddingHorizontal: SPACING.xs,
+    backgroundColor: C.surface,
+    borderRadius: moderateScale(12, 0.25),
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  attachMenuItemGallery: {
+    backgroundColor: MEDIA_GALLERY_COLOR + '14',
+    borderColor: MEDIA_GALLERY_COLOR + '33',
+  },
+  attachMenuItemCamera: {
+    backgroundColor: MEDIA_CAMERA_COLOR + '14',
+    borderColor: MEDIA_CAMERA_COLOR + '33',
+  },
+  attachMenuItemVoice: {
+    backgroundColor: MEDIA_VOICE_COLOR + '14',
+    borderColor: MEDIA_VOICE_COLOR + '33',
+  },
+  attachMenuLabel: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
+    fontWeight: '600',
+    color: C.text,
+  },
+
+  // Compact attachment chip (shown when media is attached). Tap body =
+  // existing preview logic; X = existing remove logic.
+  attachmentChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.sm + 2,
+    borderRadius: moderateScale(12, 0.25),
+    borderWidth: 1,
+    marginBottom: SPACING.sm,
+  },
+  attachmentChipIcon: {
+    width: moderateScale(32, 0.25),
+    height: moderateScale(32, 0.25),
+    borderRadius: SIZES.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentChipLabel: {
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.2),
+    fontWeight: '600',
+    color: C.text,
+  },
+  attachmentChipHint: {
+    flex: 1,
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
+    color: C.textLight,
+    textAlign: 'right',
+  },
+  attachmentChipRemove: {
+    width: moderateScale(24, 0.25),
+    height: moderateScale(24, 0.25),
+    borderRadius: SIZES.radius.full,
+    backgroundColor: C.textLight + '22',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // Batch 3: premium Reply-as section. Bigger chips, vertical
+  // icon-on-top layout, clearer active state, helper line below.
+  // Batch 4: tighten bottom margin so Post sits right under Reply-as
+  // instead of floating at the bottom with empty space.
+  identityRow: {
+    marginBottom: SPACING.sm,
+  },
+  identityRowLabel: {
+    fontSize: FONT_SIZE.xs,
+    lineHeight: lineHeight(FONT_SIZE.xs, 1.2),
+    fontWeight: '700',
+    color: C.textLight,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: SPACING.sm,
+  },
+  identityChipsRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm + 2,
+  },
+  identityChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Batch 4: text-only chips. Balanced vertical/horizontal padding
+    // gives readable height without feeling cramped or oversized. The
+    // 12 dp radius reads as a soft pill with the existing 1.5 dp
+    // border.
+    paddingVertical: SPACING.sm + 4,
+    paddingHorizontal: SPACING.sm,
+    borderRadius: moderateScale(12, 0.25),
+    backgroundColor: C.surface,
+    borderWidth: 1.5,
+    borderColor: C.textLight + '1F',
+  },
+  identityChipActive: {
+    // Batch 4 fix: drop elevation + shadow* — Android was painting the
+    // elevation as a dark horizontal band along the chip bottom, which
+    // looked like a leftover icon container behind the label. Selected
+    // state is now signalled solely by a clearer coral tint + coral
+    // border + coral label (see identityChipLabelActive). No shadows.
+    backgroundColor: C.primary + '24',
+    borderColor: C.primary,
+  },
+  identityChipLabel: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.2),
+    fontWeight: '600',
+    color: C.text,
+    textAlign: 'center',
+  },
+  identityChipLabelActive: {
+    color: C.primary,
+    fontWeight: '700',
+  },
+  identityHelperText: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: lineHeight(FONT_SIZE.sm, 1.35),
+    color: C.textLight,
+    textAlign: 'center',
+    // Batch 4: tighter helper margin to keep the section compact.
+    marginTop: SPACING.xs + 2,
+    fontStyle: 'italic',
+  },
 
   // Attachment preview
   attachmentPreview: { marginBottom: SPACING.sm },
@@ -1323,30 +1585,36 @@ const styles = StyleSheet.create({
     marginTop: SPACING.sm - 2,
   },
 
-  // Footer
+  // Footer — Batch 4 fix: drop the borderTop divider and the
+  // "Tap to view" hint so the Post button reads as part of the
+  // composer body, not a separate bottom bar. Right-align Post and
+  // keep paddings tight so it sits just below the last content row.
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     paddingHorizontal: SPACING.base,
-    paddingTop: SPACING.base,
-    paddingBottom: SPACING.base,
-    borderTopWidth: 1,
-    borderTopColor: C.surface,
+    paddingTop: SPACING.xs,
+    paddingBottom: SPACING.xs,
   },
-  viewModeHint: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm - 2 },
-  viewModeText: { fontSize: FONT_SIZE.caption, lineHeight: lineHeight(FONT_SIZE.caption, 1.2), color: C.textLight },
   submitBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING.sm - 2,
+    gap: SPACING.sm,
     backgroundColor: C.primary,
+    // Batch 4: less oversized — keeps the premium primary glow but
+    // matches the tightened footer paddingTop.
     paddingHorizontal: SPACING.xl,
     paddingVertical: SPACING.md,
     borderRadius: SIZES.radius.xl,
+    shadowColor: C.primary,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.32,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  submitBtnDisabled: { opacity: 0.5 },
-  submitText: { fontSize: FONT_SIZE.body, lineHeight: lineHeight(FONT_SIZE.body, 1.2), fontWeight: '600', color: '#FFF' },
+  submitBtnDisabled: { opacity: 0.5, shadowOpacity: 0, elevation: 0 },
+  submitText: { fontSize: FONT_SIZE.body, lineHeight: lineHeight(FONT_SIZE.body, 1.2), fontWeight: '700', color: '#FFF', letterSpacing: 0.3 },
 
   // Fullscreen media preview
   fullscreenOverlay: {
@@ -1440,5 +1708,73 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     lineHeight: lineHeight(FONT_SIZE.body, 1.2),
     color: '#FFF',
+  },
+
+  // ────────────────────────────────────────────────────────────────────
+  // Batch 1: compact-mode overrides (applied when winHeightDp < 800)
+  // Goal: keep ALL controls visible above the keyboard on small Android
+  // screens (e.g. OnePlus CPH2691 ≈ 792dp) without changing layout on
+  // taller devices. Each *Compact entry only tightens spacing/heights;
+  // it never changes colors, fonts, or behavior.
+  // ────────────────────────────────────────────────────────────────────
+  contentScroll: {
+    // Empty by design: the ScrollView itself uses default flexShrink so
+    // it absorbs the remaining vertical space between header and footer.
+    // Inner paddings live on `content` / `contentCompact` via
+    // contentContainerStyle so the scrollbar stays at the edge.
+  },
+  contentCompact: {
+    // Reclaim ~8dp horizontally and ~6dp vertically; the inner cards
+    // already have their own padding, so this just trims the gutter.
+    paddingHorizontal: SPACING.sm + 2,
+    paddingVertical: SPACING.sm,
+  },
+  textInputCompact: {
+    // 80 → 64 dp: still 3 lines of text at default scale, but reclaims
+    // ~16dp which is critical when the keyboard is open on small screens.
+    minHeight: moderateScale(64, 0.25),
+  },
+  recordingIndicatorCompact: {
+    padding: SPACING.sm + 2,
+    marginBottom: SPACING.sm,
+  },
+  attachmentBlockCompact: {
+    marginBottom: SPACING.xs,
+  },
+  attachmentHelperTextCompact: {
+    marginTop: SPACING.xs,
+  },
+  identitySectionCompact: {
+    padding: SPACING.sm,
+    marginBottom: SPACING.xs,
+  },
+  identityHeaderCompact: {
+    marginBottom: SPACING.xs,
+  },
+  identityTileCompact: {
+    paddingVertical: SPACING.sm,
+  },
+  identityDescriptionCompact: {
+    marginTop: SPACING.xs,
+  },
+  visibilitySectionCompact: {
+    padding: SPACING.sm,
+    marginBottom: SPACING.xs,
+  },
+  visibilityHeaderCompact: {
+    marginBottom: SPACING.xs,
+  },
+  segmentBtnCompact: {
+    paddingVertical: SPACING.sm,
+  },
+  visibilityHelperTextCompact: {
+    marginTop: SPACING.xs,
+  },
+  footerCompact: {
+    // Batch 4 fix: keep compact-mode footer flush with the body too —
+    // the divider/hint are gone, so we no longer need extra breathing
+    // room here.
+    paddingTop: SPACING.xs,
+    paddingBottom: SPACING.xs,
   },
 });

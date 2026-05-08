@@ -77,7 +77,7 @@ export function PendingAnswerCard({ item, onRetry, onRemove }: PendingAnswerCard
               {authorLabel}
             </Text>
             <Text style={styles.pendingLabel} numberOfLines={1}>
-              Pending answer
+              Pending comment
             </Text>
           </View>
         </View>
@@ -90,7 +90,7 @@ export function PendingAnswerCard({ item, onRetry, onRemove }: PendingAnswerCard
               </Text>
             ) : (
               <Text style={styles.answerTextMuted} numberOfLines={2}>
-                {hasMedia ? 'Media answer' : 'Text answer'}
+                {hasMedia ? 'Media comment' : 'Text comment'}
               </Text>
             )}
             <Text
