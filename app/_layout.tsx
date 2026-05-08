@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { AppState, AppStateStatus, LogBox, Text, TextInput } from "react-native";
-import { Stack, useRouter, useSegments } from "expo-router";
+import { Stack, useRouter, useSegments, usePathname } from "expo-router";
 
 // P0-1 STABILITY FIX: Import Sentry for crash reporting
-import { initSentry, captureException, setUserContext, clearUserContext } from "@/lib/sentry";
+import { initSentry, captureException, setUserContext, clearUserContext, trackRouteChange } from "@/lib/sentry";
+import { AppErrorBoundary } from "@/components/safety/AppErrorBoundary";
 import { DEBUG_ONBOARDING_HYDRATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 
 // Phase-1 Background Crossed Paths (iOS): side-effect import registers the
@@ -904,37 +905,60 @@ function CrossedPathToastManager() {
   return null;
 }
 
+/**
+ * SentryRouteTracker - App-wide Expo Router navigation instrumentation.
+ *
+ * Calls trackRouteChange() on every pathname change so screen breadcrumbs and
+ * performance spans cover ALL route groups (auth, onboarding, main). The
+ * (main)/_layout.tsx already calls trackRouteChange too — trackRouteChange is
+ * idempotent on identical pathnames, so the second call is a no-op.
+ *
+ * PRIVACY: Only the route pathname is sent (e.g. "/welcome", "/(main)/discover").
+ * No params, query strings, or user content.
+ */
+function SentryRouteTracker() {
+  const pathname = usePathname();
+  useEffect(() => {
+    if (!pathname) return;
+    trackRouteChange(pathname);
+  }, [pathname]);
+  return null;
+}
+
 export default function RootLayout() {
   // Milestone A: RootLayout first render
   markTiming('root_layout');
   log.info('[APP]', 'RootLayout rendering');
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <SafeAreaProvider>
-        <ConvexProvider client={convex}>
-          <StatusBar style="light" />
-          <DemoBanner />
-          <ResetEpochChecker />
-          <BootStateTracker />
-          <BootScreenWrapper />
-          <SessionValidator />
-          <PhotoSyncManager />
-          <OnboardingDraftHydrator />
-          <DeviceFingerprintCollector />
-          <PresenceAndLocationManager />
-          <CrossedPathToastManager />
-          <TruthDareUploadManager />
-          <TruthDarePromptUploadManager />
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="index" />
-            <Stack.Screen name="demo-profile" />
-            <Stack.Screen name="(auth)" />
-            <Stack.Screen name="(onboarding)" />
-            <Stack.Screen name="(main)" options={{ gestureEnabled: false }} />
-          </Stack>
-        </ConvexProvider>
-      </SafeAreaProvider>
-    </GestureHandlerRootView>
+    <AppErrorBoundary name="RootLayout">
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <SafeAreaProvider>
+          <ConvexProvider client={convex}>
+            <StatusBar style="light" />
+            <DemoBanner />
+            <SentryRouteTracker />
+            <ResetEpochChecker />
+            <BootStateTracker />
+            <BootScreenWrapper />
+            <SessionValidator />
+            <PhotoSyncManager />
+            <OnboardingDraftHydrator />
+            <DeviceFingerprintCollector />
+            <PresenceAndLocationManager />
+            <CrossedPathToastManager />
+            <TruthDareUploadManager />
+            <TruthDarePromptUploadManager />
+            <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="index" />
+              <Stack.Screen name="demo-profile" />
+              <Stack.Screen name="(auth)" />
+              <Stack.Screen name="(onboarding)" />
+              <Stack.Screen name="(main)" options={{ gestureEnabled: false }} />
+            </Stack>
+          </ConvexProvider>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
+    </AppErrorBoundary>
   );
 }

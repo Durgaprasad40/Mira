@@ -84,6 +84,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     favicon: "./assets/favicon.png",
   },
   plugins: [
+    // Sentry must be first so its prebuild modifications run before other plugins.
+    // Wires up native Sentry SDK for iOS/Android and source map upload during EAS builds.
+    "@sentry/react-native/expo",
     "expo-router",
     [
       "expo-camera",

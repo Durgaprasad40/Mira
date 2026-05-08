@@ -47,7 +47,10 @@ const IS_DEV = __DEV__;
 const ENVIRONMENT = IS_DEV ? 'development' : 'production';
 const SENTRY_DEBUG_FROM_ENV = process.env.EXPO_PUBLIC_SENTRY_DEBUG === 'true';
 const SENTRY_VERBOSE_MODE = IS_DEV || SENTRY_DEBUG_FROM_ENV || DEBUG_SENTRY_VERBOSE;
-const SENTRY_TRACES_SAMPLE_RATE = IS_DEV ? 0 : (SENTRY_VERBOSE_MODE ? 1.0 : 0.2);
+// Dev: capture 100% of transactions so navigation/performance spans are visible
+// while debugging. Production: keep a conservative sample rate (configurable via
+// EXPO_PUBLIC_SENTRY_DEBUG=true → 1.0, otherwise 0.1).
+const SENTRY_TRACES_SAMPLE_RATE = IS_DEV ? 1.0 : (SENTRY_VERBOSE_MODE ? 1.0 : 0.1);
 const SENTRY_PROFILES_SAMPLE_RATE = IS_DEV ? 0 : (SENTRY_VERBOSE_MODE ? 1.0 : 0);
 
 // App version (set via EAS build or package.json)
@@ -132,6 +135,7 @@ export function initSentry(): void {
       dsn: SENTRY_DSN,
       environment: ENVIRONMENT,
       release: `mira@${APP_VERSION}+${BUILD_NUMBER}`,
+      dist: BUILD_NUMBER,
 
       // Enable Sentry when DSN is configured
       enabled: true,
