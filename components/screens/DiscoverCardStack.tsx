@@ -2458,21 +2458,38 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     [isPhase2, next],
   );
 
+  // Hero prefetch depth 2: warm both the immediate next card AND the one after
+  // it. Fast successive swipes can otherwise outrun a depth-1 prefetch and
+  // show a momentary photo decode on the new top card. Phase-2 (Deep Connect)
+  // is now included — the prior null-out for Phase-2 is removed so Deep
+  // Connect benefits from the same warming.
   const nextHeroPhotoUrl = useMemo(
-    () => (!isPhase2 && next ? getRenderableProfilePhotos(next.photos)[0]?.url ?? null : null),
-    [isPhase2, next],
+    () => (next ? getRenderableProfilePhotos(next.photos)[0]?.url ?? null : null),
+    [next],
   );
 
-  useEffect(() => {
-    if (!nextHeroPhotoUrl || prefetchedNextHeroUrlsRef.current.has(nextHeroPhotoUrl)) {
-      return;
-    }
+  // next+1 hero (one card behind the next card). Pulled from the same stable
+  // queue/profileMap that drives queueCurrent / queueNext.
+  const nextNextHeroPhotoUrl = useMemo(() => {
+    const id = visibleQueue[2];
+    if (!id) return null;
+    const profile = profileMapRef.current.get(id);
+    if (!profile) return null;
+    return getRenderableProfilePhotos(profile.photos)[0]?.url ?? null;
+  }, [visibleQueue]);
 
-    prefetchedNextHeroUrlsRef.current.add(nextHeroPhotoUrl);
-    Image.prefetch(nextHeroPhotoUrl).catch(() => {
-      prefetchedNextHeroUrlsRef.current.delete(nextHeroPhotoUrl);
-    });
-  }, [nextHeroPhotoUrl]);
+  useEffect(() => {
+    const urls = [nextHeroPhotoUrl, nextNextHeroPhotoUrl].filter(
+      (u): u is string => typeof u === 'string' && u.length > 0,
+    );
+    for (const url of urls) {
+      if (prefetchedNextHeroUrlsRef.current.has(url)) continue;
+      prefetchedNextHeroUrlsRef.current.add(url);
+      Image.prefetch(url).catch(() => {
+        prefetchedNextHeroUrlsRef.current.delete(url);
+      });
+    }
+  }, [nextHeroPhotoUrl, nextNextHeroPhotoUrl]);
 
   // P2-4: Prefetch the CURRENT card's remaining photos (beyond the hero) so
   // that tapping into the full profile / swiping between photos does not
@@ -2488,9 +2505,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     return urls.length > 0 ? urls : EMPTY_STRING_ARRAY;
   }, [isPhase2, current]);
 
-  if (__DEV__ && current) {
-    // [PHOTO_DEBUG] P0: verify backendCount === renderCount on Discover cards.
-    // Remove after validation.
+  // [PHOTO_DEBUG] P0: verify backendCount === renderCount on Discover cards.
+  // Gated behind an explicit dev flag (EXPO_PUBLIC_DEBUG_PHOTOS=true) so it
+  // does not fire on every render during normal dev/profiling. Re-enable
+  // locally when validating photo render counts.
+  if (
+    __DEV__ &&
+    current &&
+    process.env.EXPO_PUBLIC_DEBUG_PHOTOS === 'true'
+  ) {
     const rendered = getRenderableProfilePhotos(current.photos);
     console.log('[PHOTO_DEBUG][discover]', {
       userId: current.id,
@@ -2657,6 +2680,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
     overlayOpacity.value = 0;
     overlayDirectionRef.current = null;
+    // Visual swap (overlay clear, slot swap, queue advance) MUST stay in the
+    // same tick so the next card appears immediately and queue invariants
+    // hold for fast successive swipes.
     setOverlayDirection(null);
     setActiveSlot(newSlot);
     setIndex((prev) => prev + 1);
@@ -2664,11 +2690,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // This removes front card, promotes back -> front, and refills from source
     advanceQueue();
 
-    // Engagement trigger: Track swipe and show progress toast (Task 3)
-    trackSwipe();
-    if (shouldShowSwipeProgress()) {
-      Toast.show("You're exploring fast 🔥");
-    }
+    // Engagement-side effects (analytics + toast) are NOT visual. Defer them
+    // by one frame so they don't pile onto the swap tick — this measurably
+    // reduces the one-frame stutter at the moment the new top card paints.
+    // Safe: trackSwipe is a Zustand action; Toast.show is fire-and-forget.
+    requestAnimationFrame(() => {
+      trackSwipe();
+      if (shouldShowSwipeProgress()) {
+        Toast.show("You're exploring fast 🔥");
+      }
+    });
     // Old pan is reset in the useEffect below, AFTER React has re-rendered
     // with the new activeSlot. This prevents a 1-frame flicker where the
     // swiped-away card snaps back to center before the slot switch renders.
@@ -3034,10 +3065,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
       const currentPanX = getActivePanX();
       const currentPanY = getActivePanY();
-      const targetX = direction === "left" ? -SCREEN_WIDTH * 1.5 : direction === "right" ? SCREEN_WIDTH * 1.5 : 0;
-      const targetY = direction === "up" ? -SCREEN_HEIGHT * 1.5 : 0;
-      const speed = Math.abs(velocity || 0);
-      const duration = speed > 1.5 ? 120 : speed > 0.5 ? 180 : 250;
+      // Targets are comfortably off-screen so the card fully unmounts. Slightly
+      // less aggressive throw than the prior fixed-duration exit so the
+      // velocity-fed spring doesn't whip past the edge unnaturally.
+      const targetX = direction === "left" ? -SCREEN_WIDTH * 1.4 : direction === "right" ? SCREEN_WIDTH * 1.4 : 0;
+      const targetY = direction === "up" ? -SCREEN_HEIGHT * 1.2 : 0;
+
+      // Pan velocity from the gesture is in screen-units / ms (gesture handler
+      // / 1000 in onPanEnd). Reanimated withSpring expects pixels/s for
+      // translate values, so we re-scale by 1000. Sign matches axis direction.
+      const vScaled = (velocity ?? 0) * 1000;
 
       setOverlayDirection(direction);
       overlayOpacity.value = 1;
@@ -3059,14 +3096,42 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         handleSwipeRef.current(direction, undefined, swipeId);
       };
 
-      // Use withTiming for smooth animation on UI thread
-      currentPanX.value = withTiming(targetX, { duration }, (finished) => {
-        // Only call completion callback once (from X animation)
-        if (finished !== undefined) {
-          runOnJS(onAnimationComplete)(finished);
-        }
-      });
-      currentPanY.value = withTiming(targetY, { duration });
+      // Velocity-fed spring for Tinder-feel exit: carries flick momentum and
+      // settles smoothly off-screen instead of a fixed-duration timing curve.
+      // Reset/cancel still uses its own withSpring in resetPosition().
+      const SWIPE_EXIT_SPRING = {
+        damping: 22,
+        stiffness: 220,
+        mass: 0.7,
+        overshootClamping: false,
+      } as const;
+
+      currentPanX.value = withSpring(
+        targetX,
+        {
+          ...SWIPE_EXIT_SPRING,
+          velocity: direction === "up" ? 0 : vScaled,
+        },
+        (finished) => {
+          // For L/R swipes the X axis is primary; fire completion here.
+          if (direction !== "up" && finished !== undefined) {
+            runOnJS(onAnimationComplete)(finished);
+          }
+        },
+      );
+      currentPanY.value = withSpring(
+        targetY,
+        {
+          ...SWIPE_EXIT_SPRING,
+          velocity: direction === "up" ? vScaled : 0,
+        },
+        (finished) => {
+          // For up swipes the Y axis is primary; fire completion here.
+          if (direction === "up" && finished !== undefined) {
+            runOnJS(onAnimationComplete)(finished);
+          }
+        },
+      );
     },
     [panAX, panAY, panBX, panBY, overlayOpacity, hasReachedLikeLimit, hasReachedStandOutLimit, acquireSwipeLock, releaseSwipeLock],
   );
@@ -3308,9 +3373,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // ★ Trigger star-burst animation for super-like
     setShowSuperLikeAnimation(true);
 
-    // Animate the card out (up direction)
+    // Animate the card out (up direction). Spring-based to match the
+    // velocity-fed exit used by direct up-swipes from animateSwipe(). The
+    // composer-flow has no live gesture velocity to feed in, so we provide a
+    // small synthetic upward velocity to keep the launch feeling responsive.
     const currentPanY = getActivePanY();
-    const targetY = -SCREEN_HEIGHT * 1.5;
+    const targetY = -SCREEN_HEIGHT * 1.2;
 
     setOverlayDirection("up");
     overlayOpacity.value = 1;
@@ -3329,12 +3397,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       handleSwipeRef.current("up", msg || undefined, swipeId);
     };
 
-    // Use withTiming for smooth animation on UI thread
-    currentPanY.value = withTiming(targetY, { duration: 250 }, (finished) => {
-      if (finished !== undefined) {
-        runOnJS(onStandOutAnimComplete)(finished);
-      }
-    });
+    currentPanY.value = withSpring(
+      targetY,
+      {
+        damping: 22,
+        stiffness: 220,
+        mass: 0.7,
+        overshootClamping: false,
+        velocity: -1800,
+      },
+      (finished) => {
+        if (finished !== undefined) {
+          runOnJS(onStandOutAnimComplete)(finished);
+        }
+      },
+    );
   }, [standOutResult, acquireSwipeLock, releaseSwipeLock, overlayOpacity, panAY, panBY]);
 
   useEffect(() => {

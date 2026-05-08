@@ -38,8 +38,8 @@ export const COLORS = {
 export const SWIPE_CONFIG = {
   SWIPE_THRESHOLD_X: 0.25, // 25% of screen width (slightly easier to trigger)
   SWIPE_THRESHOLD_Y: 0.18, // 18% of screen height
-  SWIPE_VELOCITY_X: 0.6, // horizontal velocity threshold (more responsive)
-  SWIPE_VELOCITY_Y: 0.6, // vertical velocity threshold
+  SWIPE_VELOCITY_X: 0.5, // horizontal velocity threshold — flick commits at ~0.5 (Tinder-feel responsive)
+  SWIPE_VELOCITY_Y: 0.6, // vertical velocity threshold (kept higher to avoid accidental up-swipes during slow drags)
   ROTATION_ANGLE: 8, // degrees (subtle, premium feel)
   ANIMATION_DURATION: 280, // ms (slightly faster exit)
   HAPTIC_ENABLED: true,
