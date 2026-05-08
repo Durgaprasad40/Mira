@@ -117,6 +117,7 @@ import {
   P1_DISABLED_OPACITY,
   P1_DISABLED_SHADOW_OPACITY,
 } from "./_internal/phase1ActionRow.tokens";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { isDemoMode } from "@/hooks/useConvex";
 import { getDiscoverPrefetchSnapshot, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
 import {
@@ -191,6 +192,8 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const EMPTY_ARRAY: any[] = [];
 const EMPTY_STRING_ARRAY: string[] = [];
 const PREFETCH_HOLD_MS = 1200;
+/** AsyncStorage key for persisting the Phase-1 first-launch welcome overlay flag. */
+const PHASE1_WELCOME_SHOWN_STORAGE_KEY = 'mira:phase1-discover:welcome-shown:v1';
 const PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS = 30 * 1000;
 /** Deep Connect: switch to a recovery state if the live query stalls */
 const DEEP_CONNECT_QUERY_TIMEOUT_MS = 8500;
@@ -751,13 +754,32 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const welcomeShownRef = useRef(false);
   const swipeGuidanceShownRef = useRef(false);
 
-  // Show welcome overlay on first entry (Phase-1 only, Phase-2 has its own transition)
+  // Phase-1 welcome overlay is shown at most once per install; we hydrate the
+  // persisted "shown" flag here and defer the actual show trigger until the
+  // Discover deck has settled (see effect after phase1ProfilesWithPrefetch).
+  const [welcomeFlagHydrated, setWelcomeFlagHydrated] = useState(false);
   useEffect(() => {
-    if (!isPhase2 && !welcomeShownRef.current && onboardingCompleted) {
-      welcomeShownRef.current = true;
-      setShowWelcomeOverlay(true);
+    if (isPhase2) {
+      // Phase-2 has its own transition flow and never shows this overlay.
+      setWelcomeFlagHydrated(true);
+      return;
     }
-  }, [isPhase2, onboardingCompleted]);
+    let cancelled = false;
+    AsyncStorage.getItem(PHASE1_WELCOME_SHOWN_STORAGE_KEY)
+      .then((raw) => {
+        if (cancelled) return;
+        if (raw === 'true') {
+          welcomeShownRef.current = true;
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setWelcomeFlagHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPhase2]);
 
   // Show swipe guidance after welcome (or phase transition for Phase-2)
   useEffect(() => {
@@ -988,16 +1010,25 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         : null,
     [authVersion, isDemoMode, isPhase2, skipInternalQuery, userId],
   );
+  // Treat the prefetch as a *positive* cache only — if it resolved with zero
+  // profiles we leave `prefetchedProfiles` null so the live query controls the
+  // empty/caught-up decision instead of flashing a stale "no_more_profiles".
   const [prefetchedProfiles, setPrefetchedProfiles] = useState<any[] | null>(() => {
     const r = prefetchSnapshot?.result;
     if (r == null) return null;
-    return unwrapPhase1DiscoverQueryResult(r).profiles;
+    const profs = unwrapPhase1DiscoverQueryResult(r).profiles;
+    return profs.length > 0 ? profs : null;
   });
   const [prefetchWaitExpired, setPrefetchWaitExpired] = useState(false);
 
   useEffect(() => {
     const r = prefetchSnapshot?.result;
-    setPrefetchedProfiles(r == null ? null : unwrapPhase1DiscoverQueryResult(r).profiles);
+    if (r == null) {
+      setPrefetchedProfiles(null);
+      return;
+    }
+    const profs = unwrapPhase1DiscoverQueryResult(r).profiles;
+    setPrefetchedProfiles(profs.length > 0 ? profs : null);
   }, [authVersion, prefetchSnapshot?.result, prefetchSnapshot?.startedAt, userId]);
 
   useEffect(() => {
@@ -1015,7 +1046,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       ?.then((result) => {
         if (cancelled) return;
         markPrefetchUsed();
-        setPrefetchedProfiles(unwrapPhase1DiscoverQueryResult(result).profiles);
+        const profs = unwrapPhase1DiscoverQueryResult(result).profiles;
+        setPrefetchedProfiles(profs.length > 0 ? profs : null);
       })
       .catch(() => {
         if (cancelled) return;
@@ -1085,13 +1117,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       ? unwrapPhase1DiscoverQueryResult(phase1Profiles).profiles
       : prefetchedProfiles ?? null;
 
-  /** Step 8: backend empty reason for Phase-1 (prefetch or live query). */
+  /**
+   * Step 8: backend empty reason for Phase-1.
+   *
+   * IMPORTANT: This intentionally only consults the *settled* live query.
+   * Reading from `prefetchSnapshot.result` here used to allow a stale
+   * `no_more_profiles` reason to flash "You've seen everyone" before the
+   * live query had even resolved on cold launch.
+   */
   const phase1DiscoverEmptyReason = useMemo((): Phase1DiscoverEmptyReason | undefined => {
     if (isPhase2 || isDemoMode || externalProfiles) return undefined;
-    const raw = phase1Profiles !== undefined ? phase1Profiles : prefetchSnapshot?.result ?? null;
-    if (raw === undefined || raw === null) return undefined;
-    return unwrapPhase1DiscoverQueryResult(raw).phase1EmptyReason ?? undefined;
-  }, [isPhase2, isDemoMode, externalProfiles, phase1Profiles, prefetchSnapshot?.result]);
+    if (phase1Profiles === undefined) return undefined;
+    return unwrapPhase1DiscoverQueryResult(phase1Profiles).phase1EmptyReason ?? undefined;
+  }, [isPhase2, isDemoMode, externalProfiles, phase1Profiles]);
 
   const phase1EmptyMessaging = useMemo(() => {
     switch (phase1DiscoverEmptyReason) {
@@ -1171,6 +1209,26 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       setPrefetchedProfiles(null);
     }
   }, [phase1Profiles, prefetchedProfiles]);
+
+  // Phase-1 welcome overlay: show *once* per install, only after the deck has
+  // settled with at least one profile. This avoids the white welcome card
+  // covering an empty/loading screen on every cold launch.
+  const phase1HasSettledProfile =
+    !isPhase2 &&
+    !isDemoMode &&
+    !externalProfiles &&
+    !!phase1ProfilesWithPrefetch &&
+    phase1ProfilesWithPrefetch.length > 0;
+  useEffect(() => {
+    if (isPhase2) return;
+    if (!welcomeFlagHydrated) return;
+    if (welcomeShownRef.current) return;
+    if (!onboardingCompleted) return;
+    if (!phase1HasSettledProfile) return;
+    welcomeShownRef.current = true;
+    setShowWelcomeOverlay(true);
+    AsyncStorage.setItem(PHASE1_WELCOME_SHOWN_STORAGE_KEY, 'true').catch(() => {});
+  }, [isPhase2, welcomeFlagHydrated, onboardingCompleted, phase1HasSettledProfile]);
 
   // Phase-2 private discover query args (skip if Phase-1 mode)
   // CRITICAL: This queries userPrivateProfiles table which requires isSetupComplete=true
@@ -3520,16 +3578,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     );
   const queryResolved = phase2QueryResolved;
   const cachedHas = phase2CacheBelongsToViewer && cachedProfilesMap.size > 0;
+  // PHASE2_FLICKER_FIX: Reordered so warm-open cached profiles short-circuit
+  // to "cards" BEFORE the phase2ReadyToDecide searching gate. This lets a
+  // returning user see the cached card immediately on tab tap instead of the
+  // noisy SearchingOverlay flashing while hydration + initial filter + query
+  // settle. The empty branch still requires phase2ReadyToDecide=true (and
+  // therefore phase2HasHydrated && phase2InitialFilterReady && queryResolved)
+  // because both searching guards above remain in place when cache is empty.
   const state =
     hasProfiles
       ? "cards"
-      : isPhase2 && !phase2ReadyToDecide
-        ? "searching"
-        : !queryResolved && !cachedSearchingDone && !cachedHas
-        ? "searching"
-        : cachedHas
-          ? "cards"
-          : "empty";
+      : cachedHas
+        ? "cards"
+        : isPhase2 && !phase2ReadyToDecide
+          ? "searching"
+          : !queryResolved && !cachedSearchingDone
+            ? "searching"
+            : "empty";
 
   const phase2ReadyToDecideLoggedRef = useRef(false);
   useEffect(() => {
@@ -3632,11 +3697,82 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     );
   }
 
-  // Empty state (no profiles at all)
+  // Phase-1 first-open loading: while the live discover query is still
+  // resolving and the prefetch did not provide any positive profiles, we want
+  // a neutral header-only screen instead of the "We're finding people for
+  // you" / "You've seen everyone" empty card. This is what the user sees
+  // for the brief window between focus and the first profile mount.
+  const isPhase1InitialLoading =
+    !isPhase2 &&
+    !isDemoMode &&
+    !externalProfiles &&
+    phase1Profiles === undefined &&
+    !(phase1ProfilesWithPrefetch && phase1ProfilesWithPrefetch.length > 0);
+
+  // Empty state (no profiles at all). For Phase-1 we additionally require the
+  // initial load to have settled before falling into the empty branch — this
+  // prevents the empty UI from flashing while the query is still pending.
   const shouldShowEmptyState =
     isPhase2
       ? state === "empty"
-      : profiles.length === 0;
+      : !isPhase1InitialLoading && profiles.length === 0;
+
+  if (isPhase1InitialLoading) {
+    return (
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Premium subtle gradient background for Phase-1 (mirrors empty state) */}
+        {!dark && (
+          <LinearGradient
+            colors={['#FFFFFF', '#FAFAFA', '#F7F7F7']}
+            locations={[0, 0.5, 1]}
+            style={StyleSheet.absoluteFill}
+          />
+        )}
+        {/* Header — keeps the chrome stable across loading → cards / empty */}
+        {!hideHeader && (
+          <View style={[
+            styles.header,
+            { paddingTop: compactHeaderTopPadding, height: compactHeaderHeight },
+            dark && { backgroundColor: INCOGNITO_COLORS.background },
+            !dark && { backgroundColor: 'rgba(255, 255, 255, 0.85)' },
+          ]}>
+            <TouchableOpacity
+              style={[
+                styles.headerBtn,
+                !dark && { backgroundColor: 'rgba(0, 0, 0, 0.03)', borderWidth: 1, borderColor: 'rgba(0, 0, 0, 0.04)' },
+              ]}
+              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
+            >
+              <Ionicons name="options-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            </TouchableOpacity>
+            <Text {...DISCOVER_TEXT_PROPS} style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            <View style={styles.headerRightGroup}>
+              <TouchableOpacity
+                style={[
+                  styles.headerBtn,
+                  !dark && { backgroundColor: 'rgba(0, 0, 0, 0.03)', borderWidth: 1, borderColor: 'rgba(0, 0, 0, 0.04)' },
+                ]}
+                onPress={() => setShowNotificationPopover(true)}
+              >
+                <Ionicons name="notifications-outline" size={SIZES.icon.md} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text {...DISCOVER_TEXT_PROPS} style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              <HeaderAvatarButton dark={dark} />
+            </View>
+          </View>
+        )}
+        {/* Intentionally empty body: no copy, no icon, no skeleton. The card
+            slides in over this neutral surface as soon as the live query
+            resolves with at least one profile. */}
+        <View style={[styles.center, { flex: 1 }, !dark && { backgroundColor: 'transparent' }]} />
+        {notificationPopover}
+      </View>
+    );
+  }
 
   if (shouldShowEmptyState) {
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
@@ -4104,7 +4240,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         ) : null}
 
         {isPhase2 && state === "searching" ? (
-          <SearchingOverlay />
+          // PHASE2_FLICKER_FIX: Neutral chrome-stable loading surface. No
+          // gradient, no sparkles, no copy. Header + tab chrome stay visible
+          // while phase2HasHydrated / phase2InitialFilterReady /
+          // phase2QueryResolved settle. Mirrors the Phase-1
+          // isPhase1InitialLoading branch which also renders an empty body.
+          // The container's INCOGNITO_COLORS.background shows through, which
+          // matches the eventual ProfileCard surroundings — preventing the
+          // visible swap that previously flashed the dark gradient + sparkles.
+          null
         ) : (
           <>
             {/* Back card — guard against next === current (queue drained to 1
