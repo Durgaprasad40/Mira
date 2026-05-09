@@ -244,14 +244,11 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     nearbyPausedUntil: user.nearbyPausedUntil,
     // Phase-2: separate crossed-paths opt-in (undefined treated as true).
     recordCrossedPaths: user.recordCrossedPaths,
-    // Phase-1 Background Crossed Paths: iOS-only opt-in (default false).
-    backgroundLocationEnabled: user.backgroundLocationEnabled,
-    // Phase-2 Android Discovery Mode — expose to the client so the toggle
-    // can render live countdown / stop button. Both fields can be undefined
-    // if the user has never enabled Discovery Mode.
-    discoveryModeEnabled: user.discoveryModeEnabled,
-    discoveryModeExpiresAt: user.discoveryModeExpiresAt,
-    discoveryModeStartedAt: user.discoveryModeStartedAt,
+    // P2 cleanup: backgroundLocationEnabled + Phase-2 Android Discovery Mode
+    // fields (discoveryModeEnabled / discoveryModeExpiresAt /
+    // discoveryModeStartedAt) are no longer projected. The live client is
+    // foreground-only; surfacing these dormant flags only widens the attack
+    // surface for tampered clients. Schema fields remain for back-compat.
     // NOTE: nearbyVisibilityMode retained in schema for back-compat but no
     // longer surfaced to clients — UI was removed in Phase-1 and backend
     // stopped reading it in Phase-2.
@@ -1004,16 +1001,20 @@ export const updateNearbySettings = mutation({
     // Separate from nearbyEnabled, which controls whether the user is surfaced
     // through Nearby visibility.
     recordCrossedPaths: v.optional(v.boolean()),
-    // Phase-1 Background Crossed Paths: iOS-only opt-in. Server-side gate
-    // for recordLocationBatch. Client UI should only allow toggling this
-    // on iOS after the user has granted Always location authorization.
+    // P2 cleanup: backgroundLocationEnabled is still accepted in the
+    // validator for backwards-compatibility with cached old clients, but
+    // it is dropped server-side and never patched. The live foreground-only
+    // app no longer surfaces a toggle for it.
     backgroundLocationEnabled: v.optional(v.boolean()),
     // NOTE: nearbyVisibilityMode is deprecated — the old always/app_open/recent
     // UI was removed in Phase-1 and the backend stopped reading it in Phase-2.
     // The field is intentionally NOT accepted by this mutation anymore.
   },
   handler: async (ctx, args) => {
-    const { authUserId, incognitoMode, ...updates } = args;
+    // P2 cleanup: explicitly strip backgroundLocationEnabled so a tampered
+    // client cannot re-enable the dormant iOS SLC pathway.
+    const { authUserId, incognitoMode, backgroundLocationEnabled: _bgIgnored, ...updates } = args;
+    void _bgIgnored;
 
     // P1 SECURITY: Resolve auth ID to Convex user ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -1065,69 +1066,37 @@ export const updateNearbySettings = mutation({
 //     cannot keep writing.
 // ---------------------------------------------------------------------------
 
-/** Default Discovery Mode window. Keep in sync with the client hook's
- *  default. 4 hours matches the product spec ("not 24/7 background"). */
-const DISCOVERY_MODE_DEFAULT_DURATION_MS = 4 * 60 * 60 * 1000;
-/** Upper bound on the Discovery Mode window. Prevents clients from asking
- *  for multi-day windows that would break the "time-limited" guarantee. */
-const DISCOVERY_MODE_MAX_DURATION_MS = 8 * 60 * 60 * 1000;
-
+// P2 cleanup: Phase-2 Android Discovery Mode is disabled. The live client is
+// foreground-only and no longer calls these mutations. The signatures are
+// preserved as safe no-ops so any cached old client receives a benign
+// disabled response rather than a crash. The dormant fields they used to
+// patch (discoveryModeEnabled / discoveryModeExpiresAt /
+// discoveryModeStartedAt) are no longer written here.
 export const startDiscoveryMode = mutation({
   args: {
     authUserId: v.string(),
-    // Optional: client can ask for a shorter window. Anything above the
-    // MAX is clamped; anything <=0 or missing gets the default.
     durationMs: v.optional(v.number()),
   },
-  handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-    const user = await ctx.db.get(userId);
-    if (!user) throw new Error('User not found');
-
-    const now = Date.now();
-    const requested =
-      typeof args.durationMs === 'number' && args.durationMs > 0
-        ? args.durationMs
-        : DISCOVERY_MODE_DEFAULT_DURATION_MS;
-    const clamped = Math.min(requested, DISCOVERY_MODE_MAX_DURATION_MS);
-    const expiresAt = now + clamped;
-
-    await ctx.db.patch(userId, {
-      discoveryModeEnabled: true,
-      discoveryModeStartedAt: now,
-      discoveryModeExpiresAt: expiresAt,
-    });
-
-    // Intentionally not a dev-only log — server-side audit of Discovery
-    // Mode start is useful for support. Keep it compact.
-    console.log('[ANDROID_DISCOVERY][server_start]', {
-      userId,
-      startedAt: now,
-      expiresAt,
-      durationMs: clamped,
-    });
-
-    return { success: true, startedAt: now, expiresAt, durationMs: clamped };
+  handler: async (_ctx, _args) => {
+    return {
+      success: true,
+      disabled: true,
+      reason: 'background_location_disabled',
+      startedAt: null,
+      expiresAt: null,
+      durationMs: 0,
+    };
   },
 });
 
 export const stopDiscoveryMode = mutation({
   args: { authUserId: v.string() },
-  handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
-    await ctx.db.patch(userId, {
-      discoveryModeEnabled: false,
-      discoveryModeExpiresAt: undefined,
-      // discoveryModeStartedAt intentionally left intact for diagnostics.
-    });
-    console.log('[ANDROID_DISCOVERY][server_stop]', { userId, at: Date.now() });
-    return { success: true };
+  handler: async (_ctx, _args) => {
+    return {
+      success: true,
+      disabled: true,
+      reason: 'background_location_disabled',
+    };
   },
 });
 

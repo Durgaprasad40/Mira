@@ -262,19 +262,24 @@ export default defineSchema({
     locationRejectWindowStartedAt: v.optional(v.number()),
     locationSpoofSuspect: v.optional(v.boolean()),
     locationSpoofSuspectAt: v.optional(v.number()),
-    // Phase-1 Background Crossed Paths: iOS-only opt-in for Significant Location
-    // Change-driven background sampling. Default is OFF; must be explicitly
-    // enabled by the user via enableBackgroundLocation(). Android does NOT
-    // use this flag — Android uses Discovery Mode (below) instead.
+    // DEPRECATED (P2 cleanup): Phase-1 iOS Significant Location Change opt-in.
+    // No longer written or read by live code — recordLocationBatch is now a
+    // safe no-op, updateNearbySettings strips this field, and getCurrentUser
+    // does not project it. Field retained only to preserve existing user
+    // documents; do NOT re-introduce reads/writes without re-adding manifest
+    // exclusions, foreground-only enforcement, and a consent re-acceptance
+    // gate. Original semantics: iOS-only opt-in for SLC-driven background
+    // sampling; default OFF; Android uses Discovery Mode (below).
     backgroundLocationEnabled: v.optional(v.boolean()),
-    // Phase-2 Android Discovery Mode: user-initiated, time-limited background
-    // sampling backed by a foreground-service notification. Semantics:
-    //   - discoveryModeEnabled === true  AND
-    //   - discoveryModeExpiresAt > Date.now()
-    //     → source='bg' batches from this user are accepted
-    //   - otherwise background batches are dropped server-side.
-    // discoveryModeStartedAt is kept purely for diagnostics/analytics.
-    // iOS ignores these fields; iOS uses backgroundLocationEnabled.
+    // DEPRECATED (P2 cleanup): Phase-2 Android Discovery Mode fields. No
+    // longer written or read by live code — startDiscoveryMode and
+    // stopDiscoveryMode are safe no-ops, recordLocationBatch is disabled,
+    // and getCurrentUser does not project these. Fields retained to
+    // preserve existing user documents. Original semantics:
+    //   - discoveryModeEnabled === true AND discoveryModeExpiresAt > now
+    //     → source='bg' batches accepted
+    //   - otherwise background batches dropped server-side
+    // discoveryModeStartedAt was diagnostics-only.
     discoveryModeEnabled: v.optional(v.boolean()),
     discoveryModeExpiresAt: v.optional(v.number()),
     discoveryModeStartedAt: v.optional(v.number()),
