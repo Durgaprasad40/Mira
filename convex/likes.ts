@@ -1576,6 +1576,7 @@ export const getLikedUsers = query({
       id: any;
       name: string;
       avatarUrl: string | null;
+      age: number | null;
       disambiguator: string;
       matchType: 'mutual_match' | 'liked_only';
     };
@@ -1587,21 +1588,29 @@ export const getLikedUsers = query({
       const candidate = await ctx.db.get(candidateId);
       if (!candidate || !(candidate as any).isActive) continue;
 
-      const photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', candidateId))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
-
-      // Build disambiguator: prefer bio snippet, then school, then age, then masked userId
-      let disambiguator = '';
       const c: any = candidate;
+
+      // Live primary photo: prefer the canonical `users.primaryPhotoUrl`
+      // (kept in sync by setPrimaryPhoto / reorderPhotos). Fall back to the
+      // photos table when the user doc has not been backfilled yet, and
+      // always exclude verification_reference photos.
+      let livePhotoUrl: string | null = c.primaryPhotoUrl ?? null;
+      if (!livePhotoUrl) {
+        const fallback = await getPhase1PrimaryPhoto(ctx, candidateId);
+        livePhotoUrl = fallback?.url ?? null;
+      }
+
+      // Server-derived age (never client-supplied)
+      const computedAge = c.dateOfBirth ? calculateAge(c.dateOfBirth) : 0;
+      const age = computedAge > 0 ? computedAge : null;
+
+      // Disambiguator: bio snippet, then school, else short id hint.
+      // Age is now returned as a separate field, so don't fall back to it.
+      let disambiguator = '';
       if (c.bio && c.bio.length > 0) {
-        disambiguator = c.bio.slice(0, 30) + (c.bio.length > 30 ? '...' : '');
+        disambiguator = c.bio.slice(0, 60) + (c.bio.length > 60 ? '…' : '');
       } else if (c.school) {
         disambiguator = c.school;
-      } else if (c.dateOfBirth) {
-        disambiguator = `${calculateAge(c.dateOfBirth)} years old`;
       } else {
         disambiguator = `ID: ...${String(candidateId).slice(-4)}`;
       }
@@ -1613,7 +1622,8 @@ export const getLikedUsers = query({
       result.push({
         id: candidateId,
         name: c.name,
-        avatarUrl: photo?.url || null,
+        avatarUrl: livePhotoUrl,
+        age,
         disambiguator,
         matchType,
       });

@@ -94,7 +94,7 @@ type LikedUser = {
   id: string;
   name: string;
   avatarUrl: string | null;
-  age?: number;
+  age?: number | null;
   disambiguator: string;
   matchType?: 'mutual_match' | 'liked_only';
 };

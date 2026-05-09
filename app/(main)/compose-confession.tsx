@@ -50,7 +50,7 @@ type LikedUser = {
   id: string;
   name: string;
   avatarUrl: string | null;
-  age?: number;
+  age?: number | null;
   disambiguator: string;
   matchType?: 'mutual_match' | 'liked_only';
 };
@@ -555,6 +555,7 @@ export default function ComposeConfessionScreen() {
                       <TouchableOpacity
                         key={user.id}
                         style={styles.suggestionRow}
+                        activeOpacity={0.7}
                         onPress={() => {
                           if (__DEV__) {
                             console.log('[MENTION_RULE][selected]', {
@@ -567,11 +568,27 @@ export default function ComposeConfessionScreen() {
                           setTagInput(user.name);
                         }}
                       >
-                        <View style={styles.suggestionAvatar}>
-                          <Ionicons name="person" size={12} color={COLORS.white} />
+                        {user.avatarUrl ? (
+                          <Image
+                            source={{ uri: user.avatarUrl }}
+                            style={styles.suggestionAvatarImage}
+                            contentFit="cover"
+                          />
+                        ) : (
+                          <View style={styles.suggestionAvatarFallback}>
+                            <Ionicons name="person" size={18} color={COLORS.white} />
+                          </View>
+                        )}
+                        <View style={styles.suggestionTextCol}>
+                          <Text style={styles.suggestionName} numberOfLines={1}>
+                            {user.name}{user.age ? `, ${user.age}` : ''}
+                          </Text>
+                          {user.disambiguator ? (
+                            <Text style={styles.suggestionHint} numberOfLines={1}>
+                              {user.disambiguator}
+                            </Text>
+                          ) : null}
                         </View>
-                        <Text style={styles.suggestionName}>{user.name}</Text>
-                        <Text style={styles.suggestionHint}>{user.disambiguator}</Text>
                       </TouchableOpacity>
                     ))}
                   </View>
@@ -836,31 +853,40 @@ const styles = StyleSheet.create({
   suggestionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 10,
+    gap: 12,
+    paddingHorizontal: 12,
     paddingVertical: 10,
     backgroundColor: COLORS.white,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
-  suggestionAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+  suggestionAvatarImage: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  suggestionAvatarFallback: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.primary,
   },
+  suggestionTextCol: {
+    flex: 1,
+    minWidth: 0,
+  },
   suggestionName: {
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '600',
     color: COLORS.text,
   },
   suggestionHint: {
-    fontSize: 11,
+    fontSize: 12,
     color: COLORS.textMuted,
-    flex: 1,
-    textAlign: 'right',
+    marginTop: 2,
   },
   // Identity selector styles - stable, no animations
   identitySection: {
