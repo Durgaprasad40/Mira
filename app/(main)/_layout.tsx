@@ -268,6 +268,10 @@ export default function MainLayout() {
         options={{ presentation: "fullScreenModal" }}
       />
       <Stack.Screen name="demo-panel" options={{ presentation: "modal" }} />
+      <Stack.Screen
+        name="background-crossed-paths-explainer"
+        options={{ presentation: "modal" }}
+      />
     </Stack>
     <ToastHost />
     </View>

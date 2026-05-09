@@ -23,6 +23,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
 import { Toast } from '@/components/ui/Toast';
 import { getDemoCurrentUser } from '@/lib/demoData';
+import {
+  BG_COPY,
+  BG_CROSSED_PATHS_FEATURE_READY,
+  formatDiscoveryCountdown,
+  resolveBgConsentStatus,
+  type BgConsentStatus,
+} from '@/lib/backgroundCrossedPaths';
 
 // Phase-1 cleanup: the `always / app_open / recent` visibility-mode UI was
 // removed because the backend no longer enforces these modes (Nearby became a
@@ -43,6 +50,12 @@ export default function NearbySettingsScreen() {
   // Mutations
   const updateNearbySettingsMut = useMutation(api.users.updateNearbySettings);
   const pauseNearbyMut = useMutation(api.users.pauseNearby);
+  // Phase-2 background crossed paths: opt-out is the only consent mutation
+  // ever called from this screen. Opt-in is reserved for the explainer modal
+  // (and even there only when the client-side feature gate flips ON).
+  const revokeBgConsentMut = useMutation(
+    api.users.revokeBackgroundLocationConsent,
+  );
 
   // Local state (initialized from server)
   const [nearbyEnabled, setNearbyEnabled] = useState(true);
@@ -152,6 +165,96 @@ export default function NearbySettingsScreen() {
     setRecordCrossedPaths(value);
     handleSave('recordCrossedPaths', value);
   };
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Phase-2: Background Crossed Paths — UI/consent foundation only.
+  //
+  // STRICT RULES enforced by this section:
+  //   - The toggle does NOT request any OS background-location permission.
+  //   - It does NOT call TaskManager / startLocationUpdatesAsync.
+  //   - "Turn ON" is only reachable when BG_CROSSED_PATHS_FEATURE_READY is true
+  //     AND, even then, only routes through the explainer modal — accept is
+  //     called from there, not from this row.
+  //   - "Turn OFF" always works (idempotent revoke), regardless of the gate,
+  //     so any consent ever recorded can be cleared from this screen.
+  // ────────────────────────────────────────────────────────────────────────
+  const bgConsentAt: number | undefined = currentUser?.backgroundLocationConsentAt;
+  const bgConsentVersion: string | undefined =
+    currentUser?.backgroundLocationConsentVersion;
+  const bgEnabledServer: boolean = currentUser?.backgroundLocationEnabled === true;
+  const discoveryEnabled: boolean = currentUser?.discoveryModeEnabled === true;
+  const discoveryExpiresAt: number | undefined =
+    currentUser?.discoveryModeExpiresAt;
+
+  const bgConsentStatus: BgConsentStatus = resolveBgConsentStatus({
+    featureReady: BG_CROSSED_PATHS_FEATURE_READY,
+    consentAt: bgConsentAt,
+    consentVersion: bgConsentVersion,
+  });
+
+  // Toggle is "on" from the user's perspective when consent is granted AND
+  // the server still has backgroundLocationEnabled=true. Stale-version
+  // consent renders as off so the user can re-confirm via the explainer.
+  const bgToggleOn =
+    BG_CROSSED_PATHS_FEATURE_READY &&
+    bgConsentStatus === 'granted' &&
+    bgEnabledServer;
+
+  const discoveryCountdown = discoveryEnabled
+    ? formatDiscoveryCountdown(discoveryExpiresAt)
+    : null;
+
+  const handleBgToggle = useCallback(
+    async (value: boolean) => {
+      // OFF path — ALWAYS available. Idempotent. Clears server consent +
+      // disables backgroundLocationEnabled + tears down Discovery Mode.
+      if (!value) {
+        // No consent on file and gate is off → nothing to revoke; just toast.
+        if (
+          bgConsentStatus === 'unavailable' ||
+          (bgConsentStatus === 'none' && !bgEnabledServer)
+        ) {
+          return;
+        }
+        if (isDemoMode || !userId) {
+          Toast.show('Background crossed paths turned off');
+          return;
+        }
+        try {
+          await revokeBgConsentMut({ authUserId: userId });
+          Toast.show('Background crossed paths turned off');
+        } catch {
+          Toast.show('Failed to update background crossed paths');
+        }
+        return;
+      }
+
+      // ON path — gated. When the feature is not ready, never call
+      // acceptBackgroundLocationConsent and never show the explainer's
+      // "I understand, enable" CTA as actionable. Just route to the
+      // explainer in read-only mode so the user understands the future
+      // behavior.
+      router.push('/(main)/background-crossed-paths-explainer' as any);
+    },
+    [bgConsentStatus, bgEnabledServer, revokeBgConsentMut, router, userId],
+  );
+
+  const handleOpenBgExplainer = useCallback(() => {
+    router.push('/(main)/background-crossed-paths-explainer' as any);
+  }, [router]);
+
+  const bgStatusLine = (() => {
+    if (bgConsentStatus === 'unavailable') return BG_COPY.statusComingSoon;
+    if (bgConsentStatus === 'granted' && bgEnabledServer) {
+      return BG_COPY.statusConsentGranted;
+    }
+    if (bgConsentStatus === 'stale') return BG_COPY.statusConsentNone;
+    return BG_COPY.statusConsentNone;
+  })();
+
+  const bgDescription = BG_CROSSED_PATHS_FEATURE_READY
+    ? BG_COPY.toggleDescriptionReady
+    : BG_COPY.toggleDescriptionUnavailable;
 
   // Phase-2: pause-duration options. null = indefinite ("Until turned back on").
   const PAUSE_OPTIONS: Array<{ label: string; durationMs: number | null; shortLabel: string }> = [
@@ -330,6 +433,78 @@ export default function NearbySettingsScreen() {
               disabled={isSaving}
             />
           </View>
+        </View>
+
+        {/* ──────────────────────────────────────────────────────────────
+            Phase-2: Background Crossed Paths section.
+            UI/consent foundation only — no OS-permission requests, no
+            background tracking. The "Turn ON" path goes through the
+            explainer modal; the "Turn OFF" path is always reachable.
+            ────────────────────────────────────────────────────────────── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>{BG_COPY.sectionTitle}</Text>
+          <Text style={styles.bgTagline}>{BG_COPY.sectionTagline}</Text>
+
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <View style={styles.titleRow}>
+                <Text style={styles.toggleTitle}>{BG_COPY.toggleTitle}</Text>
+                {!BG_CROSSED_PATHS_FEATURE_READY && (
+                  <View style={styles.comingSoonBadge}>
+                    <Text style={styles.comingSoonBadgeText}>SOON</Text>
+                  </View>
+                )}
+              </View>
+              <Text style={styles.toggleDescription}>{bgDescription}</Text>
+              <Text style={styles.bgStatusLine}>{bgStatusLine}</Text>
+            </View>
+            <Switch
+              value={bgToggleOn}
+              onValueChange={handleBgToggle}
+              trackColor={{ false: COLORS.border, true: COLORS.primary }}
+              thumbColor={COLORS.white}
+              // OFF must always be reachable so existing consent can be
+              // cleared. ON is reachable only when the gate is ready, the
+              // user is not paused, and we are not mid-save. The explainer
+              // modal still gates the actual accept call.
+              disabled={
+                isSaving ||
+                (!BG_CROSSED_PATHS_FEATURE_READY && !bgToggleOn && !bgEnabledServer)
+              }
+            />
+          </View>
+
+          {/* Discovery Mode read-out (visible when active). Phase-2 has no
+              start/stop UI here — backend controls and Phase-3 native code
+              own the lifecycle. We only surface the current state. */}
+          {discoveryEnabled && (
+            <View style={styles.bgInfoRow}>
+              <Ionicons name="compass-outline" size={16} color={COLORS.primary} />
+              <Text style={styles.bgInfoText}>
+                {BG_COPY.discoveryActiveLabel}
+                {discoveryCountdown ? ` — ${discoveryCountdown}` : ''}
+              </Text>
+            </View>
+          )}
+
+          {/* Always provide a way back into the explainer for users who want
+              to read the policy without flipping the switch. */}
+          <TouchableOpacity
+            style={styles.bgLearnMore}
+            onPress={handleOpenBgExplainer}
+            accessibilityLabel="Learn more about background crossed paths"
+          >
+            <Ionicons
+              name="information-circle-outline"
+              size={16}
+              color={COLORS.primary}
+            />
+            <Text style={styles.bgLearnMoreText}>Learn more</Text>
+          </TouchableOpacity>
+
+          {bgToggleOn && (
+            <Text style={styles.bgRevokeNote}>{BG_COPY.revokeNote}</Text>
+          )}
         </View>
 
         {/* Privacy Section */}
@@ -543,6 +718,58 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   premiumBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.white,
+    letterSpacing: 0.5,
+  },
+  // Phase-2 Background Crossed Paths styles
+  bgTagline: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  bgStatusLine: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 6,
+  },
+  bgInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+  },
+  bgInfoText: {
+    fontSize: 13,
+    color: COLORS.text,
+    fontWeight: '500',
+  },
+  bgLearnMore: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+  },
+  bgLearnMoreText: {
+    fontSize: 13,
+    color: COLORS.primary,
+    fontWeight: '500',
+  },
+  bgRevokeNote: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 6,
+    lineHeight: 16,
+  },
+  comingSoonBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: COLORS.warning,
+  },
+  comingSoonBadgeText: {
     fontSize: 10,
     fontWeight: '700',
     color: COLORS.white,
