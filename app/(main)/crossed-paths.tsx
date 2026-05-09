@@ -56,6 +56,7 @@ interface CrossedPathItem {
   // crossingCount for any UI string (Fix 4: no raw counts to displays).
   crossingCountDisplay?: string;
   distanceRange: string | null;
+  locationDisclosure?: string | null;
   relativeTime: string;
   reasonTags: string[];
   reasonText: string | null;
@@ -64,6 +65,12 @@ interface CrossedPathItem {
   initial: string;
   isVerified: boolean;
   createdAt?: number; // Timestamp for sorting/filtering
+}
+
+function formatLocationDisclosure(disclosure?: string | null): string | null {
+  if (disclosure === 'distance_hidden') return 'Distance hidden for privacy';
+  if (disclosure === 'approximate_area') return 'Approximate area';
+  return null;
 }
 
 // 12 hours in milliseconds for "Just Crossed" threshold
@@ -481,6 +488,7 @@ export default function CrossedPathsScreen() {
   // Render standard card (used in Recent and Frequent sections)
   // ---------------------------------------------------------------------------
   const renderCard = useCallback((item: CrossedPathItem) => {
+    const locationDisclosure = formatLocationDisclosure(item.locationDisclosure);
     return (
       <TouchableOpacity
         key={item.id}
@@ -529,6 +537,16 @@ export default function CrossedPathsScreen() {
                 <Text style={styles.detailText}>{item.areaName}</Text>
               </View>
             </View>
+            {locationDisclosure && (
+              <View style={styles.locationDisclosureRow}>
+                <Ionicons
+                  name={item.locationDisclosure === 'distance_hidden' ? 'eye-off-outline' : 'shield-checkmark-outline'}
+                  size={13}
+                  color={COLORS.textLight}
+                />
+                <Text style={styles.locationDisclosureText}>{locationDisclosure}</Text>
+              </View>
+            )}
 
             <View style={styles.timeRow}>
               <Ionicons name="time-outline" size={14} color={COLORS.textLight} />
@@ -563,6 +581,7 @@ export default function CrossedPathsScreen() {
   // Render "Just Crossed" highlight card (larger, more prominent)
   // ---------------------------------------------------------------------------
   const renderJustCrossedCard = useCallback((item: CrossedPathItem) => {
+    const locationDisclosure = formatLocationDisclosure(item.locationDisclosure);
     return (
       <TouchableOpacity
         style={styles.justCrossedCard}
@@ -599,6 +618,9 @@ export default function CrossedPathsScreen() {
               <Text style={styles.justCrossedTime}>{item.relativeTime}</Text>
             </View>
             <Text style={styles.justCrossedLocation}>Near your area</Text>
+            {locationDisclosure && (
+              <Text style={styles.justCrossedDisclosure}>{locationDisclosure}</Text>
+            )}
             {item.reasonText && (
               <Text style={styles.justCrossedReason} numberOfLines={1}>
                 {item.reasonText}
@@ -947,6 +969,17 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: COLORS.textLight,
   },
+  locationDisclosureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 3,
+  },
+  locationDisclosureText: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    fontWeight: '600',
+  },
   timeRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1099,6 +1132,12 @@ const styles = StyleSheet.create({
   justCrossedLocation: {
     fontSize: 13,
     color: COLORS.textLight,
+    marginTop: 2,
+  },
+  justCrossedDisclosure: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    fontWeight: '600',
     marginTop: 2,
   },
   justCrossedReason: {

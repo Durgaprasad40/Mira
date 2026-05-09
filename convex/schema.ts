@@ -302,6 +302,9 @@ export default defineSchema({
     // fresh re-acceptance — same pattern as nearbyConsentVersion.
     backgroundLocationConsentAt: v.optional(v.number()),
     backgroundLocationConsentVersion: v.optional(v.string()),
+    // Ops-only kill switch for Phase-3 background crossed-path batch writes.
+    // This does not affect foreground Nearby / recordLocation behavior.
+    bgCrossedPathsOpsDisabled: v.optional(v.boolean()),
     nearbyPausedUntil: v.optional(v.number()),        // pause nearby visibility until timestamp
     nearbyVisibilityMode: v.optional(v.union(         // DEPRECATED (Phase-1 removed UI, Phase-2 stops reading it); kept to preserve existing data, no live code-path depends on it
       v.literal('always'),
@@ -1180,12 +1183,15 @@ export default defineSchema({
     targetUserId: v.id('users'),
     firstShownAt: v.number(),
     lastShownAt: v.number(),
+    expiresAt: v.optional(v.number()),       // TTL sweep; optional for legacy rows
     // True when the pair already had a crossedPaths row at the time we surfaced
     // it — those don't consume daily-new slots.
     wasExistingCrossedPath: v.optional(v.boolean()),
   })
     .index('by_viewer_date', ['viewerId', 'dateKey'])
-    .index('by_viewer_date_pair', ['viewerId', 'dateKey', 'pairKey']),
+    .index('by_viewer_date_pair', ['viewerId', 'dateKey', 'pairKey'])
+    .index('by_date_key', ['dateKey'])
+    .index('by_expires', ['expiresAt']),
 
   // Phase-1 Background Crossed Paths: short-lived ring-buffer of location
   // samples (foreground, background, SLC). Used by recordLocationBatch +

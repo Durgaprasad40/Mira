@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import { loadDiscoveryExclusions } from './discoveryExclusions';
 
 // ---------------------------------------------------------------------------
@@ -265,6 +265,8 @@ const CROSSED_PATH_WRITE_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
 // Sliding window — a new push only after 6h since the previous push for this pair.
 const CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 hours
 const MAX_NOTIFICATIONS_PER_DAY = 3; // Maximum crossed-paths notifications per day per user
+const CROSSED_PATH_NOTIFICATION_TITLE = 'Crossed Paths';
+const CROSSED_PATH_NOTIFICATION_BODY = 'You crossed paths with someone nearby';
 
 // Fix 7 — Daily distinct crossed-profile cap.
 // Per-viewer cap on how many *new* crossed profiles can be surfaced in the
@@ -272,6 +274,7 @@ const MAX_NOTIFICATIONS_PER_DAY = 3; // Maximum crossed-paths notifications per 
 // a crossedPaths row for at the moment of display are not counted against the
 // cap (a re-display of a known pair is "free").
 const MAX_DAILY_NEW_CROSSED_PROFILES = 40;
+const DAILY_SHOWN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 // Privacy Zones
 const PRIVACY_ZONE_MAX_ZONES = 3;
@@ -2152,30 +2155,8 @@ export const recordLocation = mutation({
         // Update lastNotifiedAt to prevent race condition duplicates
         await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
 
-        // Generate dynamic notification text based on crossing count
-        const crossingCount = currentCrossedPath.count;
-        const reasonText = formatReasonForNotification(reasonTags[0] ?? 'common');
-
-        // Dynamic title and body based on state
-        let title: string;
-        let body: string;
-
-        // Use capped display ("1" / "2" / "3+") in user-visible body text so
-        // we never reveal raw crossing counts to clients (Fix 4).
-        const crossingCountDisplay = getCrossingCountDisplay(crossingCount);
-        if (crossingCount === 1) {
-          // First crossing
-          title = 'Someone crossed your path';
-          body = `${reasonText}`;
-        } else if (crossingCount < 5) {
-          // Early crossings
-          title = 'Someone interesting crossed your path';
-          body = `You've crossed paths ${crossingCountDisplay} times. ${reasonText}`;
-        } else {
-          // Frequent crossings - stronger suggestion
-          title = 'You keep crossing paths with someone';
-          body = `${crossingCountDisplay} times now! ${reasonText}. Maybe say hi?`;
-        }
+        const title = CROSSED_PATH_NOTIFICATION_TITLE;
+        const body = CROSSED_PATH_NOTIFICATION_BODY;
 
         // Stable per-pair dedupeKey (symmetric, no time bucket).
         // One notification row per pair per recipient — upserted in place.
@@ -2501,6 +2482,123 @@ async function emitBgLocationAuditLog(
 }
 
 // ---------------------------------------------------------------------------
+// debugBgPipelineStatus — current-user support diagnostics.
+// Returns only gates, counters, and timestamps. It never exposes coordinates
+// or other users' data.
+// ---------------------------------------------------------------------------
+
+export const debugBgPipelineStatus = query({
+  args: {
+    token: v.string(),
+    deviceHash: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const token = args.token.trim();
+    if (!token) {
+      return { ok: false as const, reason: 'missing_token' as const };
+    }
+
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      return { ok: false as const, reason: 'unauthorized' as const };
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return { ok: false as const, reason: 'user_not_found' as const };
+    }
+
+    const now = Date.now();
+    const sampleRows = await ctx.db
+      .query('locationSamples')
+      .withIndex('by_user_capturedAt', (q) => q.eq('userId', userId))
+      .order('desc')
+      .take(50);
+    const recentSamples = sampleRows.filter(
+      (row) => row.capturedAt >= now - LOCATION_SAMPLE_TTL_MS,
+    );
+
+    const lastAudit = await ctx.db
+      .query('bgLocationAuditLog')
+      .withIndex('by_user_at', (q) => q.eq('userId', userId))
+      .order('desc')
+      .first();
+
+    const deviceHash = args.deviceHash?.trim();
+    const rateLimitRows = deviceHash
+      ? await Promise.all([
+          ctx.db
+            .query('locationBatchRateLimit')
+            .withIndex('by_user_device_window', (q) =>
+              q.eq('userId', userId).eq('deviceHash', deviceHash).eq('windowKind', '10min'),
+            )
+            .first(),
+          ctx.db
+            .query('locationBatchRateLimit')
+            .withIndex('by_user_device_window', (q) =>
+              q.eq('userId', userId).eq('deviceHash', deviceHash).eq('windowKind', 'daily'),
+            )
+            .first(),
+        ])
+      : null;
+
+    return {
+      ok: true as const,
+      serverFeatureFlagEnabled: await isBgCrossedPathsEnabled(ctx),
+      nearbyConsentVersion: user.nearbyConsentVersion ?? null,
+      nearbyConsentCurrent: hasNearbyConsent(user),
+      bgLocationConsentVersion: user.backgroundLocationConsentVersion ?? null,
+      bgLocationConsentCurrent: hasBackgroundLocationConsent(user),
+      backgroundLocationEnabled: user.backgroundLocationEnabled === true,
+      discoveryModeEnabled: user.discoveryModeEnabled === true,
+      discoveryModeExpiresAt: user.discoveryModeExpiresAt ?? null,
+      discoveryModeActive:
+        user.discoveryModeEnabled === true &&
+        typeof user.discoveryModeExpiresAt === 'number' &&
+        user.discoveryModeExpiresAt > now,
+      nearbyEnabled: user.nearbyEnabled !== false,
+      nearbyPausedActive:
+        typeof user.nearbyPausedUntil === 'number' && user.nearbyPausedUntil > now,
+      nearbyPausedUntil: user.nearbyPausedUntil ?? null,
+      recordCrossedPaths: user.recordCrossedPaths !== false,
+      incognitoMode: user.incognitoMode === true,
+      opsDisabled: user.bgCrossedPathsOpsDisabled === true,
+      lastNearbyUpdateAt: user.lastLocationUpdatedAt ?? null,
+      lastNearbyPublishedAt: user.publishedAt ?? null,
+      recentLocationSampleWindowMs: LOCATION_SAMPLE_TTL_MS,
+      recentLocationSampleCount: recentSamples.length,
+      recentLocationSampleCountCappedAt: 50,
+      lastLocationSampleAt: sampleRows[0]?.capturedAt ?? null,
+      lastBgLocationAuditLog: lastAudit
+        ? {
+            at: lastAudit.at,
+            outcome: lastAudit.outcome,
+            reason: lastAudit.reason ?? null,
+            sampleCount: lastAudit.sampleCount,
+            accepted: lastAudit.accepted,
+            dropped: lastAudit.dropped,
+            sources: lastAudit.sources,
+            hasDeviceHash: Boolean(lastAudit.deviceHash),
+          }
+        : null,
+      rateLimitBuckets: rateLimitRows
+        ? rateLimitRows
+            .flatMap((row) =>
+              row
+                ? [{
+                    windowKind: row.windowKind,
+                    windowStartedAt: row.windowStartedAt,
+                    count: row.count,
+                    updatedAt: row.updatedAt,
+                  }]
+                : [],
+            )
+        : null,
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
 // recordLocationBatch — Phase 1 Background Crossed Paths entry point.
 // (Restored from commit ebb838b with new server-side gates layered on top.)
 //
@@ -2589,6 +2687,14 @@ export const recordLocationBatch = mutation({
     const user = await ctx.db.get(userId);
     if (!user) {
       return { success: false, accepted: 0, reason: 'user_not_found' };
+    }
+
+    if (user.bgCrossedPathsOpsDisabled === true) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'ops_disabled', deviceHash: args.deviceHash,
+      });
+      return { success: false, accepted: 0, reason: 'ops_disabled' };
     }
 
     // Early opt-out gates (no background-consent specifics yet — those
@@ -3301,23 +3407,8 @@ async function detectCrossingsForSample(
 
     await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
 
-    const reasonText = formatReasonForNotification(reasonTags[0] ?? 'common');
-    const crossingCount = currentCrossedPath.count;
-    let title: string;
-    let body: string;
-    // Use capped display ("1" / "2" / "3+") in user-visible body text so
-    // we never reveal raw crossing counts to clients (Fix 4).
-    const crossingCountDisplay = getCrossingCountDisplay(crossingCount);
-    if (crossingCount === 1) {
-      title = 'Someone crossed your path';
-      body = `${reasonText}`;
-    } else if (crossingCount < 5) {
-      title = 'Someone interesting crossed your path';
-      body = `You've crossed paths ${crossingCountDisplay} times. ${reasonText}`;
-    } else {
-      title = 'You keep crossing paths with someone';
-      body = `${crossingCountDisplay} times now! ${reasonText}. Maybe say hi?`;
-    }
+    const title = CROSSED_PATH_NOTIFICATION_TITLE;
+    const body = CROSSED_PATH_NOTIFICATION_BODY;
     const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id);
 
     for (const [recipient, other] of [
@@ -3813,6 +3904,7 @@ export const markDailyCrossedProfilesShown = mutation({
       if (existingShown) {
         await ctx.db.patch(existingShown._id, {
           lastShownAt: now,
+          expiresAt: now + DAILY_SHOWN_RETENTION_MS,
           // Latch this flag — once a pair was "free" because it was already
           // crossed, future re-displays should remain "free" even if the
           // crossedPaths row is later removed.
@@ -3828,6 +3920,7 @@ export const markDailyCrossedProfilesShown = mutation({
           targetUserId,
           firstShownAt: now,
           lastShownAt: now,
+          expiresAt: now + DAILY_SHOWN_RETENTION_MS,
           wasExistingCrossedPath,
         });
         inserted++;
@@ -3835,6 +3928,49 @@ export const markDailyCrossedProfilesShown = mutation({
     }
 
     return { success: true, inserted, updated };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// cleanupExpiredCrossedPathDailyShown — TTL sweep for daily-shown ledger rows.
+// New rows expire via expiresAt; legacy rows without expiresAt are swept by
+// dateKey after the same 30-day retention window.
+// ---------------------------------------------------------------------------
+
+export const cleanupExpiredCrossedPathDailyShown = internalMutation({
+  handler: async (ctx) => {
+    const now = Date.now();
+    const cutoffDateKey = getDailyShownDateKey(now - DAILY_SHOWN_RETENTION_MS);
+    const BATCH = 100;
+
+    const expiredRows = await ctx.db
+      .query('crossedPathDailyShown')
+      .withIndex('by_expires')
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('expiresAt'), undefined),
+          q.lte(q.field('expiresAt'), now),
+        )
+      )
+      .take(BATCH);
+
+    let deleted = 0;
+    for (const row of expiredRows) {
+      await ctx.db.delete(row._id);
+      deleted++;
+    }
+
+    const legacyRows = await ctx.db
+      .query('crossedPathDailyShown')
+      .withIndex('by_date_key', (q) => q.lt('dateKey', cutoffDateKey))
+      .take(BATCH);
+
+    for (const row of legacyRows) {
+      await ctx.db.delete(row._id);
+      deleted++;
+    }
+
+    return { deleted };
   },
 });
 
@@ -4066,6 +4202,12 @@ export const getCrossPathHistory = query({
       if (otherUser.hideDistance === true) {
         distanceRange = null;
       }
+      const locationDisclosure =
+        otherUser.hideDistance === true
+          ? 'distance_hidden'
+          : otherUser.strongPrivacyMode === true
+          ? 'approximate_area'
+          : null;
 
       // Calculate relative time for display
       const relativeTime = formatRelativeTime(entry.createdAt, now);
@@ -4086,6 +4228,7 @@ export const getCrossPathHistory = query({
         crossingCountDisplay: getCrossingCountDisplay(crossingCount),
         // Distance range (e.g., "4-5 km")
         distanceRange,
+        locationDisclosure,
         // Relative time (e.g., "today", "yesterday", "3 days ago")
         relativeTime,
         // Reason tags and formatted text

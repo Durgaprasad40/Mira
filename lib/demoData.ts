@@ -1779,7 +1779,7 @@ export function generateDemoCrossedPaths(
  * DEPRECATED: Legacy export for backwards compatibility during migration.
  * New code should use generateDemoCrossedPaths(userLat, userLng) instead.
  * This fallback uses a safe default location (0, 0) which will be off-screen
- * and should trigger re-seeding with live location.
+ * and should trigger re-seeding with the user's current app location.
  */
 export const DEMO_CROSSED_PATHS: import('@/stores/demoStore').DemoCrossedPath[] = [];
 

@@ -24,6 +24,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { recordBgCrossedPathsBreadcrumb } from '@/lib/backgroundCrossedPathsTelemetry';
 
 /** Sample type intentionally mirrors the `recordLocationBatch` validator
  *  in `convex/crossedPaths.ts`. Source is one of:
@@ -42,6 +43,10 @@ export type BufferedSample = {
  *  buffering more than 200 in one device-day would always be rejected
  *  on flush anyway. We pick 200 to align with that ceiling. */
 const MAX_PENDING_SAMPLES = 200;
+
+function summarizeSources(samples: BufferedSample[]): string[] {
+  return Array.from(new Set(samples.map((sample) => sample.source)));
+}
 
 interface BackgroundLocationBufferState {
   pending: BufferedSample[];
@@ -64,10 +69,24 @@ export const useBackgroundLocationBufferStore = create<BackgroundLocationBufferS
       enqueue: (sample) => {
         set((state) => {
           const next = [...state.pending, sample];
+          const evictedCount = Math.max(0, next.length - MAX_PENDING_SAMPLES);
           // Drop oldest when over cap; we'd rather lose ancient samples
           // than the freshest crossing.
-          if (next.length > MAX_PENDING_SAMPLES) {
-            next.splice(0, next.length - MAX_PENDING_SAMPLES);
+          if (evictedCount > 0) {
+            next.splice(0, evictedCount);
+            recordBgCrossedPathsBreadcrumb('buffer_oldest_evicted', {
+              evictedCount,
+              pendingCount: next.length,
+              incomingCount: 1,
+              sources: [sample.source],
+            });
+          }
+          if (next.length >= MAX_PENDING_SAMPLES) {
+            recordBgCrossedPathsBreadcrumb('buffer_cap_reached', {
+              pendingCount: next.length,
+              cap: MAX_PENDING_SAMPLES,
+              sources: [sample.source],
+            });
           }
           return { pending: next };
         });
@@ -76,8 +95,23 @@ export const useBackgroundLocationBufferStore = create<BackgroundLocationBufferS
         if (samples.length === 0) return;
         set((state) => {
           const next = [...state.pending, ...samples];
-          if (next.length > MAX_PENDING_SAMPLES) {
-            next.splice(0, next.length - MAX_PENDING_SAMPLES);
+          const evictedCount = Math.max(0, next.length - MAX_PENDING_SAMPLES);
+          if (evictedCount > 0) {
+            next.splice(0, evictedCount);
+            recordBgCrossedPathsBreadcrumb('buffer_oldest_evicted', {
+              evictedCount,
+              pendingCount: next.length,
+              incomingCount: samples.length,
+              sources: summarizeSources(samples),
+            });
+          }
+          if (next.length >= MAX_PENDING_SAMPLES) {
+            recordBgCrossedPathsBreadcrumb('buffer_cap_reached', {
+              pendingCount: next.length,
+              cap: MAX_PENDING_SAMPLES,
+              incomingCount: samples.length,
+              sources: summarizeSources(samples),
+            });
           }
           return { pending: next };
         });
@@ -86,7 +120,16 @@ export const useBackgroundLocationBufferStore = create<BackgroundLocationBufferS
         if (n <= 0) return;
         set((state) => ({ pending: state.pending.slice(n) }));
       },
-      clear: () => set({ pending: [] }),
+      clear: () =>
+        set((state) => {
+          if (state.pending.length > 0) {
+            recordBgCrossedPathsBreadcrumb('buffer_cleared', {
+              clearedCount: state.pending.length,
+              sources: summarizeSources(state.pending),
+            });
+          }
+          return { pending: [] };
+        }),
       getPending: () => get().pending,
     }),
     {

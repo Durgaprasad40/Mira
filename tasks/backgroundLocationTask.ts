@@ -22,6 +22,7 @@
 import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
 import { backgroundLocationBuffer } from '@/stores/backgroundLocationBufferStore';
+import { recordBgCrossedPathsBreadcrumb } from '@/lib/backgroundCrossedPathsTelemetry';
 
 /** Stable task name — referenced by `useBackgroundLocation` to start/stop
  *  via `Location.startLocationUpdatesAsync` and `stopLocationUpdatesAsync`. */
@@ -39,6 +40,9 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK_NAME, async ({ data, error }) =>
   if (error) {
     // Swallow — never throw from background context. Foreground UI will
     // surface degraded state via getStatus() if the task ends up unhealthy.
+    recordBgCrossedPathsBreadcrumb('background_location_task_error', {
+      reason: 'task_error',
+    });
     if (__DEV__) {
       console.warn('[BG_LOCATION_TASK] error:', error?.message);
     }
@@ -89,10 +93,19 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK_NAME, async ({ data, error }) =>
 
   try {
     backgroundLocationBuffer.enqueueMany(samples);
+    recordBgCrossedPathsBreadcrumb('samples_buffered', {
+      count: samples.length,
+      sources: Array.from(new Set(samples.map((sample) => sample.source))),
+      pendingCount: backgroundLocationBuffer.size(),
+    });
   } catch (err) {
     // Persist failure here is non-recoverable from background context.
     // Drop silently; foreground retry-loop will re-prime if the user is
     // still moving.
+    recordBgCrossedPathsBreadcrumb('buffer_enqueue_failed', {
+      reason: 'persist_failed',
+      count: samples.length,
+    });
     if (__DEV__) {
       console.warn('[BG_LOCATION_TASK] enqueue failed:', (err as Error)?.message);
     }

@@ -158,6 +158,14 @@ crons.interval(
   internal.crossedPaths.cleanupExpiredHistory
 );
 
+// Nearby/Crossed Paths: Cleanup daily-shown ledger rows after 30 days
+// Prevents the crossedPathDailyShown cap ledger from growing forever.
+crons.daily(
+  'cleanup-expired-crossed-path-daily-shown',
+  { hourUTC: 4, minuteUTC: 15 },
+  internal.crossedPaths.cleanupExpiredCrossedPathDailyShown
+);
+
 // Nearby/Crossed Paths: Cleanup expired crossed events every hour
 // Removes crossed events past their 7-day expiration
 crons.hourly(

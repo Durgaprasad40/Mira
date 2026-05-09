@@ -6,14 +6,16 @@ import { Stack, useRouter, useSegments, usePathname } from "expo-router";
 import { initSentry, captureException, setUserContext, clearUserContext, trackRouteChange } from "@/lib/sentry";
 import { AppErrorBoundary } from "@/components/safety/AppErrorBoundary";
 import { DEBUG_ONBOARDING_HYDRATION, DEBUG_STARTUP } from "@/lib/debugFlags";
+import { recoverBackgroundCrossedPathsTasks } from "@/hooks/useBackgroundLocation";
 
 // ════════════════════════════════════════════════════════════════════════════
 // PHASE-3 BACKGROUND CROSSED PATHS: Module-load task registration ONLY.
 //
-// This import has a single side effect: it calls TaskManager.defineTask(...)
-// at module scope so the OS knows about the task name when (later) the user
-// explicitly enables Background Crossed Paths from Nearby Settings and the
-// `useBackgroundLocation` hook calls Location.startLocationUpdatesAsync.
+// These imports have a single side effect: they call TaskManager.defineTask(...)
+// at module scope so the OS knows about the task names when (later) the user
+// explicitly enables Background Crossed Paths from Nearby Settings. The location
+// task only starts after `useBackgroundLocation` calls Location.startLocationUpdatesAsync;
+// the deferred flush task only registers after the same explicit enable flow.
 //
 // IMPORTANT: defining a task is NOT the same as starting it. Nothing about
 // this import causes the app to begin collecting location samples. The task
@@ -26,6 +28,7 @@ import { DEBUG_ONBOARDING_HYDRATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 //      an explicit user action and all server-side consent gates pass.
 // ════════════════════════════════════════════════════════════════════════════
 import "@/tasks/backgroundLocationTask";
+import "@/tasks/backgroundFlushTask";
 
 // Initialize Sentry FIRST, before any other code runs
 // This ensures we catch errors during app initialization
@@ -938,6 +941,13 @@ function SentryRouteTracker() {
   return null;
 }
 
+function BackgroundCrossedPathsRecoveryManager() {
+  useEffect(() => {
+    void recoverBackgroundCrossedPathsTasks();
+  }, []);
+  return null;
+}
+
 export default function RootLayout() {
   // Milestone A: RootLayout first render
   markTiming('root_layout');
@@ -959,6 +969,7 @@ export default function RootLayout() {
             <OnboardingDraftHydrator />
             <DeviceFingerprintCollector />
             <PresenceAndLocationManager />
+            <BackgroundCrossedPathsRecoveryManager />
             <CrossedPathToastManager />
             <TruthDareUploadManager />
             <TruthDarePromptUploadManager />

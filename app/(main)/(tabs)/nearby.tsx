@@ -449,6 +449,14 @@ export default function NearbyScreen() {
   // Auth store
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
+  const currentUserQuery = useQuery(
+    api.users.getCurrentUser,
+    !isDemo && userId ? { userId } : 'skip'
+  );
+  const incognitoMode = currentUserQuery?.incognitoMode === true;
+  const nearbyPaused =
+    typeof currentUserQuery?.nearbyPausedUntil === 'number' &&
+    currentUserQuery.nearbyPausedUntil > Date.now();
 
   // Location store
   const permissionStatus = useLocationStore((s) => s.permissionStatus);
@@ -933,6 +941,16 @@ export default function NearbyScreen() {
       return;
     }
 
+    if (incognitoMode || nearbyPaused) {
+      if (__DEV__) {
+        console.log('[NEARBY] publishLocation skipped: privacy mode active', {
+          incognitoMode,
+          nearbyPaused,
+        });
+      }
+      return;
+    }
+
     // Skip if location not ready
     if (locationUIState !== 'ready') {
       return;
@@ -1114,6 +1132,8 @@ export default function NearbyScreen() {
     isDemo,
     isNearbyFocused,
     token,
+    incognitoMode,
+    nearbyPaused,
     locationUIState,
     bestLocation,
     publishRefreshTick,
@@ -1603,6 +1623,8 @@ export default function NearbyScreen() {
       crossingCountDisplay: user.crossingCountDisplay,
       lastCrossedAt: user.lastCrossedAt,
       areaName: user.areaName,
+      strongPrivacyMode: user.strongPrivacyMode,
+      hideDistance: user.hideDistance,
     };
     setPreviewUser(preview);
     trackEvent({

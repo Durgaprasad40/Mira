@@ -1,3 +1,8 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as BackgroundTask from 'expo-background-task';
+import * as TaskManager from 'expo-task-manager';
+import { recordBgCrossedPathsBreadcrumb } from '@/lib/backgroundCrossedPathsTelemetry';
+
 /**
  * Background Crossed Paths — Phase-2 client foundation
  *
@@ -28,6 +33,10 @@
  */
 export const BG_CROSSED_PATHS_FEATURE_READY = false;
 
+export const BACKGROUND_FLUSH_TASK_NAME = 'mira-background-crossed-paths-flush-v1';
+const BACKGROUND_FLUSH_MIN_INTERVAL_MINUTES = 60;
+const LOCAL_BG_CROSSED_PATHS_ENABLED_KEY = 'mira_bg_crossed_paths_enabled_v1';
+
 /**
  * Mirror of the backend `BG_LOCATION_CONSENT_VERSION` (in `convex/crossedPaths.ts`).
  * Used by the UI to decide whether an existing consent stamp is still
@@ -41,12 +50,16 @@ export const BG_LOCATION_CONSENT_VERSION = 'bg_crossed_paths_v1';
 export const BG_COPY = {
   sectionTitle: 'Background crossed paths',
   sectionTagline:
-    'Find people you crossed paths with even when Mira is closed — once you choose to turn it on later.',
+    'Best-effort background detection for approximate crossed-path encounters — once you choose to turn it on later.',
   toggleTitle: 'Enable background crossed paths',
   toggleDescriptionUnavailable:
     'Coming soon. We will let you know when this is ready to enable.',
   toggleDescriptionReady:
-    'Mira will use background location to remember when you cross paths with someone, even when the app is closed.',
+    'Mira can occasionally check approximate crossed-path encounters in the background after you enable it.',
+  androidBatteryTitle: 'Android reliability',
+  androidBatteryDescription:
+    'Samsung, OnePlus, and some Android phones may pause background detection to save battery. You can improve reliability by allowing Mira unrestricted battery usage in Android settings.',
+  androidBatteryAction: 'Open app settings',
   statusComingSoon: 'Unavailable in this version',
   statusConsentGranted: 'Consent granted',
   statusConsentNone: 'Not enabled',
@@ -55,17 +68,17 @@ export const BG_COPY = {
   // Explainer modal copy
   explainerTitle: 'Background crossed paths',
   explainerLead:
-    'When you turn this on later, Mira will be able to record when you cross paths with someone even if the app is closed.',
+    'When you turn this on later, Mira can use best-effort background detection for approximate crossed-path encounters.',
   explainerBullets: [
     'Mira only uses background location if you explicitly enable it.',
-    'Your exact coordinates are never shown to other users — only that you crossed paths.',
+    'Your exact coordinates are never shown to other users — only that an approximate crossed-path encounter happened.',
     'You can turn it off anytime from Nearby Settings, and your consent is cleared.',
-    'Privacy zones, distance rules, and pause still apply to background samples.',
+    'Privacy zones, distance rules, pause, and Android battery limits still apply.',
   ],
   explainerNoticeUnavailable:
     'This phase does not start real background location yet. We are only saving your preference.',
   explainerNoticeReady:
-    'Tapping continue will record your consent. Mira may then ask the system for background location permission.',
+    'Tapping continue records your consent. Mira may then ask the system for background location permission.',
   explainerCancel: 'Cancel',
   explainerContinueUnavailable: 'OK, got it',
   explainerContinueReady: 'I understand, enable',
@@ -111,4 +124,113 @@ export function formatDiscoveryCountdown(expiresAt: number | undefined | null): 
   const minutes = totalMinutes % 60;
   if (hours > 0) return `${hours}h ${minutes}m left`;
   return `${minutes}m left`;
+}
+
+export async function getLocalBackgroundCrossedPathsEnabled(): Promise<boolean> {
+  try {
+    return (await AsyncStorage.getItem(LOCAL_BG_CROSSED_PATHS_ENABLED_KEY)) === '1';
+  } catch (err) {
+    recordBgCrossedPathsBreadcrumb('local_opt_in_read_failed', {
+      reason: 'storage_read_failed',
+    });
+    if (__DEV__) {
+      console.warn('[BG_FLUSH_TASK] skipped reason=local_enabled_read_failed', (err as Error)?.message);
+    }
+    return false;
+  }
+}
+
+export async function setLocalBackgroundCrossedPathsEnabled(enabled: boolean): Promise<void> {
+  try {
+    if (enabled) {
+      await AsyncStorage.setItem(LOCAL_BG_CROSSED_PATHS_ENABLED_KEY, '1');
+    } else {
+      await AsyncStorage.removeItem(LOCAL_BG_CROSSED_PATHS_ENABLED_KEY);
+    }
+    recordBgCrossedPathsBreadcrumb('local_opt_in_updated', { enabled });
+  } catch (err) {
+    recordBgCrossedPathsBreadcrumb('local_opt_in_update_failed', {
+      enabled,
+      reason: 'storage_write_failed',
+    });
+    if (__DEV__) {
+      console.warn('[BG_FLUSH_TASK] local enablement write failed:', (err as Error)?.message);
+    }
+  }
+}
+
+export async function registerBackgroundCrossedPathsFlushTask(): Promise<{
+  registered: boolean;
+  reason?: string;
+}> {
+  if (!BG_CROSSED_PATHS_FEATURE_READY) {
+    recordBgCrossedPathsBreadcrumb('deferred_flush_register_skipped', {
+      reason: 'feature_not_ready',
+    });
+    if (__DEV__) console.log('[BG_FLUSH_TASK] skipped reason=feature_not_ready');
+    return { registered: false, reason: 'feature_not_ready' };
+  }
+
+  const locallyEnabled = await getLocalBackgroundCrossedPathsEnabled();
+  if (!locallyEnabled) {
+    recordBgCrossedPathsBreadcrumb('deferred_flush_register_skipped', {
+      reason: 'locally_disabled',
+    });
+    if (__DEV__) console.log('[BG_FLUSH_TASK] skipped reason=locally_disabled');
+    return { registered: false, reason: 'locally_disabled' };
+  }
+
+  try {
+    if (!TaskManager.isTaskDefined(BACKGROUND_FLUSH_TASK_NAME)) {
+      recordBgCrossedPathsBreadcrumb('deferred_flush_register_skipped', {
+        reason: 'task_not_defined',
+      });
+      if (__DEV__) console.warn('[BG_FLUSH_TASK] skipped reason=task_not_defined');
+      return { registered: false, reason: 'task_not_defined' };
+    }
+
+    const status = await BackgroundTask.getStatusAsync();
+    if (status !== BackgroundTask.BackgroundTaskStatus.Available) {
+      recordBgCrossedPathsBreadcrumb('deferred_flush_register_skipped', {
+        reason: 'background_task_unavailable',
+        status,
+      });
+      if (__DEV__) console.log('[BG_FLUSH_TASK] skipped reason=background_task_unavailable');
+      return { registered: false, reason: 'background_task_unavailable' };
+    }
+
+    await BackgroundTask.registerTaskAsync(BACKGROUND_FLUSH_TASK_NAME, {
+      minimumInterval: BACKGROUND_FLUSH_MIN_INTERVAL_MINUTES,
+    });
+    recordBgCrossedPathsBreadcrumb('deferred_flush_task_registered', {
+      minimumIntervalMinutes: BACKGROUND_FLUSH_MIN_INTERVAL_MINUTES,
+    });
+    if (__DEV__) console.log('[BG_FLUSH_TASK] registered');
+    return { registered: true };
+  } catch (err) {
+    recordBgCrossedPathsBreadcrumb('deferred_flush_register_failed', {
+      reason: 'register_failed',
+    });
+    if (__DEV__) {
+      console.warn('[BG_FLUSH_TASK] failed reason=register_failed', (err as Error)?.message);
+    }
+    return { registered: false, reason: 'register_failed' };
+  }
+}
+
+export async function unregisterBackgroundCrossedPathsFlushTask(): Promise<void> {
+  try {
+    await BackgroundTask.unregisterTaskAsync(BACKGROUND_FLUSH_TASK_NAME);
+    recordBgCrossedPathsBreadcrumb('deferred_flush_task_unregistered');
+    if (__DEV__) console.log('[BG_FLUSH_TASK] unregistered');
+  } catch (err) {
+    recordBgCrossedPathsBreadcrumb('deferred_flush_unregister_failed', {
+      reason: 'unregister_failed',
+    });
+    if (__DEV__) {
+      console.warn('[BG_FLUSH_TASK] failed reason=unregister_failed', (err as Error)?.message);
+    }
+  } finally {
+    await setLocalBackgroundCrossedPathsEnabled(false);
+  }
 }

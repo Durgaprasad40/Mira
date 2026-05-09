@@ -50,6 +50,8 @@ export interface NearbyPreviewData {
   crossingCountDisplay?: string;
   lastCrossedAt?: number;
   areaName?: string;
+  strongPrivacyMode?: boolean;
+  hideDistance?: boolean;
 }
 
 interface NearbyPreviewCardProps {
@@ -139,7 +141,12 @@ export function NearbyPreviewCard({
   const crossingCountText = formatCrossingCount(user.crossingCount, user.crossingCountDisplay);
   const lastCrossedText = formatLastCrossed(user.lastCrossedAt);
   const areaName = user.areaName?.trim();
-  const hasCrossingMeta = Boolean(crossingCountText || areaName || lastCrossedText);
+  const privacyDisclosureText = user.hideDistance
+    ? 'Distance hidden for privacy'
+    : user.strongPrivacyMode
+    ? 'Approximate area'
+    : null;
+  const hasCrossingMeta = Boolean(crossingCountText || areaName || lastCrossedText || privacyDisclosureText);
   const verificationDisplay = getVerificationDisplay({
     isVerified: user.isVerified,
     verificationStatus: user.verificationStatus,
@@ -220,6 +227,16 @@ export function NearbyPreviewCard({
                 </View>
                 {lastCrossedText ? (
                   <Text style={styles.lastCrossedText}>{lastCrossedText}</Text>
+                ) : null}
+                {privacyDisclosureText ? (
+                  <View style={styles.privacyDisclosureRow}>
+                    <Ionicons
+                      name={user.hideDistance ? 'eye-off-outline' : 'shield-checkmark-outline'}
+                      size={12}
+                      color={COLORS.textMuted}
+                    />
+                    <Text style={styles.privacyDisclosureText}>{privacyDisclosureText}</Text>
+                  </View>
                 ) : null}
               </View>
             )}
@@ -427,6 +444,16 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 12,
     fontWeight: '500',
+  },
+  privacyDisclosureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  privacyDisclosureText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
   },
   tagline: {
     fontSize: 14,

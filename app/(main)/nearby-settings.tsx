@@ -12,6 +12,9 @@ import {
   ScrollView,
   TouchableOpacity,
   Switch,
+  Linking,
+  Platform,
+  I18nManager,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -245,6 +248,14 @@ export default function NearbySettingsScreen() {
     router.push('/(main)/background-crossed-paths-explainer' as any);
   }, [router]);
 
+  const handleOpenAndroidAppSettings = useCallback(async () => {
+    try {
+      await Linking.openSettings();
+    } catch {
+      Toast.show('Open Android settings and choose Mira to adjust battery usage.');
+    }
+  }, []);
+
   const bgStatusLine = (() => {
     if (bgConsentStatus === 'unavailable') return BG_COPY.statusComingSoon;
     if (bgConsentStatus === 'granted' && bgEnabledServer) {
@@ -257,6 +268,11 @@ export default function NearbySettingsScreen() {
   const bgDescription = BG_CROSSED_PATHS_FEATURE_READY
     ? BG_COPY.toggleDescriptionReady
     : BG_COPY.toggleDescriptionUnavailable;
+  const showAndroidBatteryGuidance =
+    Platform.OS === 'android' &&
+    BG_CROSSED_PATHS_FEATURE_READY &&
+    bgConsentStatus === 'granted' &&
+    (bgEnabledServer || discoveryEnabled);
 
   // Phase-2: pause-duration options. null = indefinite ("Until turned back on").
   const PAUSE_OPTIONS: Array<{ label: string; durationMs: number | null; shortLabel: string }> = [
@@ -424,7 +440,7 @@ export default function NearbySettingsScreen() {
               <Text style={styles.toggleTitle}>Save crossed paths</Text>
               <Text style={styles.toggleDescription}>
                 Mira uses approximate location to remember people you crossed paths with while
-                you are using the app. Your live location is never shown. You can pause this anytime.
+                you are using the app. Your exact location is never shown. You can pause this anytime.
               </Text>
             </View>
             <Switch
@@ -506,6 +522,28 @@ export default function NearbySettingsScreen() {
 
           {bgToggleOn && (
             <Text style={styles.bgRevokeNote}>{BG_COPY.revokeNote}</Text>
+          )}
+
+          {showAndroidBatteryGuidance && (
+            <View style={styles.androidBatteryCard}>
+              <View style={styles.androidBatteryHeader}>
+                <Ionicons name="battery-charging-outline" size={17} color={COLORS.primary} />
+                <Text style={styles.androidBatteryTitle}>{BG_COPY.androidBatteryTitle}</Text>
+              </View>
+              <Text style={styles.androidBatteryText}>
+                {BG_COPY.androidBatteryDescription}
+              </Text>
+              <TouchableOpacity
+                style={styles.androidBatteryAction}
+                onPress={handleOpenAndroidAppSettings}
+                accessibilityLabel="Open Android app settings"
+              >
+                <Text style={styles.androidBatteryActionText}>
+                  {BG_COPY.androidBatteryAction}
+                </Text>
+                <Ionicons name="open-outline" size={15} color={COLORS.primary} />
+              </TouchableOpacity>
+            </View>
           )}
         </View>
 
@@ -764,6 +802,45 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     marginTop: 6,
     lineHeight: 16,
+  },
+  androidBatteryCard: {
+    marginTop: 10,
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  androidBatteryHeader: {
+    flexDirection: I18nManager.isRTL ? 'row-reverse' : 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  androidBatteryTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: I18nManager.isRTL ? 'right' : 'left',
+  },
+  androidBatteryText: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: COLORS.textMuted,
+    textAlign: I18nManager.isRTL ? 'right' : 'left',
+  },
+  androidBatteryAction: {
+    flexDirection: I18nManager.isRTL ? 'row-reverse' : 'row',
+    alignItems: 'center',
+    alignSelf: I18nManager.isRTL ? 'flex-end' : 'flex-start',
+    gap: 6,
+    marginTop: 10,
+    paddingVertical: 4,
+  },
+  androidBatteryActionText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   comingSoonBadge: {
     paddingHorizontal: 6,

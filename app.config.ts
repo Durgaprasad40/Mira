@@ -103,6 +103,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     // Wires up native Sentry SDK for iOS/Android and source map upload during EAS builds.
     "@sentry/react-native/expo",
     "expo-router",
+    "expo-background-task",
     [
       "expo-camera",
       {

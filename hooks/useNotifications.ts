@@ -200,8 +200,8 @@ function createDemoNotifications(): AppNotification[] {
     {
       _id: 'demo_notif_1',
       type: 'crossed_paths',
-      title: 'Crossed paths',
-      body: 'You crossed paths with Isha nearby.',
+      title: 'Crossed Paths',
+      body: 'You crossed paths with someone nearby',
       data: { otherUserId: 'demo_profile_12', crossedAt: String(now - 5 * 60 * 1000) },
       createdAt: now - 10 * 60 * 1000,
       expiresAt: now - 10 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS, // BUGFIX #19

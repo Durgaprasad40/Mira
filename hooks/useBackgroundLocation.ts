@@ -46,13 +46,22 @@ import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { BG_CROSSED_PATHS_FEATURE_READY } from '@/lib/backgroundCrossedPaths';
-import { BACKGROUND_LOCATION_TASK_NAME } from '@/tasks/backgroundLocationTask';
 import {
-  backgroundLocationBuffer,
-  type BufferedSample,
-} from '@/stores/backgroundLocationBufferStore';
-import { getOrCreateInstallId } from '@/lib/deviceFingerprint';
+  BG_CROSSED_PATHS_FEATURE_READY,
+  BACKGROUND_FLUSH_TASK_NAME,
+  getLocalBackgroundCrossedPathsEnabled,
+  registerBackgroundCrossedPathsFlushTask,
+  setLocalBackgroundCrossedPathsEnabled,
+  unregisterBackgroundCrossedPathsFlushTask,
+} from '@/lib/backgroundCrossedPaths';
+import {
+  flushBufferedBackgroundSamples,
+  type BackgroundFlushResult,
+} from '@/lib/backgroundCrossedPathsFlush';
+import { recordBgCrossedPathsBreadcrumb } from '@/lib/backgroundCrossedPathsTelemetry';
+import { BACKGROUND_LOCATION_TASK_NAME } from '@/tasks/backgroundLocationTask';
+import { backgroundLocationBuffer } from '@/stores/backgroundLocationBufferStore';
+import { getAuthBootCache } from '@/stores/authBootCache';
 
 // ---------------------------------------------------------------------------
 // Public result types — the hook NEVER throws, callers branch on `ok`.
@@ -78,12 +87,7 @@ export type BgDisableResult =
   | { ok: true }
   | { ok: false; reason: BgDisableFailureReason; message?: string };
 
-export type BgFlushResult = {
-  flushed: number;       // number of samples we attempted to upload
-  accepted: number;      // number the backend confirmed it stored
-  skipped: boolean;      // true if no upload happened
-  reason?: string;       // structured short-circuit reason
-};
+export type BgFlushResult = BackgroundFlushResult;
 
 export type BgStatus = {
   /** Mirror of the client-side feature gate. Currently false. */
@@ -162,8 +166,12 @@ async function stopBackgroundTaskSafe(): Promise<void> {
     );
     if (started) {
       await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK_NAME);
+      recordBgCrossedPathsBreadcrumb('background_location_task_stopped');
     }
   } catch (err) {
+    recordBgCrossedPathsBreadcrumb('background_location_task_stop_failed', {
+      reason: 'stop_failed',
+    });
     if (__DEV__) {
       console.warn(
         '[BG_LOCATION] stopBackgroundTaskSafe failed:',
@@ -173,10 +181,136 @@ async function stopBackgroundTaskSafe(): Promise<void> {
   }
 }
 
-/** Cap per-flush so a backlog of 200 samples doesn't slam the backend with a
- *  single huge mutation. Backend MAX_SAMPLES_PER_BATCH is configurable; 50 is
- *  conservative and lines up with foreground rate limits. */
-const FLUSH_BATCH_LIMIT = 50;
+function getBackgroundLocationTaskOptions(): Location.LocationTaskOptions {
+  return Platform.OS === 'android'
+    ? {
+        accuracy: Location.Accuracy.Balanced,
+        timeInterval: 60_000,
+        distanceInterval: 100,
+        deferredUpdatesInterval: 60_000,
+        deferredUpdatesDistance: 100,
+        pausesUpdatesAutomatically: false,
+        showsBackgroundLocationIndicator: false,
+        foregroundService: {
+          notificationTitle: 'Mira',
+          notificationBody:
+            'Recording crossed paths. You can turn this off in Nearby Settings.',
+        },
+      }
+    : {
+        accuracy: Location.Accuracy.Balanced,
+        distanceInterval: 100,
+        pausesUpdatesAutomatically: true,
+        showsBackgroundLocationIndicator: false,
+        activityType: Location.ActivityType.Other,
+      };
+}
+
+export async function recoverBackgroundCrossedPathsTasks(): Promise<void> {
+  if (Platform.OS !== 'android') return;
+
+  if (!BG_CROSSED_PATHS_FEATURE_READY) {
+    recordBgCrossedPathsBreadcrumb('recovery_skipped', {
+      reason: 'feature_not_ready',
+      platform: Platform.OS,
+    });
+    if (__DEV__) console.log('[BG_RECOVERY] skipped: feature not ready');
+    return;
+  }
+
+  const locallyEnabled = await getLocalBackgroundCrossedPathsEnabled();
+  if (!locallyEnabled) {
+    recordBgCrossedPathsBreadcrumb('recovery_skipped', {
+      reason: 'local_opt_in_missing',
+      platform: Platform.OS,
+    });
+    if (__DEV__) console.log('[BG_RECOVERY] skipped: local opt-in missing');
+    return;
+  }
+
+  const auth = await getAuthBootCache();
+  if (!auth.isAuthenticated || !auth.userId || !auth.token) {
+    recordBgCrossedPathsBreadcrumb('recovery_failed', {
+      reason: 'not_authenticated',
+      platform: Platform.OS,
+    });
+    if (__DEV__) console.log('[BG_RECOVERY] failed: not_authenticated');
+    return;
+  }
+
+  try {
+    if (!TaskManager.isTaskDefined(BACKGROUND_LOCATION_TASK_NAME)) {
+      recordBgCrossedPathsBreadcrumb('recovery_failed', {
+        reason: 'location_task_not_defined',
+        platform: Platform.OS,
+      });
+      if (__DEV__) console.log('[BG_RECOVERY] failed: location task not defined');
+      return;
+    }
+    if (!TaskManager.isTaskDefined(BACKGROUND_FLUSH_TASK_NAME)) {
+      recordBgCrossedPathsBreadcrumb('recovery_failed', {
+        reason: 'flush_task_not_defined',
+        platform: Platform.OS,
+      });
+      if (__DEV__) console.log('[BG_RECOVERY] failed: flush task not defined');
+      return;
+    }
+
+    const backgroundPermission = await Location.getBackgroundPermissionsAsync();
+    if (backgroundPermission.status !== 'granted') {
+      recordBgCrossedPathsBreadcrumb('recovery_failed', {
+        reason: 'background_permission_missing',
+        platform: Platform.OS,
+      });
+      if (__DEV__) console.log('[BG_RECOVERY] failed: background permission missing');
+      return;
+    }
+
+    let repaired = false;
+    const locationStarted = await Location.hasStartedLocationUpdatesAsync(
+      BACKGROUND_LOCATION_TASK_NAME,
+    );
+    if (!locationStarted) {
+      await Location.startLocationUpdatesAsync(
+        BACKGROUND_LOCATION_TASK_NAME,
+        getBackgroundLocationTaskOptions(),
+      );
+      recordBgCrossedPathsBreadcrumb('background_location_task_started', {
+        source: 'recovery',
+        platform: Platform.OS,
+      });
+      repaired = true;
+    }
+
+    const flushRegistered = await TaskManager.isTaskRegisteredAsync(
+      BACKGROUND_FLUSH_TASK_NAME,
+    );
+    if (!flushRegistered) {
+      const result = await registerBackgroundCrossedPathsFlushTask();
+      repaired = repaired || result.registered;
+    }
+
+    if (__DEV__) {
+      console.log(
+        repaired
+          ? '[BG_RECOVERY] repaired: tasks re-registered'
+          : '[BG_RECOVERY] checked: tasks already registered',
+      );
+    }
+    recordBgCrossedPathsBreadcrumb(repaired ? 'recovery_repaired' : 'recovery_checked', {
+      repaired,
+      platform: Platform.OS,
+    });
+  } catch (err) {
+    recordBgCrossedPathsBreadcrumb('recovery_failed', {
+      reason: 'exception',
+      platform: Platform.OS,
+    });
+    if (__DEV__) {
+      console.warn('[BG_RECOVERY] failed:', (err as Error)?.message);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Hook
@@ -184,10 +318,13 @@ const FLUSH_BATCH_LIMIT = 50;
 
 export function useBackgroundLocation() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   // Capture in a ref so async callbacks see the latest value without
   // re-binding the callbacks on every render.
   const userIdRef = useRef(userId);
+  const tokenRef = useRef(token);
   userIdRef.current = userId;
+  tokenRef.current = token;
 
   const acceptConsentMut = useMutation(api.users.acceptBackgroundLocationConsent);
   const revokeConsentMut = useMutation(api.users.revokeBackgroundLocationConsent);
@@ -204,61 +341,27 @@ export function useBackgroundLocation() {
   // flushPendingBackgroundSamples
   // -------------------------------------------------------------------------
   const flushPendingBackgroundSamples = useCallback(async (): Promise<BgFlushResult> => {
-    if (!BG_CROSSED_PATHS_FEATURE_READY) {
-      return { flushed: 0, accepted: 0, skipped: true, reason: 'feature_not_ready' };
-    }
-    if (isDemoMode) {
-      return { flushed: 0, accepted: 0, skipped: true, reason: 'demo_mode' };
-    }
-    const uid = userIdRef.current;
-    if (!uid) {
-      return { flushed: 0, accepted: 0, skipped: true, reason: 'not_authenticated' };
-    }
     if (flushInFlightRef.current) {
+      recordBgCrossedPathsBreadcrumb('flush_skipped', {
+        reason: 'in_flight',
+      });
       return { flushed: 0, accepted: 0, skipped: true, reason: 'in_flight' };
     }
 
-    const pending = backgroundLocationBuffer.getPending();
-    if (pending.length === 0) {
-      return { flushed: 0, accepted: 0, skipped: true, reason: 'empty' };
-    }
-
-    const slice: BufferedSample[] = pending.slice(0, FLUSH_BATCH_LIMIT);
     flushInFlightRef.current = true;
     try {
-      const deviceHash = await getOrCreateInstallId();
-      const res = (await recordBatchMut({
-        userId: uid as any,
-        samples: slice,
-        deviceHash,
-      })) as { success?: boolean; accepted?: number; reason?: string } | undefined;
-
-      const reason = res?.reason;
-      // Keep samples on disk only for transient failures (rate limit). Every
-      // other reason — kill-switch off, consent missing, paused, incognito,
-      // privacy-zone — is a steady-state rejection that won't change inside
-      // a session, so retrying would just churn the buffer until the cap
-      // forces a drop. Drop the slice and move on.
-      const transient = reason === 'rate_limited';
-      if (!transient) {
-        backgroundLocationBuffer.drainFirst(slice.length);
-      }
-      return {
-        flushed: slice.length,
-        accepted: typeof res?.accepted === 'number' ? res.accepted : 0,
-        skipped: false,
-        reason,
-      };
-    } catch (err) {
-      // Network or backend error — keep samples for the next foreground
-      // attempt. The 200-cap protects disk usage if we never recover.
-      if (__DEV__) {
-        console.warn(
-          '[BG_LOCATION] flushPendingBackgroundSamples failed:',
-          (err as Error)?.message,
-        );
-      }
-      return { flushed: 0, accepted: 0, skipped: true, reason: 'network_error' };
+      return await flushBufferedBackgroundSamples({
+        userId: userIdRef.current,
+        token: tokenRef.current,
+        logPrefix: 'BG_LOCATION',
+        requireLocalEnablement: true,
+        uploadBatch: async ({ userId, samples, deviceHash }) =>
+          (await recordBatchMut({
+            userId: userId as any,
+            samples,
+            deviceHash,
+          })) as { success?: boolean; accepted?: number; reason?: string } | undefined,
+      });
     } finally {
       flushInFlightRef.current = false;
     }
@@ -273,6 +376,10 @@ export function useBackgroundLocation() {
       // ANY OS API or backend mutation. This is the check that keeps Phase-3
       // OFF in production until we explicitly flip the constant.
       if (!BG_CROSSED_PATHS_FEATURE_READY) {
+        recordBgCrossedPathsBreadcrumb('enable_gate_skipped', {
+          gate: 'feature_ready',
+          reason: 'feature_not_ready',
+        });
         return {
           ok: false,
           reason: 'feature_not_ready',
@@ -281,10 +388,18 @@ export function useBackgroundLocation() {
         };
       }
       if (isDemoMode) {
+        recordBgCrossedPathsBreadcrumb('enable_gate_skipped', {
+          gate: 'demo_mode',
+          reason: 'demo_mode',
+        });
         return { ok: false, reason: 'demo_mode' };
       }
       const uid = userIdRef.current;
       if (!uid) {
+        recordBgCrossedPathsBreadcrumb('enable_gate_skipped', {
+          gate: 'auth',
+          reason: 'not_authenticated',
+        });
         return { ok: false, reason: 'not_authenticated' };
       }
 
@@ -297,6 +412,11 @@ export function useBackgroundLocation() {
         try {
           fg = await Location.requestForegroundPermissionsAsync();
         } catch (err) {
+          recordBgCrossedPathsBreadcrumb('os_permission_result', {
+            permission: 'foreground',
+            granted: false,
+            reason: 'request_failed',
+          });
           return {
             ok: false,
             reason: 'foreground_permission_denied',
@@ -305,8 +425,17 @@ export function useBackgroundLocation() {
         }
       }
       if (fg.status !== 'granted') {
+        recordBgCrossedPathsBreadcrumb('os_permission_result', {
+          permission: 'foreground',
+          granted: false,
+          reason: 'denied',
+        });
         return { ok: false, reason: 'foreground_permission_denied' };
       }
+      recordBgCrossedPathsBreadcrumb('os_permission_result', {
+        permission: 'foreground',
+        granted: true,
+      });
 
       // Gate 3: Server-side consent stamp. We record consent BEFORE asking
       // for OS background permission so a user who declines the OS prompt
@@ -315,7 +444,14 @@ export function useBackgroundLocation() {
       // (defense in depth — UI also gates).
       try {
         await acceptConsentMut({ authUserId: uid });
+        recordBgCrossedPathsBreadcrumb('server_consent_result', {
+          success: true,
+        });
       } catch (err) {
+        recordBgCrossedPathsBreadcrumb('server_consent_result', {
+          success: false,
+          reason: 'consent_failed',
+        });
         return {
           ok: false,
           reason: 'consent_failed',
@@ -332,6 +468,11 @@ export function useBackgroundLocation() {
           bg = await Location.requestBackgroundPermissionsAsync();
         } catch (err) {
           await safeRevokeOnRollback(uid, revokeConsentMut);
+          recordBgCrossedPathsBreadcrumb('os_permission_result', {
+            permission: 'background',
+            granted: false,
+            reason: 'request_failed',
+          });
           return {
             ok: false,
             reason: 'background_permission_denied',
@@ -341,8 +482,17 @@ export function useBackgroundLocation() {
       }
       if (bg.status !== 'granted') {
         await safeRevokeOnRollback(uid, revokeConsentMut);
+        recordBgCrossedPathsBreadcrumb('os_permission_result', {
+          permission: 'background',
+          granted: false,
+          reason: 'denied',
+        });
         return { ok: false, reason: 'background_permission_denied' };
       }
+      recordBgCrossedPathsBreadcrumb('os_permission_result', {
+        permission: 'background',
+        granted: true,
+      });
 
       // Gate 5: Platform-specific server flag.
       //   - Android: open a Discovery Mode window (auto-expires; backend
@@ -357,8 +507,17 @@ export function useBackgroundLocation() {
             backgroundLocationEnabled: true,
           });
         }
+        recordBgCrossedPathsBreadcrumb('platform_setup_result', {
+          success: true,
+          platform: Platform.OS,
+        });
       } catch (err) {
         await safeRevokeOnRollback(uid, revokeConsentMut);
+        recordBgCrossedPathsBreadcrumb('platform_setup_result', {
+          success: false,
+          platform: Platform.OS,
+          reason: 'platform_setup_failed',
+        });
         return {
           ok: false,
           reason: 'platform_setup_failed',
@@ -371,42 +530,14 @@ export function useBackgroundLocation() {
       // `@/tasks/backgroundLocationTask` — this is the first time it actually
       // runs.
       try {
-        const opts: Location.LocationTaskOptions =
-          Platform.OS === 'android'
-            ? {
-                accuracy: Location.Accuracy.Balanced,
-                // Android: foreground-service-backed updates. The system
-                // notification is REQUIRED on Android 14+ for
-                // FOREGROUND_SERVICE_LOCATION; the copy explicitly tells the
-                // user how to turn it off (Nearby Settings).
-                timeInterval: 60_000,
-                distanceInterval: 100,
-                deferredUpdatesInterval: 60_000,
-                deferredUpdatesDistance: 100,
-                pausesUpdatesAutomatically: false,
-                showsBackgroundLocationIndicator: false,
-                foregroundService: {
-                  notificationTitle: 'Mira',
-                  notificationBody:
-                    'Recording crossed paths. You can turn this off in Nearby Settings.',
-                },
-              }
-            : {
-                // iOS: low accuracy + automatic-pause + Other activity type
-                // is the documented expo-location pattern that lines up with
-                // CoreLocation's Significant Location Change service. Samples
-                // arrive infrequently (city-block scale), aligning with the
-                // backend's privacy-protective coarsening.
-                accuracy: Location.Accuracy.Balanced,
-                distanceInterval: 100,
-                pausesUpdatesAutomatically: true,
-                showsBackgroundLocationIndicator: false,
-                activityType: Location.ActivityType.Other,
-              };
         await Location.startLocationUpdatesAsync(
           BACKGROUND_LOCATION_TASK_NAME,
-          opts,
+          getBackgroundLocationTaskOptions(),
         );
+        recordBgCrossedPathsBreadcrumb('background_location_task_started', {
+          source: 'enable_flow',
+          platform: Platform.OS,
+        });
       } catch (err) {
         // Roll back: stop platform flag, then revoke consent.
         try {
@@ -422,12 +553,22 @@ export function useBackgroundLocation() {
           // Swallow — revoke below also clears these defensively.
         }
         await safeRevokeOnRollback(uid, revokeConsentMut);
+        recordBgCrossedPathsBreadcrumb('background_location_task_start_failed', {
+          reason: 'task_start_failed',
+          platform: Platform.OS,
+        });
         return {
           ok: false,
           reason: 'task_start_failed',
           message: (err as Error)?.message,
         };
       }
+
+      await setLocalBackgroundCrossedPathsEnabled(true);
+      await registerBackgroundCrossedPathsFlushTask();
+      recordBgCrossedPathsBreadcrumb('enable_flow_succeeded', {
+        platform: Platform.OS,
+      });
 
       return { ok: true };
     }, [
@@ -444,17 +585,23 @@ export function useBackgroundLocation() {
   // Order matters here:
   //   1. Stop the OS task FIRST so no further samples enqueue while we tear
   //      down the rest of the state.
-  //   2. Clear the on-disk buffer so retries can't resurface dropped samples.
-  //   3. Best-effort stop platform-specific flag (Discovery / iOS bg flag).
+  //   2. Unregister the deferred flush task and clear local enablement.
+  //   3. Clear the on-disk buffer so retries can't resurface dropped samples.
+  //   4. Best-effort stop platform-specific flag (Discovery / iOS bg flag).
   //      `revokeConsent` below also clears these, but we send the targeted
   //      mutation first so the platform-specific telemetry log fires.
-  //   4. Revoke server-side consent — this is the canonical "off" mutation
+  //   5. Revoke server-side consent — this is the canonical "off" mutation
   //      and ALWAYS succeeds for an authenticated user (backend code path
   //      never throws here).
   const disableBackgroundCrossedPaths =
     useCallback(async (): Promise<BgDisableResult> => {
       await stopBackgroundTaskSafe();
+      await unregisterBackgroundCrossedPathsFlushTask();
+      const pendingBeforeClear = backgroundLocationBuffer.size();
       backgroundLocationBuffer.clear();
+      recordBgCrossedPathsBreadcrumb('disable_flow_local_cleanup', {
+        clearedCount: pendingBeforeClear,
+      });
 
       if (isDemoMode) return { ok: true };
       const uid = userIdRef.current;
@@ -481,8 +628,15 @@ export function useBackgroundLocation() {
           }
         }
         await revokeConsentMut({ authUserId: uid });
+        recordBgCrossedPathsBreadcrumb('server_revoke_result', {
+          success: true,
+        });
         return { ok: true };
       } catch (err) {
+        recordBgCrossedPathsBreadcrumb('server_revoke_result', {
+          success: false,
+          reason: 'revoke_failed',
+        });
         return {
           ok: false,
           reason: 'revoke_failed',
@@ -545,7 +699,16 @@ async function safeRevokeOnRollback(
 ): Promise<void> {
   try {
     await revokeMut({ authUserId });
+    recordBgCrossedPathsBreadcrumb('server_revoke_result', {
+      success: true,
+      source: 'rollback',
+    });
   } catch (err) {
+    recordBgCrossedPathsBreadcrumb('server_revoke_result', {
+      success: false,
+      source: 'rollback',
+      reason: 'rollback_failed',
+    });
     if (__DEV__) {
       console.warn(
         '[BG_LOCATION] rollback revoke failed:',
