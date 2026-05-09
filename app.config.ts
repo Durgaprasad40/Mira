@@ -25,7 +25,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       NSMicrophoneUsageDescription:
         "Mira needs microphone access for video recording.",
       NSLocationWhenInUseUsageDescription:
-        "Mira uses your location to show people near you.",
+        "Mira uses your location to show people near you and discover approximate crossed-path encounters.",
       // Phase-3 Background Crossed Paths — copy is intentionally specific:
       // it names the feature, scopes the use to crossed paths, and notes that
       // background use only happens after the user explicitly enables it from
@@ -33,6 +33,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       // explicitly opts in via the in-app explainer + accept flow; the UI
       // never auto-prompts it during normal app launch.
       NSLocationAlwaysAndWhenInUseUsageDescription:
+        "Mira may use location in the background ONLY for the Background Crossed Paths feature, and only after you explicitly turn it on. You can disable it anytime in Nearby Settings.",
+      // NSLocationAlwaysUsageDescription is the legacy iOS <11 fallback. The
+      // app's LSMinimumSystemVersion is 12+, so this string is unlikely to be
+      // shown, but Apple still recommends supplying it whenever the
+      // "Always" key is declared. Mirrors the AlwaysAndWhenInUse copy so any
+      // OS version sees the same Phase-3 framing.
+      NSLocationAlwaysUsageDescription:
         "Mira may use location in the background ONLY for the Background Crossed Paths feature, and only after you explicitly turn it on. You can disable it anytime in Nearby Settings.",
       // UIBackgroundModes is enforced at the app level. We add 'location' so
       // the iOS Significant Location Change service (used by the Phase-3
