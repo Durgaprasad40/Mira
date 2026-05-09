@@ -30,6 +30,7 @@ import {
   resolveBgConsentStatus,
   type BgConsentStatus,
 } from '@/lib/backgroundCrossedPaths';
+import { useBackgroundLocation } from '@/hooks/useBackgroundLocation';
 
 // Phase-1 cleanup: the `always / app_open / recent` visibility-mode UI was
 // removed because the backend no longer enforces these modes (Nearby became a
@@ -50,12 +51,11 @@ export default function NearbySettingsScreen() {
   // Mutations
   const updateNearbySettingsMut = useMutation(api.users.updateNearbySettings);
   const pauseNearbyMut = useMutation(api.users.pauseNearby);
-  // Phase-2 background crossed paths: opt-out is the only consent mutation
-  // ever called from this screen. Opt-in is reserved for the explainer modal
-  // (and even there only when the client-side feature gate flips ON).
-  const revokeBgConsentMut = useMutation(
-    api.users.revokeBackgroundLocationConsent,
-  );
+  // Phase-3 background crossed paths: the OFF path is routed through the
+  // `useBackgroundLocation` hook, which stops the OS task, clears the buffer,
+  // and revokes server-side consent. ON path is reserved for the explainer
+  // modal — and even there only when the client-side feature gate is ON.
+  const { disableBackgroundCrossedPaths } = useBackgroundLocation();
 
   // Local state (initialized from server)
   const [nearbyEnabled, setNearbyEnabled] = useState(true);
@@ -206,37 +206,39 @@ export default function NearbySettingsScreen() {
 
   const handleBgToggle = useCallback(
     async (value: boolean) => {
-      // OFF path — ALWAYS available. Idempotent. Clears server consent +
-      // disables backgroundLocationEnabled + tears down Discovery Mode.
+      // OFF path — ALWAYS available. The hook stops the OS task, clears the
+      // on-disk buffer, then revokes server-side consent (which also clears
+      // backgroundLocationEnabled and Discovery Mode). The OFF path NEVER
+      // requests any OS permission and never starts anything.
       if (!value) {
-        // No consent on file and gate is off → nothing to revoke; just toast.
+        // No consent on file and feature gate is off → nothing to do.
         if (
           bgConsentStatus === 'unavailable' ||
           (bgConsentStatus === 'none' && !bgEnabledServer)
         ) {
           return;
         }
-        if (isDemoMode || !userId) {
+        if (isDemoMode) {
           Toast.show('Background crossed paths turned off');
           return;
         }
-        try {
-          await revokeBgConsentMut({ authUserId: userId });
+        const result = await disableBackgroundCrossedPaths();
+        if (result.ok) {
           Toast.show('Background crossed paths turned off');
-        } catch {
+        } else {
           Toast.show('Failed to update background crossed paths');
         }
         return;
       }
 
-      // ON path — gated. When the feature is not ready, never call
-      // acceptBackgroundLocationConsent and never show the explainer's
-      // "I understand, enable" CTA as actionable. Just route to the
-      // explainer in read-only mode so the user understands the future
-      // behavior.
+      // ON path — gated. When the feature is not ready we route to the
+      // explainer in read-only mode (its accept CTA itself is gated and
+      // currently dismisses without any side effects). When the feature
+      // flips ON, the explainer's CTA hands off to
+      // `enableBackgroundCrossedPaths()` which performs the full flow.
       router.push('/(main)/background-crossed-paths-explainer' as any);
     },
-    [bgConsentStatus, bgEnabledServer, revokeBgConsentMut, router, userId],
+    [bgConsentStatus, bgEnabledServer, disableBackgroundCrossedPaths, router],
   );
 
   const handleOpenBgExplainer = useCallback(() => {

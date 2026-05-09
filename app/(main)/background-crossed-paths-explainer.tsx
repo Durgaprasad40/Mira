@@ -1,15 +1,18 @@
 /**
- * Background Crossed Paths — Explainer modal (Phase-2)
+ * Background Crossed Paths — Explainer modal (Phase-3)
  *
- * Strict Phase-2 contract:
- *   - This screen NEVER calls any OS background-permission API.
- *   - It NEVER registers a TaskManager task.
- *   - It NEVER calls Location.startLocationUpdatesAsync.
- *   - When the client-side feature gate is OFF (the Phase-2 default), the
- *     "continue" button only acknowledges the explainer and dismisses.
- *   - When the gate is ON (Phase-3+), the same button calls
- *     `acceptBackgroundLocationConsent` — still no OS-permission request
- *     happens here; that is reserved for the dedicated Phase-3 entry point.
+ * Strict contract:
+ *   - When the client-side feature gate is OFF (current default), this screen
+ *     is purely informational. The "continue" button only dismisses; it
+ *     NEVER calls a consent mutation, NEVER asks for any OS permission, and
+ *     NEVER starts a TaskManager task.
+ *   - When the gate flips ON (a future release), the "continue" button hands
+ *     off to `useBackgroundLocation.enableBackgroundCrossedPaths()`, which
+ *     orchestrates: foreground permission → server consent → background
+ *     permission → platform-specific server flag → start task. The flow
+ *     fail-closes and rolls back on any step failure.
+ *   - This screen ITSELF still never directly calls Location APIs or
+ *     TaskManager; all OS-touching code lives in the hook.
  *
  * Reached from: Nearby Settings → "Enable background crossed paths".
  */
@@ -23,8 +26,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useMutation } from 'convex/react';
-import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
@@ -34,11 +35,12 @@ import {
   BG_COPY,
   BG_CROSSED_PATHS_FEATURE_READY,
 } from '@/lib/backgroundCrossedPaths';
+import { useBackgroundLocation } from '@/hooks/useBackgroundLocation';
 
 export default function BackgroundCrossedPathsExplainerScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
-  const acceptMut = useMutation(api.users.acceptBackgroundLocationConsent);
+  const { enableBackgroundCrossedPaths } = useBackgroundLocation();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleClose = useCallback(() => {
@@ -49,16 +51,18 @@ export default function BackgroundCrossedPathsExplainerScreen() {
   const handleContinue = useCallback(async () => {
     if (isSubmitting) return;
 
-    // Phase-2 default path: feature gate is OFF.
-    // We DO NOT call acceptBackgroundLocationConsent and we DO NOT request
-    // any OS permission. The button just dismisses.
+    // Gate-OFF path (current default): purely informational. We DO NOT call
+    // any consent mutation, DO NOT ask for any OS permission, and DO NOT
+    // touch the TaskManager. The button only dismisses the modal.
     if (!BG_CROSSED_PATHS_FEATURE_READY) {
       if (router.canGoBack()) router.back();
       return;
     }
 
-    // Phase-3+ path: feature gate is ON.
-    // Record consent only — no OS permission is requested from this screen.
+    // Gate-ON path: hand off to the orchestrator hook. The hook itself
+    // re-checks the gate, requests permissions, records consent, sets the
+    // platform server flag, and starts the OS task — fail-closing on any
+    // step.
     if (isDemoMode || !userId) {
       Toast.show('Consent saved');
       if (router.canGoBack()) router.back();
@@ -67,22 +71,48 @@ export default function BackgroundCrossedPathsExplainerScreen() {
 
     setIsSubmitting(true);
     try {
-      await acceptMut({ authUserId: userId });
-      Toast.show('Background crossed paths enabled');
-      if (router.canGoBack()) router.back();
-    } catch (error: any) {
-      const msg = typeof error?.message === 'string' ? error.message : '';
-      if (msg.includes('foreground_consent_required')) {
-        Toast.show('Enable Nearby first to continue.');
-      } else if (msg.includes('feature_flag_off')) {
-        Toast.show('This feature is not available yet.');
+      const result = await enableBackgroundCrossedPaths();
+      if (result.ok) {
+        Toast.show('Background crossed paths enabled');
+        if (router.canGoBack()) router.back();
       } else {
-        Toast.show('Could not save consent. Please try again.');
+        // Map structured failure reasons to user-facing toasts.
+        switch (result.reason) {
+          case 'feature_not_ready':
+            Toast.show('This feature is not available yet.');
+            break;
+          case 'foreground_permission_denied':
+            Toast.show('Allow location access to continue.');
+            break;
+          case 'background_permission_denied':
+            Toast.show('Allow background location in Settings to continue.');
+            break;
+          case 'consent_failed':
+            if ((result.message || '').includes('foreground_consent_required')) {
+              Toast.show('Enable Nearby first to continue.');
+            } else if ((result.message || '').includes('feature_flag_off')) {
+              Toast.show('This feature is not available yet.');
+            } else {
+              Toast.show('Could not save consent. Please try again.');
+            }
+            break;
+          case 'platform_setup_failed':
+            Toast.show('Could not enable background mode. Please try again.');
+            break;
+          case 'task_start_failed':
+            Toast.show('Could not start background updates. Please try again.');
+            break;
+          case 'demo_mode':
+          case 'not_authenticated':
+          default:
+            Toast.show('Could not enable background crossed paths.');
+            break;
+        }
       }
     } finally {
       setIsSubmitting(false);
     }
-  }, [isSubmitting, userId, acceptMut, router]);
+  }, [isSubmitting, userId, enableBackgroundCrossedPaths, router]);
 
   // Pick copy variants based on the client-side gate.
   const continueLabel = BG_CROSSED_PATHS_FEATURE_READY

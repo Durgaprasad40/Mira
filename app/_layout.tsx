@@ -7,6 +7,26 @@ import { initSentry, captureException, setUserContext, clearUserContext, trackRo
 import { AppErrorBoundary } from "@/components/safety/AppErrorBoundary";
 import { DEBUG_ONBOARDING_HYDRATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 
+// ════════════════════════════════════════════════════════════════════════════
+// PHASE-3 BACKGROUND CROSSED PATHS: Module-load task registration ONLY.
+//
+// This import has a single side effect: it calls TaskManager.defineTask(...)
+// at module scope so the OS knows about the task name when (later) the user
+// explicitly enables Background Crossed Paths from Nearby Settings and the
+// `useBackgroundLocation` hook calls Location.startLocationUpdatesAsync.
+//
+// IMPORTANT: defining a task is NOT the same as starting it. Nothing about
+// this import causes the app to begin collecting location samples. The task
+// stays inactive until ALL of the following are true:
+//   1. backend feature flag bgCrossedPathsEnabled === true
+//   2. client BG_CROSSED_PATHS_FEATURE_READY === true
+//   3. the user accepts the in-app explainer
+//   4. the user grants OS background-location permission
+//   5. useBackgroundLocation.enableBackgroundCrossedPaths() is invoked from
+//      an explicit user action and all server-side consent gates pass.
+// ════════════════════════════════════════════════════════════════════════════
+import "@/tasks/backgroundLocationTask";
+
 // Initialize Sentry FIRST, before any other code runs
 // This ensures we catch errors during app initialization
 initSentry();
