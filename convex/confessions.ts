@@ -66,6 +66,31 @@ function canonicalIdentityMode(
   }
 }
 
+// Build a map of userId → current primary profile photo URL from the users
+// table source of truth. `users.primaryPhotoUrl` is kept in sync with the
+// `photos` table by `setPrimaryPhoto` / `reorderPhotos` / photo upload &
+// delete flows, and excludes verification reference photos.
+//
+// Confess surfaces use this to resolve the *current* author photo at read
+// time instead of the stale snapshot persisted on the confession / reply
+// row at create time. When the user changes their main photo in Edit
+// Profile, the Convex reactive query re-runs (because it now reads the
+// users table) and Confess feed / thread / my-confessions / replies all
+// pick up the new photo automatically.
+async function buildLivePrimaryPhotoMapForUserIds(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  userIds: Iterable<Id<'users'>>
+): Promise<Map<string, string | undefined>> {
+  const map = new Map<string, string | undefined>();
+  for (const id of userIds) {
+    const key = String(id);
+    if (map.has(key)) continue;
+    const userDoc = await ctx.db.get(id);
+    map.set(key, userDoc?.primaryPhotoUrl);
+  }
+  return map;
+}
+
 type SerializedReply = {
   _id: Id<'confessionReplies'>;
   _creationTime: number;
@@ -89,7 +114,10 @@ type SerializedReply = {
 
 function serializeReply(
   reply: Doc<'confessionReplies'>,
-  options?: { viewerId?: Id<'users'> | null }
+  options?: {
+    viewerId?: Id<'users'> | null;
+    livePhotoUrlByUserId?: Map<string, string | undefined>;
+  }
 ): SerializedReply {
   const identityMode = canonicalIdentityMode(reply.identityMode, reply.isAnonymous);
   const base: SerializedReply = {
@@ -111,7 +139,14 @@ function serializeReply(
   // Gate author display fields by identity mode. Anonymous must never leak identity.
   if (identityMode !== 'anonymous') {
     base.authorName = reply.authorName;
-    base.authorPhotoUrl = reply.authorPhotoUrl;
+    // Photo: prefer the live primary photo from `users.primaryPhotoUrl`
+    // when the caller pre-fetched the lookup map, so reorder/main-photo
+    // changes propagate automatically. Fall back to the legacy snapshot
+    // only if no override was supplied (defensive — every current call
+    // site provides the map).
+    base.authorPhotoUrl = options?.livePhotoUrlByUserId
+      ? options.livePhotoUrlByUserId.get(String(reply.userId))
+      : reply.authorPhotoUrl;
     base.authorAge = reply.authorAge;
     base.authorGender = reply.authorGender;
   }
@@ -130,8 +165,25 @@ function serializeConfession(
     trendingScore?: number;
     isExpired?: boolean;
     viewerIsOwner?: boolean;
+    livePhotoUrlByUserId?: Map<string, string | undefined>;
   }
 ): SerializedConfession {
+  // Resolve the author photo URL.
+  //   anonymous (mode or legacy isAnonymous) → never leak a photo.
+  //   open / blur_photo → return the live primary photo from the users
+  //                       table when the caller pre-fetched the map. The
+  //                       client decides whether to blur it based on
+  //                       `authorVisibility`.
+  // Falls back to the persisted snapshot only if the caller did not supply
+  // the override map (defensive — every current call site does).
+  const isAnonymousMode =
+    confession.authorVisibility === 'anonymous' || confession.isAnonymous;
+  const resolvedAuthorPhotoUrl: string | undefined = isAnonymousMode
+    ? undefined
+    : options?.livePhotoUrlByUserId
+      ? options.livePhotoUrlByUserId.get(String(confession.userId))
+      : confession.authorPhotoUrl;
+
   const result: SerializedConfession = {
     _id: confession._id,
     _creationTime: confession._creationTime,
@@ -143,7 +195,7 @@ function serializeConfession(
     visibility: confession.visibility,
     imageUrl: confession.imageUrl,
     authorName: confession.authorName,
-    authorPhotoUrl: confession.authorPhotoUrl,
+    authorPhotoUrl: resolvedAuthorPhotoUrl,
     authorAge: confession.authorAge,
     authorGender: confession.authorGender,
     replyCount: confession.replyCount,
@@ -458,6 +510,14 @@ export const listConfessions = query({
       }
     );
 
+    // Pre-fetch live primary photos for all unique authors so the feed
+    // reflects the current `users.primaryPhotoUrl` instead of the stale
+    // snapshot stored on each confession at create time.
+    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
+      ctx,
+      confessions.map((c) => c.userId)
+    );
+
     // Attach 2 reply previews per confession
     const withPreviews = await Promise.all(
       confessions.map(async (c) => {
@@ -487,6 +547,7 @@ export const listConfessions = query({
           ...serializeConfession(c, {
             includeTaggedUserId: true,
             viewerIsOwner: !!resolvedViewerId && c.userId === resolvedViewerId,
+            livePhotoUrlByUserId,
           }),
           replyPreviews: replies.map((r) => ({
             _id: r._id,
@@ -557,6 +618,13 @@ export const getTrendingConfessions = query({
         getConfessionModerationStatus(c) === 'normal'
     );
 
+    // Pre-fetch live primary photos so trending cards reflect the author's
+    // current main profile photo, not the create-time snapshot.
+    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
+      ctx,
+      recent.map((c) => c.userId)
+    );
+
     // Improved trending scoring with consistent weights
     // Replies are strongest signal (weight 5), reactions medium (weight 2)
     // Voice replies get additional bonus (+1 each)
@@ -569,6 +637,7 @@ export const getTrendingConfessions = query({
       return serializeConfession(c, {
         includeTaggedUserId: true,
         trendingScore: score,
+        livePhotoUrlByUserId,
       });
     });
 
@@ -612,10 +681,18 @@ export const getConfession = query({
       return null;
     }
 
+    // Resolve the live primary photo for the author so the thread hero
+    // reflects the current main photo, not the create-time snapshot.
+    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
+      ctx,
+      [confession.userId]
+    );
+
     return serializeConfession(confession, {
       includeTaggedUserId: true,
       isExpired,
       viewerIsOwner,
+      livePhotoUrlByUserId,
     });
   },
 });
@@ -940,7 +1017,20 @@ export const getReplies = query({
       .order('asc')
       .collect();
 
-    return replies.map((reply) => serializeReply(reply, { viewerId: resolvedViewerId }));
+    // Pre-fetch live primary photos for every replier so comment avatars
+    // reflect the current `users.primaryPhotoUrl` source of truth instead
+    // of the snapshot stored on the reply at create time.
+    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
+      ctx,
+      replies.map((r) => r.userId)
+    );
+
+    return replies.map((reply) =>
+      serializeReply(reply, {
+        viewerId: resolvedViewerId,
+        livePhotoUrlByUserId,
+      })
+    );
   },
 });
 
@@ -992,7 +1082,13 @@ export const getMyReplyForConfession = query({
       .first();
 
     if (!own) return null;
-    return serializeReply(own, { viewerId: resolvedViewerId });
+    // Single-user lookup so the composer's "edit your comment" preview shows
+    // the viewer's current main profile photo, not the create-time snapshot.
+    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
+      ctx,
+      [own.userId]
+    );
+    return serializeReply(own, { viewerId: resolvedViewerId, livePhotoUrlByUserId });
   },
 });
 
@@ -1173,6 +1269,14 @@ export const getMyConfessions = query({
       .order('desc')
       .collect();
 
+    // All rows here belong to the same user — fetch their primary photo
+    // once so My Confessions reflects the current main photo, not the
+    // create-time snapshot.
+    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
+      ctx,
+      [userId]
+    );
+
     // Filter out manually deleted confessions (isDeleted: true)
     // Expired confessions are kept but marked as expired for the owner to see
     return confessions
@@ -1182,6 +1286,7 @@ export const getMyConfessions = query({
           includeTaggedUserId: true,
           isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
           viewerIsOwner: true,
+          livePhotoUrlByUserId,
         })
       );
   },
@@ -1396,6 +1501,16 @@ export const listTaggedConfessionsForUser = query({
       const allowName = effectiveVisibility !== 'anonymous';
       const allowPhoto = effectiveVisibility === 'open';
 
+      // Resolve the live primary photo from `users.primaryPhotoUrl` so the
+      // sheet reflects the author's current main photo, not the snapshot
+      // captured at create time. Only fetched when the visibility rule
+      // allows leaking the photo, to avoid an unnecessary user lookup.
+      let liveAuthorPhotoUrl: string | undefined;
+      if (allowPhoto) {
+        const authorDoc = await ctx.db.get(confession.userId);
+        liveAuthorPhotoUrl = authorDoc?.primaryPhotoUrl;
+      }
+
       result.push({
         notificationId: notif._id,
         confessionId: notif.confessionId,
@@ -1412,7 +1527,7 @@ export const listTaggedConfessionsForUser = query({
         // Author identity (privacy-gated — never leaked for anonymous mode)
         authorVisibility: effectiveVisibility,
         authorName: allowName ? confession.authorName : undefined,
-        authorPhotoUrl: allowPhoto ? confession.authorPhotoUrl : undefined,
+        authorPhotoUrl: liveAuthorPhotoUrl,
         authorAge: allowName ? confession.authorAge : undefined,
         authorGender: allowName ? confession.authorGender : undefined,
       });
