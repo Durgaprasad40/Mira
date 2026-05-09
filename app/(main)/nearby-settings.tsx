@@ -2,12 +2,9 @@
  * Nearby Settings Screen
  *
  * User-facing settings for Nearby visibility, privacy, and crossed paths.
- * Part of Phase-1 Profile settings.
- *
- * Nearby updates in the foreground and, when explicitly enabled, can use
- * approximate background samples for crossed-path history.
+ * Nearby is foreground-only.
  */
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -15,10 +12,7 @@ import {
   ScrollView,
   TouchableOpacity,
   Switch,
-  Platform,
-  Linking,
 } from 'react-native';
-import * as Location from 'expo-location';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
@@ -29,8 +23,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
 import { Toast } from '@/components/ui/Toast';
 import { getDemoCurrentUser } from '@/lib/demoData';
-import { useBackgroundLocation } from '@/hooks/useBackgroundLocation';
-import { getQueuedNearbyBackgroundSampleCount } from '@/lib/nearbyBackgroundQueue';
 
 // Phase-1 cleanup: the `always / app_open / recent` visibility-mode UI was
 // removed because the backend no longer enforces these modes (Nearby became a
@@ -51,14 +43,6 @@ export default function NearbySettingsScreen() {
   // Mutations
   const updateNearbySettingsMut = useMutation(api.users.updateNearbySettings);
   const pauseNearbyMut = useMutation(api.users.pauseNearby);
-  const {
-    enable: enableBackgroundLocation,
-    disable: disableBackgroundLocation,
-    enableDiscoveryMode,
-    disableDiscoveryMode,
-    isWorking: isBackgroundLocationWorking,
-    isRunning: isBackgroundLocationRunning,
-  } = useBackgroundLocation(!isDemoMode ? userId : null);
 
   // Local state (initialized from server)
   const [nearbyEnabled, setNearbyEnabled] = useState(true);
@@ -66,12 +50,6 @@ export default function NearbySettingsScreen() {
   const [incognitoMode, setIncognitoMode] = useState(false);
   // Phase-2: separate crossed-paths opt-in. Default true (undefined → on).
   const [recordCrossedPaths, setRecordCrossedPaths] = useState(true);
-  const [backgroundCrossedPathsEnabled, setBackgroundCrossedPathsEnabled] = useState(false);
-  const [androidDiscoveryExpiresAt, setAndroidDiscoveryExpiresAt] = useState<number | null>(null);
-  const [backgroundTaskRunning, setBackgroundTaskRunning] = useState<boolean | null>(null);
-  const [foregroundPermissionStatus, setForegroundPermissionStatus] = useState<string | null>(null);
-  const [backgroundPermissionStatus, setBackgroundPermissionStatus] = useState<string | null>(null);
-  const [pendingQueueCount, setPendingQueueCount] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const [pausedUntil, setPausedUntil] = useState<number | null>(null);
   // Phase-2: pause duration picker visibility
@@ -97,18 +75,6 @@ export default function NearbySettingsScreen() {
       setIncognitoMode(currentUser.incognitoMode === true);
       // Phase-2: undefined treated as opted-in (default true).
       setRecordCrossedPaths(currentUser.recordCrossedPaths !== false);
-      const discoveryActive =
-        currentUser.discoveryModeEnabled === true &&
-        typeof currentUser.discoveryModeExpiresAt === 'number' &&
-        currentUser.discoveryModeExpiresAt > Date.now();
-      setAndroidDiscoveryExpiresAt(discoveryActive ? currentUser.discoveryModeExpiresAt : null);
-      setBackgroundCrossedPathsEnabled(
-        Platform.OS === 'ios'
-          ? currentUser.backgroundLocationEnabled === true
-          : Platform.OS === 'android'
-            ? discoveryActive
-            : false,
-      );
 
       // Check pause status
       const pauseUntil = currentUser.nearbyPausedUntil;
@@ -158,107 +124,10 @@ export default function NearbySettingsScreen() {
     [userId, currentUser, updateNearbySettingsMut]
   );
 
-  const disableBackgroundCrossedPaths = useCallback(
-    async (showToast = false) => {
-      try {
-        if (Platform.OS === 'ios') {
-          await disableBackgroundLocation();
-        } else if (Platform.OS === 'android') {
-          await disableDiscoveryMode();
-        }
-      } finally {
-        setBackgroundCrossedPathsEnabled(false);
-        setAndroidDiscoveryExpiresAt(null);
-      }
-      if (showToast) {
-        Toast.show('Background Crossed Paths turned off');
-      }
-    },
-    [disableBackgroundLocation, disableDiscoveryMode],
-  );
-
-  const backgroundUnavailableReason = useCallback((): string | null => {
-    if (!nearbyEnabled) return 'Turn on Nearby first.';
-    if (!recordCrossedPaths) return 'Turn on Save crossed paths first.';
-    if (incognitoMode) return 'Turn off Incognito Nearby first.';
-    if (isPaused) return 'Resume Nearby first.';
-    if (Platform.OS !== 'ios' && Platform.OS !== 'android') {
-      return 'Background Crossed Paths is not supported on this device.';
-    }
-    return null;
-  }, [incognitoMode, isPaused, nearbyEnabled, recordCrossedPaths]);
-
-  useEffect(() => {
-    if (isDemoMode || !backgroundCrossedPathsEnabled) return;
-    let cancelled = false;
-    const verifyBackgroundTask = async () => {
-      const running = await isBackgroundLocationRunning();
-      if (cancelled || running) return;
-      await disableBackgroundCrossedPaths();
-      if (!cancelled) {
-        Toast.show('Background Crossed Paths stopped. Check location permission.');
-      }
-    };
-    void verifyBackgroundTask();
-    return () => {
-      cancelled = true;
-    };
-  }, [backgroundCrossedPathsEnabled, disableBackgroundCrossedPaths, isBackgroundLocationRunning]);
-
-  useEffect(() => {
-    if (isDemoMode) {
-      setBackgroundTaskRunning(backgroundCrossedPathsEnabled);
-      setForegroundPermissionStatus('granted');
-      setBackgroundPermissionStatus('granted');
-      return;
-    }
-
-    let cancelled = false;
-    const refreshStatus = async () => {
-      try {
-        const [running, foregroundPermission, backgroundPermission] = await Promise.all([
-          isBackgroundLocationRunning(),
-          Location.getForegroundPermissionsAsync(),
-          Location.getBackgroundPermissionsAsync(),
-        ]);
-        if (cancelled) return;
-        setBackgroundTaskRunning(running);
-        setForegroundPermissionStatus(foregroundPermission.status);
-        setBackgroundPermissionStatus(backgroundPermission.status);
-      } catch {
-        if (cancelled) return;
-        setBackgroundTaskRunning(null);
-      }
-    };
-
-    void refreshStatus();
-    return () => {
-      cancelled = true;
-    };
-  }, [backgroundCrossedPathsEnabled, isBackgroundLocationRunning, isSaving]);
-
-  useEffect(() => {
-    if (!__DEV__) return;
-    let cancelled = false;
-    const refreshQueueCount = async () => {
-      const count = await getQueuedNearbyBackgroundSampleCount();
-      if (!cancelled) {
-        setPendingQueueCount(count);
-      }
-    };
-    void refreshQueueCount();
-    return () => {
-      cancelled = true;
-    };
-  }, [backgroundCrossedPathsEnabled, isSaving]);
-
   // Toggle handlers
   const handleNearbyEnabledToggle = (value: boolean) => {
     setNearbyEnabled(value);
     handleSave('nearbyEnabled', value);
-    if (!value) {
-      void disableBackgroundCrossedPaths();
-    }
   };
 
   const handleHideDistanceToggle = (value: boolean) => {
@@ -276,80 +145,12 @@ export default function NearbySettingsScreen() {
     }
     setIncognitoMode(value);
     handleSave('incognitoMode', value);
-    if (value) {
-      void disableBackgroundCrossedPaths();
-    }
   };
 
   // Phase-2: record-crossed-paths toggle (independent from map visibility)
   const handleRecordCrossedPathsToggle = (value: boolean) => {
     setRecordCrossedPaths(value);
     handleSave('recordCrossedPaths', value);
-    if (!value) {
-      void disableBackgroundCrossedPaths();
-    }
-  };
-
-  const handleBackgroundCrossedPathsToggle = async (value: boolean) => {
-    if (!value) {
-      await disableBackgroundCrossedPaths(true);
-      return;
-    }
-
-    const unavailable = backgroundUnavailableReason();
-    if (unavailable) {
-      setBackgroundCrossedPathsEnabled(false);
-      Toast.show(unavailable);
-      return;
-    }
-
-    if (isDemoMode) {
-      setBackgroundCrossedPathsEnabled(true);
-      Toast.show('Background Crossed Paths enabled for demo mode');
-      return;
-    }
-
-    setIsSaving(true);
-    try {
-      if (Platform.OS === 'ios') {
-        const result = await enableBackgroundLocation();
-        if (!result.ok) {
-          setBackgroundCrossedPathsEnabled(false);
-          Toast.show(
-            result.reason === 'foreground_denied' || result.reason === 'background_denied'
-              ? 'Location permission was not granted.'
-              : 'Could not start Background Crossed Paths.',
-          );
-          return;
-        }
-        setBackgroundCrossedPathsEnabled(true);
-        Toast.show('Background Crossed Paths enabled');
-        return;
-      }
-
-      if (Platform.OS === 'android') {
-        const result = await enableDiscoveryMode();
-        if (!result.ok) {
-          setBackgroundCrossedPathsEnabled(false);
-          setAndroidDiscoveryExpiresAt(null);
-          Toast.show(
-            result.reason === 'foreground_denied' || result.reason === 'background_denied'
-              ? 'Location permission was not granted.'
-              : 'Could not start Discovery Mode.',
-          );
-          return;
-        }
-        setBackgroundCrossedPathsEnabled(true);
-        setAndroidDiscoveryExpiresAt(result.expiresAt);
-        Toast.show('Discovery Mode enabled for Crossed Paths');
-        return;
-      }
-
-      setBackgroundCrossedPathsEnabled(false);
-      Toast.show('Background Crossed Paths is not supported on this device.');
-    } finally {
-      setIsSaving(false);
-    }
   };
 
   // Phase-2: pause-duration options. null = indefinite ("Until turned back on").
@@ -395,7 +196,6 @@ export default function NearbySettingsScreen() {
       await pauseNearbyMut({ authUserId: userId, paused: true, durationMs });
       setIsPaused(true);
       setPausedUntil(Date.now() + effectiveMs);
-      await disableBackgroundCrossedPaths();
       Toast.show(
         durationMs === null
           ? 'Nearby paused until you turn it back on'
@@ -416,66 +216,6 @@ export default function NearbySettingsScreen() {
     }
     return `Paused until ${new Date(pausedUntil).toLocaleString()} — you are hidden from the map and crossings are not recorded.`;
   })();
-
-  const backgroundCrossedPathsDescription =
-    Platform.OS === 'android'
-      ? androidDiscoveryExpiresAt && androidDiscoveryExpiresAt > Date.now()
-        ? `Approximate background detection is active until ${new Date(androidDiscoveryExpiresAt).toLocaleTimeString()}. Android may stop it based on battery settings.`
-        : 'Starts a time-limited Discovery Mode with an Android notification. Mira uses approximate location only.'
-      : 'Mira uses approximate background location to remember people you crossed paths with. Your live location is never shown.';
-
-  const foregroundPermissionNeedsAttention =
-    !isDemoMode && foregroundPermissionStatus != null && foregroundPermissionStatus !== 'granted';
-  const backgroundPermissionNeedsAttention =
-    !isDemoMode && backgroundPermissionStatus != null && backgroundPermissionStatus !== 'granted';
-  const locationPermissionStatusLabel =
-    foregroundPermissionNeedsAttention || backgroundPermissionNeedsAttention
-      ? 'Permission needed'
-      : foregroundPermissionStatus === 'granted' || backgroundPermissionStatus === 'granted' || isDemoMode
-        ? 'Granted'
-        : 'Checking...';
-
-  const backgroundStatus = useMemo(() => {
-    if (!nearbyEnabled || !recordCrossedPaths || incognitoMode || isPaused) {
-      return 'Off';
-    }
-    if (!backgroundCrossedPathsEnabled) {
-      return 'Off';
-    }
-    if (foregroundPermissionNeedsAttention || backgroundPermissionNeedsAttention) {
-      return 'Permission needed';
-    }
-    if (backgroundTaskRunning === false) {
-      return 'Limited by OS';
-    }
-    if (backgroundTaskRunning === true || isDemoMode) {
-      return 'On';
-    }
-    return 'Checking...';
-  }, [
-    backgroundCrossedPathsEnabled,
-    backgroundPermissionNeedsAttention,
-    backgroundTaskRunning,
-    foregroundPermissionNeedsAttention,
-    incognitoMode,
-    isDemoMode,
-    isPaused,
-    nearbyEnabled,
-    recordCrossedPaths,
-  ]);
-
-  const platformBackgroundCopy =
-    Platform.OS === 'android'
-      ? 'Android may pause background updates to save battery. Discovery Mode uses a visible notification while active.'
-      : Platform.OS === 'ios'
-        ? 'iPhone may deliver background location updates less often. Crossed Paths works best when location permission is set to Always.'
-        : 'Background updates depend on phone permissions and battery settings.';
-
-  const openSettings = useCallback(() => {
-    Linking.openSettings().catch(() => {
-      Toast.show('Open location settings from your phone settings.');
-    });
-  }, []);
 
   // Loading state
   if (!currentUser) {
@@ -573,94 +313,13 @@ export default function NearbySettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Crossed Paths</Text>
 
-          <View style={styles.statusCard}>
-            <View style={styles.statusRow}>
-              <Text style={styles.statusLabel}>Crossed Paths</Text>
-              <Text style={[styles.statusValue, recordCrossedPaths && nearbyEnabled && !incognitoMode && !isPaused ? styles.statusValueOn : styles.statusValueMuted]}>
-                {recordCrossedPaths && nearbyEnabled && !incognitoMode && !isPaused ? 'On' : 'Off'}
-              </Text>
-            </View>
-            <View style={styles.statusRow}>
-              <Text style={styles.statusLabel}>Background</Text>
-              <Text style={[
-                styles.statusValue,
-                backgroundStatus === 'On' ? styles.statusValueOn : styles.statusValueMuted,
-                backgroundStatus === 'Permission needed' ? styles.statusValueWarning : null,
-              ]}>
-                {backgroundStatus}
-              </Text>
-            </View>
-            <View style={styles.statusRow}>
-              <Text style={styles.statusLabel}>Phone permission</Text>
-              <Text style={[
-                styles.statusValue,
-                locationPermissionStatusLabel === 'Granted' ? styles.statusValueOn : styles.statusValueMuted,
-                locationPermissionStatusLabel === 'Permission needed' ? styles.statusValueWarning : null,
-              ]}>
-                {locationPermissionStatusLabel}
-              </Text>
-            </View>
-            <View style={styles.statusRow}>
-              <Text style={styles.statusLabel}>Save history</Text>
-              <Text style={[styles.statusValue, recordCrossedPaths ? styles.statusValueOn : styles.statusValueMuted]}>
-                {recordCrossedPaths ? 'On' : 'Off'}
-              </Text>
-            </View>
-            <View style={styles.statusRow}>
-              <Text style={styles.statusLabel}>Incognito</Text>
-              <Text style={[styles.statusValue, incognitoMode ? styles.statusValueWarning : styles.statusValueMuted]}>
-                {incognitoMode ? 'On' : 'Off'}
-              </Text>
-            </View>
-            {__DEV__ && (
-              <View style={styles.statusRow}>
-                <Text style={styles.statusLabel}>Pending samples</Text>
-                <Text style={[styles.statusValue, pendingQueueCount > 0 ? styles.statusValueWarning : styles.statusValueMuted]}>
-                  {pendingQueueCount}
-                </Text>
-              </View>
-            )}
-            <Text style={styles.statusHint}>
-              Approximate location only. Your live location is never shown.
-            </Text>
-            <Text style={styles.statusHint}>{platformBackgroundCopy}</Text>
-            {(foregroundPermissionNeedsAttention || backgroundPermissionNeedsAttention) && (
-              <View style={styles.permissionHintRow}>
-                <Text style={styles.permissionHintText}>
-                  Allow background location to remember crossed paths when Mira is not open.
-                </Text>
-                <TouchableOpacity style={styles.permissionHintButton} onPress={openSettings}>
-                  <Text style={styles.permissionHintButtonText}>Open settings</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Background Crossed Paths</Text>
-              <Text style={styles.toggleDescription}>
-                {backgroundCrossedPathsDescription}
-              </Text>
-            </View>
-            <Switch
-              value={backgroundCrossedPathsEnabled}
-              onValueChange={(value) => {
-                void handleBackgroundCrossedPathsToggle(value);
-              }}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-              disabled={isSaving || isBackgroundLocationWorking}
-            />
-          </View>
-
           {/* Crossed-path history opt-in */}
           <View style={styles.toggleRow}>
             <View style={styles.toggleInfo}>
               <Text style={styles.toggleTitle}>Save crossed paths</Text>
               <Text style={styles.toggleDescription}>
-                Mira uses approximate location to remember people you crossed paths with. Your live
-                location is never shown. You can pause this anytime.
+                Mira uses approximate location to remember people you crossed paths with while
+                you are using the app. Your live location is never shown. You can pause this anytime.
               </Text>
             </View>
             <Switch
@@ -676,6 +335,21 @@ export default function NearbySettingsScreen() {
         {/* Privacy Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Privacy</Text>
+
+          {/* Privacy Zones — opens dedicated settings screen */}
+          <TouchableOpacity
+            style={styles.actionRow}
+            onPress={() => router.push('/(main)/settings/privacy-zones' as any)}
+            accessibilityLabel="Open Privacy Zones"
+          >
+            <View style={styles.actionInfo}>
+              <Text style={styles.toggleTitle}>Privacy Zones</Text>
+              <Text style={styles.toggleDescription}>
+                Stop Nearby and crossed paths from recording private areas
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+          </TouchableOpacity>
 
           {/* Hide Distance (don't show distance info to others) */}
           <View style={styles.toggleRow}>
@@ -861,75 +535,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.text,
     fontWeight: '500',
-  },
-  statusCard: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 14,
-    backgroundColor: COLORS.backgroundDark,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    marginBottom: 10,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    paddingVertical: 4,
-  },
-  statusLabel: {
-    flex: 1,
-    fontSize: 13,
-    color: COLORS.textLight,
-  },
-  statusValue: {
-    flexShrink: 0,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  statusValueOn: {
-    color: COLORS.secondaryDark,
-  },
-  statusValueMuted: {
-    color: COLORS.textMuted,
-  },
-  statusValueWarning: {
-    color: '#A66A00',
-  },
-  statusHint: {
-    marginTop: 6,
-    fontSize: 12,
-    lineHeight: 17,
-    color: COLORS.textMuted,
-  },
-  permissionHintRow: {
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: COLORS.border,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  permissionHintText: {
-    flex: 1,
-    fontSize: 12,
-    lineHeight: 17,
-    color: COLORS.textLight,
-  },
-  permissionHintButton: {
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 14,
-    backgroundColor: COLORS.white,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  permissionHintButtonText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.text,
   },
   premiumBadge: {
     paddingHorizontal: 6,

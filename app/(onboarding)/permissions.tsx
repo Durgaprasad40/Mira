@@ -15,7 +15,6 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
-  Platform,
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -70,11 +69,6 @@ export default function PermissionsScreen() {
       if (!isMountedRef.current) return;
       if (status === "granted") {
         setLocationGranted(true);
-
-        // Also request background location if needed for Crossed Paths
-        if (Platform.OS !== "web") {
-          await Location.requestBackgroundPermissionsAsync();
-        }
       } else {
         Alert.alert(
           "Location Permission",

@@ -93,8 +93,6 @@ import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 import { HeaderAvatarButton } from '@/components/ui';
 import { NearbyPreviewCard, NearbyPreviewData } from '@/components/nearby/NearbyPreviewCard';
 import { trackEvent } from '@/lib/analytics';
-import { useScreenProtection } from '@/hooks/useScreenProtection';
-import { flushQueuedBackgroundLocationSamples } from '@/tasks/backgroundLocationTask';
 
 // Key for storing when user last viewed crossed paths
 const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
@@ -260,6 +258,8 @@ interface NearbyUser {
   strongPrivacyMode: boolean;
   hideDistance: boolean;
   crossingCount?: number;
+  // Capped display ("1" / "2" / "3+") — preferred for UI strings (Fix 4).
+  crossingCountDisplay?: string;
   lastCrossedAt?: number;
   areaName?: string;
   // Phase-3 preview payload (server-provided, privacy-safe).
@@ -424,11 +424,13 @@ export default function NearbyScreen() {
   const isDemo = isDemoMode;
   const insets = useSafeAreaInsets();
 
-  // Safe Nearby v2 — Android FLAG_SECURE on this tab only.
-  // Blocks screenshots + screen recording while Nearby is mounted, preventing
-  // coarse-pin leakage via screen capture. iOS is intentionally left untouched
-  // (optional hardening for a later pass).
-  useScreenProtection(Platform.OS === 'android');
+  // Crossed Paths stability fix: screenshots are now allowed on Nearby /
+  // Crossed Paths surfaces. Screenshot prevention is reserved for the
+  // protected/secure photo + video viewers (see ProtectedMediaViewer and
+  // SecureMediaViewer), which still call useScreenProtection while open.
+  // The Nearby map only ever shows ~300 m grid-snapped, jittered crossing
+  // pins (never the candidate's live or exact location), so allowing
+  // screenshots here does not leak precise location.
 
   // Map ref for programmatic control
   const mapRef = useRef<MapView>(null);
@@ -617,6 +619,12 @@ export default function NearbyScreen() {
       ? { userId }
       : 'skip'
   );
+  // Fix 7 — daily distinct crossed-profile cap. Best-effort write so the
+  // backend can correctly count "new" surfaces vs re-displays.
+  const markDailyCrossedProfilesShown = useMutation(
+    api.crossedPaths.markDailyCrossedProfilesShown,
+  );
+  const markedDailyShownKeyRef = useRef<string>('');
 
   // ---------------------------------------------------------------------------
   // Crossed Paths Badge - show dot when there are new entries
@@ -1202,6 +1210,40 @@ export default function NearbyScreen() {
     }
   }, [nearbyUsersResult]);
 
+  // Fix 7 — after the Nearby list resolves, tell the backend which distinct
+  // profiles the viewer saw today. Best-effort: a failure does not affect the
+  // UI. The markerKey guard prevents the same identical list from being
+  // re-marked on every render.
+  useEffect(() => {
+    if (isDemo || !userId) return;
+    if (nearbyUsersResult?.status !== 'ok') return;
+    const users = nearbyUsersResult.users ?? [];
+    if (users.length === 0) return;
+    const targetUserIds = Array.from(
+      new Set(
+        users
+          .map((u) => u.id as string)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0),
+      ),
+    );
+    if (targetUserIds.length === 0) return;
+
+    const markerKey = `${userId}:${targetUserIds.join('|')}`;
+    if (markedDailyShownKeyRef.current === markerKey) return;
+    markedDailyShownKeyRef.current = markerKey;
+
+    markDailyCrossedProfilesShown({
+      authUserId: userId,
+      targetUserIds: targetUserIds as any,
+    }).catch((err) => {
+      if (__DEV__) {
+        console.log('[NEARBY] daily shown tracking skipped', {
+          reason: String(err).slice(0, 80),
+        });
+      }
+    });
+  }, [isDemo, userId, nearbyUsersResult, markDailyCrossedProfilesShown]);
+
   const displayNearbyUsersResult = nearbyUsersResult ?? retainedNearbyUsersResult;
   const hasRetainedNearbyResult =
     nearbyUsersResult == null && retainedNearbyUsersResult?.status === 'ok';
@@ -1558,6 +1600,7 @@ export default function NearbyScreen() {
       isVerified: user.isVerified,
       verificationStatus: user.verificationStatus,
       crossingCount: user.crossingCount,
+      crossingCountDisplay: user.crossingCountDisplay,
       lastCrossedAt: user.lastCrossedAt,
       areaName: user.areaName,
     };
@@ -1716,7 +1759,6 @@ export default function NearbyScreen() {
         });
       }
       startNearbyLocationTracking();
-      void flushQueuedBackgroundLocationSamples(userId);
 
       // Cleanup: stop tracking when leaving Nearby tab (battery optimization)
       return () => {
@@ -1737,7 +1779,7 @@ export default function NearbyScreen() {
         }
         stopLocationTracking();
       };
-    }, [requestNearbyRefresh, startNearbyLocationTracking, stopLocationTracking, userId])
+    }, [requestNearbyRefresh, startNearbyLocationTracking, stopLocationTracking])
   );
 
   // ---------------------------------------------------------------------------

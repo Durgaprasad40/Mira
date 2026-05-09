@@ -160,10 +160,10 @@ const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // foreground locations, not old published/current-user snapshots.
 const FOREGROUND_FRESHNESS_MS = 12 * 60 * 60 * 1000; // 12 hours
 
-// Crossed paths history — Safe Nearby v2: retention shortened from 4 weeks
-// to 14 days so the historical surface aligns with GHOST_CUTOFF_MS and
-// matches the hybrid model's promise of "events within the last two weeks".
-const HISTORY_EXPIRY_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+// Crossed paths history — retention set to 30 days. Older crossPathHistory
+// rows are removed by the cleanupExpiredHistory cron and any time the
+// per-pair record buffer is appended to.
+const HISTORY_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 const GENERIC_CROSSING_AREA_NAME = 'Nearby area';
 
@@ -224,9 +224,62 @@ const SHARED_PLACES_MAX_RESULTS = 3;
 // Delayed crossing: same area within 10 minutes counts as crossing
 const DELAYED_CROSSING_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
+// ---------------------------------------------------------------------------
+// Nearby / Crossed Paths server-side consent gate
+// ---------------------------------------------------------------------------
+// Bump this string when the consent disclosure copy materially changes; any
+// user whose nearbyConsentVersion does not match the current value is
+// treated as un-consented and must re-accept the disclosure before any
+// location / crossed-paths write is accepted server-side.
+export const NEARBY_CONSENT_VERSION = 'nearby_crossed_paths_v1';
+
+/**
+ * Cap the crossing count we expose to clients at "3+". The raw count is
+ * still tracked server-side (used for ordering and notification copy
+ * thresholds) but UI never sees the precise number once it crosses 3.
+ */
+export function getCrossingCountDisplay(count: number): string {
+  if (!Number.isFinite(count) || count <= 1) return '1';
+  if (count === 2) return '2';
+  return '3+';
+}
+
+/**
+ * Server-side consent check. Returns true only when the user has explicitly
+ * accepted the current Nearby / Crossed Paths disclosure. Defaults to false
+ * when either field is missing so legacy clients cannot bypass the consent
+ * flow.
+ */
+export function hasNearbyConsent(user: Doc<'users'>): boolean {
+  return (
+    typeof user.nearbyConsentAt === 'number' &&
+    user.nearbyConsentAt > 0 &&
+    user.nearbyConsentVersion === NEARBY_CONSENT_VERSION
+  );
+}
+
 // Notification rate limiting
-const NOTIFICATION_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour minimum between notifications per pair
-const MAX_NOTIFICATIONS_PER_DAY = 3; // Maximum notifications per day per user
+// Write-side cooldown: how often we update lastCrossedAt / append history per pair.
+const CROSSED_PATH_WRITE_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+// Notification-side cooldown: how often we deliver a push for the same pair.
+// Sliding window — a new push only after 6h since the previous push for this pair.
+const CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 6 hours
+const MAX_NOTIFICATIONS_PER_DAY = 3; // Maximum crossed-paths notifications per day per user
+
+// Fix 7 — Daily distinct crossed-profile cap.
+// Per-viewer cap on how many *new* crossed profiles can be surfaced in the
+// Nearby feed in a single calendar day (UTC). Profiles the viewer already had
+// a crossedPaths row for at the moment of display are not counted against the
+// cap (a re-display of a known pair is "free").
+const MAX_DAILY_NEW_CROSSED_PROFILES = 40;
+
+// Privacy Zones
+const PRIVACY_ZONE_MAX_ZONES = 3;
+const PRIVACY_ZONE_DEFAULT_RADIUS_METERS = 500;
+const PRIVACY_ZONE_MIN_RADIUS_METERS = 200;
+const PRIVACY_ZONE_MAX_RADIUS_METERS = 1000;
+const PRIVACY_ZONE_LABEL_MAX_LENGTH = 32;
+const PRIVACY_ZONE_AUDIT_ENABLED = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
 
 // ---------------------------------------------------------------------------
 // GPS Jitter Protection Constants (server-side)
@@ -246,6 +299,26 @@ const MIN_MOVEMENT_FOR_CROSSING_METERS = 25;
 const MAX_SPEED_MPS = 55;
 
 // ---------------------------------------------------------------------------
+// Fix 3 — Impossible Travel / GPS spoof protection (server-side).
+// ---------------------------------------------------------------------------
+// Window we look back for the user's previously accepted location. Older
+// points are ignored because reasonable travel can cover any distance.
+const IMPOSSIBLE_TRAVEL_LOOKBACK_MS = 30 * 60 * 1000;
+// Implied speed (km/h) above which we reject the new sample as impossible.
+const IMPOSSIBLE_TRAVEL_MAX_SPEED_KMH = 250;
+// Distance below which we never reject (avoid false positives from rapid
+// re-publishes within a small radius).
+const IMPOSSIBLE_TRAVEL_MIN_DISTANCE_KM = 2;
+// Sliding window for the per-user reject counter.
+const LOCATION_REJECT_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Threshold above which we set locationSpoofSuspect=true.
+const LOCATION_REJECTS_TO_FLAG = 3;
+// Treat rapid-fire rejects as a single event so a flapping client cannot
+// burn through the suspect threshold in a few seconds.
+const LOCATION_REJECT_DEDUPE_MS = 5000;
+const LOCATION_SAFETY_AUDIT_ENABLED = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+
+// ---------------------------------------------------------------------------
 // "Someone crossed you" alert constants
 // ---------------------------------------------------------------------------
 
@@ -255,24 +328,19 @@ const CROSS_EVENT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (cleanup)
 
 // ---------------------------------------------------------------------------
 // Deterministic dedupeKey generation for crossed paths
-// Uses sorted user IDs to ensure A-B == B-A (symmetric)
-// Includes 1-hour time bucket to allow new crossings in future hours
+// Uses sorted user IDs to ensure A-B == B-A (symmetric).
+// Stable per pair (no time bucket): one notification row per pair per recipient,
+// upserted in place. Cooldown is enforced via createdAt comparison and the
+// sliding CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS window.
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a deterministic dedupeKey for crossed paths notifications.
- * Uses sorted user IDs to ensure symmetric detection (A crossing B == B crossing A).
- * Includes 1-hour time bucket to:
- * - Prevent duplicate notifications within the same hour
- * - Allow new notifications in future hours for repeat crossings
- *
- * Format: `crossed_paths:${minUserId}:${maxUserId}:${hourBucket}`
+ * Generate a stable, symmetric dedupeKey for crossed-paths notifications.
+ * Format: `crossed_paths:${minUserId}:${maxUserId}:pair`
  */
-function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: number): string {
+function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>): string {
   const sorted = [userA as string, userB as string].sort();
-  // 1-hour time bucket (milliseconds -> hours)
-  const bucket = Math.floor(now / (60 * 60 * 1000));
-  return `crossed_paths:${sorted[0]}:${sorted[1]}:${bucket}`;
+  return `crossed_paths:${sorted[0]}:${sorted[1]}:pair`;
 }
 
 function orderUserPair(userA: Id<'users'>, userB: Id<'users'>): { user1Id: Id<'users'>; user2Id: Id<'users'> } {
@@ -280,6 +348,239 @@ function orderUserPair(userA: Id<'users'>, userB: Id<'users'>): { user1Id: Id<'u
     ? { user1Id: userA, user2Id: userB }
     : { user1Id: userB, user2Id: userA };
 }
+
+/**
+ * Fix 7 — Daily distinct crossed-profile cap helpers.
+ * Stable, symmetric pair key for the daily-shown ledger ("user1Id:user2Id").
+ */
+function makeDailyShownPairKey(viewerId: Id<'users'>, targetUserId: Id<'users'>): string {
+  const { user1Id, user2Id } = orderUserPair(viewerId, targetUserId);
+  return `${user1Id}:${user2Id}`;
+}
+
+/** UTC date slice ("YYYY-MM-DD") used as the ledger partition key. */
+function getDailyShownDateKey(now: number): string {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+/**
+ * Look up the (ordered) crossedPaths row for a pair without writing to it.
+ * Used by the daily cap helper to check whether a candidate is "already
+ * crossed" (free re-display) vs a brand-new surface.
+ */
+async function getCrossedPathPair(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userA: Id<'users'>,
+  userB: Id<'users'>,
+): Promise<Doc<'crossedPaths'> | null> {
+  const { user1Id, user2Id } = orderUserPair(userA, userB);
+  return await ctx.db
+    .query('crossedPaths')
+    .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+    .first();
+}
+
+/**
+ * Apply the per-viewer daily cap on newly-surfaced crossed profiles.
+ * Re-displays of profiles already shown today, or already in crossedPaths,
+ * pass through unchanged. New pairs consume one slot until the daily quota
+ * is exhausted.
+ *
+ * NOTE: this is read-only — it does NOT insert into crossedPathDailyShown.
+ * The client is expected to call markDailyCrossedProfilesShown after the
+ * list actually rendered so we only count items the user truly saw.
+ */
+async function applyDailyDistinctCrossedProfileCap<T extends { id: Id<'users'> | string }>(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  viewerId: Id<'users'>,
+  results: T[],
+  now: number,
+): Promise<T[]> {
+  if (results.length === 0) return results;
+
+  const dateKey = getDailyShownDateKey(now);
+  const shownToday = await ctx.db
+    .query('crossedPathDailyShown')
+    .withIndex('by_viewer_date', (q: any) =>
+      q.eq('viewerId', viewerId).eq('dateKey', dateKey),
+    )
+    .collect();
+
+  const shownPairKeys = new Set<string>();
+  const countedNewPairKeys = new Set<string>();
+  for (const row of shownToday) {
+    shownPairKeys.add(row.pairKey);
+    if (row.wasExistingCrossedPath !== true) {
+      countedNewPairKeys.add(row.pairKey);
+    }
+  }
+
+  let remainingNewSlots = Math.max(
+    0,
+    MAX_DAILY_NEW_CROSSED_PROFILES - countedNewPairKeys.size,
+  );
+
+  const pairStates = await Promise.all(
+    results.map(async (result) => {
+      const targetUserId = result.id as Id<'users'>;
+      const pairKey = makeDailyShownPairKey(viewerId, targetUserId);
+      const existingCrossedPath = await getCrossedPathPair(ctx, viewerId, targetUserId);
+      return {
+        pairKey,
+        alreadyShownToday: shownPairKeys.has(pairKey),
+        alreadyCrossed: existingCrossedPath !== null,
+      };
+    }),
+  );
+
+  const capped: T[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const state = pairStates[i];
+    if (state.alreadyShownToday || state.alreadyCrossed) {
+      capped.push(results[i]);
+      continue;
+    }
+    if (remainingNewSlots > 0) {
+      remainingNewSlots--;
+      capped.push(results[i]);
+    }
+  }
+
+  return capped;
+}
+
+/**
+ * Stable per-pair dedupe prefix used to find ALL crossed-paths notifications
+ * for a pair, regardless of dedupeKey suffix.
+ */
+function makeCrossedPathsPairDedupePrefix(userA: Id<'users'>, userB: Id<'users'>): string {
+  const { user1Id, user2Id } = orderUserPair(userA, userB);
+  return `crossed_paths:${user1Id}:${user2Id}:`;
+}
+
+/**
+ * Returns true if the given notification belongs to the crossed-paths
+ * pair (userA, userB). Matches by dedupeKey prefix, data.pairKey prefix,
+ * or recipient/otherUserId fallback for older rows.
+ */
+function isCrossedPathNotificationForPair(
+  notification: Doc<'notifications'>,
+  userA: Id<'users'>,
+  userB: Id<'users'>,
+  pairPrefix: string,
+): boolean {
+  if (notification.type !== 'crossed_paths') return false;
+
+  const dedupeKey = notification.dedupeKey;
+  if (typeof dedupeKey === 'string' && dedupeKey.startsWith(pairPrefix)) {
+    return true;
+  }
+
+  const pairKey = notification.data?.pairKey;
+  if (typeof pairKey === 'string' && pairKey.startsWith(pairPrefix)) {
+    return true;
+  }
+
+  const otherUserId = notification.data?.userId;
+  return (
+    (notification.userId === userA && otherUserId === (userB as string)) ||
+    (notification.userId === userB && otherUserId === (userA as string))
+  );
+}
+
+/**
+ * Block-cleanup helper. Idempotent.
+ * When user A blocks user B (or vice-versa), purge all crossed-paths state
+ * for the pair: crossedPaths row, crossPathHistory rows (both directions of
+ * pair ordering), crossedEvents in both directions, and any crossed-paths
+ * notifications for either side that reference the pair.
+ */
+export const purgeCrossedPathPairForBlock = internalMutation({
+  args: {
+    userAId: v.id('users'),
+    userBId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { userAId, userBId } = args;
+    if (userAId === userBId) {
+      return {
+        crossedPathsDeleted: 0,
+        historyDeleted: 0,
+        crossedEventsDeleted: 0,
+        notificationsDeleted: 0,
+      };
+    }
+
+    const { user1Id, user2Id } = orderUserPair(userAId, userBId);
+    const pairPrefix = makeCrossedPathsPairDedupePrefix(userAId, userBId);
+
+    let crossedPathsDeleted = 0;
+    const crossedPathRows = await ctx.db
+      .query('crossedPaths')
+      .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+      .collect();
+    for (const row of crossedPathRows) {
+      await ctx.db.delete(row._id);
+      crossedPathsDeleted++;
+    }
+
+    let historyDeleted = 0;
+    const historyRows = await ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+      .collect();
+    for (const row of historyRows) {
+      await ctx.db.delete(row._id);
+      historyDeleted++;
+    }
+
+    let crossedEventsDeleted = 0;
+    const eventRows = await Promise.all([
+      ctx.db
+        .query('crossedEvents')
+        .withIndex('by_user_other', (q) =>
+          q.eq('userId', userAId).eq('otherUserId', userBId),
+        )
+        .collect(),
+      ctx.db
+        .query('crossedEvents')
+        .withIndex('by_user_other', (q) =>
+          q.eq('userId', userBId).eq('otherUserId', userAId),
+        )
+        .collect(),
+    ]);
+    for (const row of eventRows.flat()) {
+      await ctx.db.delete(row._id);
+      crossedEventsDeleted++;
+    }
+
+    let notificationsDeleted = 0;
+    const notificationRows = await Promise.all([
+      ctx.db
+        .query('notifications')
+        .withIndex('by_user', (q) => q.eq('userId', userAId))
+        .collect(),
+      ctx.db
+        .query('notifications')
+        .withIndex('by_user', (q) => q.eq('userId', userBId))
+        .collect(),
+    ]);
+    for (const row of notificationRows.flat()) {
+      if (!isCrossedPathNotificationForPair(row, userAId, userBId, pairPrefix)) continue;
+      await ctx.db.delete(row._id);
+      notificationsDeleted++;
+    }
+
+    return {
+      crossedPathsDeleted,
+      historyDeleted,
+      crossedEventsDeleted,
+      notificationsDeleted,
+    };
+  },
+});
 
 async function getCrossedPathForPair(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -294,6 +595,225 @@ async function getCrossedPathForPair(
       q.eq('user1Id', user1Id).eq('user2Id', user2Id),
     )
     .first();
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3 — Impossible Travel / GPS spoof protection helpers.
+// ---------------------------------------------------------------------------
+function isValidLatLng(latitude: number, longitude: number): boolean {
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180
+  );
+}
+
+type AcceptedLocationPoint = {
+  latitude: number;
+  longitude: number;
+  acceptedAt: number;
+};
+
+function calculateDistanceKm(
+  fromLatitude: number,
+  fromLongitude: number,
+  toLatitude: number,
+  toLongitude: number,
+): number {
+  return (
+    calculateDistanceMeters(fromLatitude, fromLongitude, toLatitude, toLongitude) / 1000
+  );
+}
+
+function calculateImpliedSpeedKmh(distanceKm: number, elapsedMs: number): number | null {
+  if (!Number.isFinite(distanceKm) || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+    return null;
+  }
+  const timeHours = elapsedMs / (60 * 60 * 1000);
+  if (timeHours <= 0) return null;
+  return distanceKm / timeHours;
+}
+
+/**
+ * Returns the most recent accepted location for the user (preferring the
+ * later of `latitude`/`longitude` + `lastLocationUpdatedAt` and
+ * `publishedLat`/`publishedLng` + `publishedAt`).
+ * Returns null when no valid prior point is on file.
+ */
+function getLatestAcceptedLocation(user: Doc<'users'>): AcceptedLocationPoint | null {
+  const candidates: AcceptedLocationPoint[] = [];
+
+  if (
+    typeof user.latitude === 'number' &&
+    typeof user.longitude === 'number' &&
+    typeof user.lastLocationUpdatedAt === 'number' &&
+    isValidLatLng(user.latitude, user.longitude)
+  ) {
+    candidates.push({
+      latitude: user.latitude,
+      longitude: user.longitude,
+      acceptedAt: user.lastLocationUpdatedAt,
+    });
+  }
+
+  if (
+    typeof user.publishedLat === 'number' &&
+    typeof user.publishedLng === 'number' &&
+    typeof user.publishedAt === 'number' &&
+    isValidLatLng(user.publishedLat, user.publishedLng)
+  ) {
+    candidates.push({
+      latitude: user.publishedLat,
+      longitude: user.publishedLng,
+      acceptedAt: user.publishedAt,
+    });
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.acceptedAt - a.acceptedAt);
+  return candidates[0];
+}
+
+/**
+ * Pure function — decides whether the proposed `next` location is safe to
+ * accept given a `previous` accepted point. Rejects only on clearly
+ * impossible travel (>250 km/h implied speed over >=2 km / <=30min) or on
+ * malformed coordinates.
+ */
+function evaluateImpossibleTravel(
+  previous: AcceptedLocationPoint | null,
+  next: AcceptedLocationPoint,
+): {
+  rejected: boolean;
+  reason?: 'suspicious_location' | 'impossible_travel';
+  speedKmh?: number;
+  previousAcceptedAt?: number;
+} {
+  if (!isValidLatLng(next.latitude, next.longitude)) {
+    return { rejected: true, reason: 'suspicious_location' };
+  }
+
+  if (
+    !previous ||
+    !isValidLatLng(previous.latitude, previous.longitude) ||
+    !Number.isFinite(previous.acceptedAt) ||
+    !Number.isFinite(next.acceptedAt)
+  ) {
+    return { rejected: false };
+  }
+
+  const elapsedMs = next.acceptedAt - previous.acceptedAt;
+  if (elapsedMs <= 0 || elapsedMs > IMPOSSIBLE_TRAVEL_LOOKBACK_MS) {
+    return { rejected: false };
+  }
+
+  const distanceKm = calculateDistanceKm(
+    previous.latitude,
+    previous.longitude,
+    next.latitude,
+    next.longitude,
+  );
+  if (distanceKm < IMPOSSIBLE_TRAVEL_MIN_DISTANCE_KM) {
+    return { rejected: false };
+  }
+
+  const speedKmh = calculateImpliedSpeedKmh(distanceKm, elapsedMs);
+  if (speedKmh === null || speedKmh <= IMPOSSIBLE_TRAVEL_MAX_SPEED_KMH) {
+    return { rejected: false };
+  }
+
+  return {
+    rejected: true,
+    reason: 'impossible_travel',
+    speedKmh,
+    previousAcceptedAt: previous.acceptedAt,
+  };
+}
+
+/**
+ * Persist a server-side reject. Implements:
+ *   - 5s dedupe window (rapid-fire rejects count as one)
+ *   - 24h sliding reject-count window
+ *   - flips `locationSpoofSuspect` once 3 rejects accumulate inside the
+ *     same 24h window. The flag is sticky (we only set, never clear here).
+ */
+async function recordLocationSafetyReject(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>,
+  rejection: { reason?: string; speedKmh?: number; previousAcceptedAt?: number },
+): Promise<void> {
+  if (rejection.reason !== 'impossible_travel') return;
+
+  const now = Date.now();
+  const latestUser = await ctx.db.get(userId);
+  if (!latestUser) return;
+
+  if (
+    typeof latestUser.locationLastRejectAt === 'number' &&
+    now - latestUser.locationLastRejectAt < LOCATION_REJECT_DEDUPE_MS
+  ) {
+    return;
+  }
+
+  const existingWindowStart = latestUser.locationRejectWindowStartedAt;
+  const inExistingWindow =
+    typeof existingWindowStart === 'number' &&
+    now - existingWindowStart <= LOCATION_REJECT_WINDOW_MS;
+  const windowStartedAt = inExistingWindow ? existingWindowStart : now;
+  const previousCount = inExistingWindow ? latestUser.locationRejectCount ?? 0 : 0;
+  const nextCount = previousCount + 1;
+  const shouldFlag = nextCount >= LOCATION_REJECTS_TO_FLAG;
+
+  const updates: Record<string, unknown> = {
+    locationRejectCount: nextCount,
+    locationRejectWindowStartedAt: windowStartedAt,
+    locationLastRejectAt: now,
+  };
+
+  if (shouldFlag) {
+    updates.locationSpoofSuspect = true;
+    updates.locationSpoofSuspectAt = latestUser.locationSpoofSuspectAt ?? now;
+  }
+
+  await ctx.db.patch(userId, updates);
+
+  if (LOCATION_SAFETY_AUDIT_ENABLED) {
+    console.log('[LOCATION_SAFETY] impossible travel rejected', {
+      speedKmh: rejection.speedKmh ? Math.round(rejection.speedKmh) : null,
+      rejectCount: nextCount,
+      flagged: shouldFlag,
+      previousAcceptedAt: rejection.previousAcceptedAt ?? null,
+    });
+  }
+}
+
+/**
+ * Convenience wrapper: read the user's latest accepted point, evaluate the
+ * incoming sample, and (on reject) record the safety event. Callers should
+ * abort their write/upsert path when this returns rejected=true.
+ */
+async function rejectIfUnsafeLocation(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>,
+  user: Doc<'users'>,
+  latitude: number,
+  longitude: number,
+  acceptedAt: number,
+): Promise<{ rejected: boolean; reason?: 'suspicious_location' | 'impossible_travel' }> {
+  const rejection = evaluateImpossibleTravel(getLatestAcceptedLocation(user), {
+    latitude,
+    longitude,
+    acceptedAt,
+  });
+
+  if (!rejection.rejected) return { rejected: false };
+  await recordLocationSafetyReject(ctx, userId, rejection);
+  return { rejected: true, reason: rejection.reason };
 }
 
 function isPairDismissedForViewer(
@@ -406,6 +926,54 @@ async function hideActiveHistoryRowsForViewer(
   }
 }
 
+// STABILITY FIX (Crossed Paths): pick a marker coordinate that does NOT
+// move on repeat crossings. Resolution order:
+//   1. firstCrossingLatitude/Longitude on the pair record (set on first
+//      ever crossing, never patched).
+//   2. earliestEntry coordinates from crossPathHistory (immutable per-event).
+//   3. legacy crossingLatitude/Longitude on the pair record (latest value;
+//      used only as last-resort fallback for rows that pre-date this fix).
+//   4. latestEntry coordinates as a final fallback.
+// Returns null if no usable approximate coordinate is available.
+function pickStableCrossingCoords(
+  crossedPath: Doc<'crossedPaths'> | null | undefined,
+  earliestEntry: Doc<'crossPathHistory'> | undefined,
+  latestEntry: Doc<'crossPathHistory'> | undefined,
+): { lat: number; lng: number } | null {
+  if (
+    crossedPath &&
+    typeof (crossedPath as any).firstCrossingLatitude === 'number' &&
+    typeof (crossedPath as any).firstCrossingLongitude === 'number'
+  ) {
+    return {
+      lat: (crossedPath as any).firstCrossingLatitude as number,
+      lng: (crossedPath as any).firstCrossingLongitude as number,
+    };
+  }
+  if (
+    earliestEntry &&
+    typeof earliestEntry.crossedLatApprox === 'number' &&
+    typeof earliestEntry.crossedLngApprox === 'number'
+  ) {
+    return { lat: earliestEntry.crossedLatApprox, lng: earliestEntry.crossedLngApprox };
+  }
+  if (
+    crossedPath &&
+    typeof crossedPath.crossingLatitude === 'number' &&
+    typeof crossedPath.crossingLongitude === 'number'
+  ) {
+    return { lat: crossedPath.crossingLatitude, lng: crossedPath.crossingLongitude };
+  }
+  if (
+    latestEntry &&
+    typeof latestEntry.crossedLatApprox === 'number' &&
+    typeof latestEntry.crossedLngApprox === 'number'
+  ) {
+    return { lat: latestEntry.crossedLatApprox, lng: latestEntry.crossedLngApprox };
+  }
+  return null;
+}
+
 async function getDismissedOtherUserIds(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
@@ -427,6 +995,196 @@ async function getDismissedOtherUserIds(
   );
   return new Set(checks.filter((id): id is string => id !== null));
 }
+
+function sanitizePrivacyZoneLabel(label: string): string {
+  const trimmed = label.trim().replace(/\s+/g, ' ');
+  if (trimmed.length === 0) {
+    throw new Error('Privacy Zone name is required.');
+  }
+  if (trimmed.length > PRIVACY_ZONE_LABEL_MAX_LENGTH) {
+    throw new Error(`Privacy Zone name must be ${PRIVACY_ZONE_LABEL_MAX_LENGTH} characters or less.`);
+  }
+  return trimmed;
+}
+
+function validatePrivacyZoneCoordinate(latitude: number, longitude: number) {
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+    throw new Error('Privacy Zone latitude is invalid.');
+  }
+  if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    throw new Error('Privacy Zone longitude is invalid.');
+  }
+}
+
+function validatePrivacyZoneRadius(radiusMeters: number | undefined): number {
+  const radius = radiusMeters ?? PRIVACY_ZONE_DEFAULT_RADIUS_METERS;
+  if (!Number.isFinite(radius)) {
+    throw new Error('Privacy Zone radius is invalid.');
+  }
+  if (
+    radius < PRIVACY_ZONE_MIN_RADIUS_METERS ||
+    radius > PRIVACY_ZONE_MAX_RADIUS_METERS
+  ) {
+    throw new Error(
+      `Privacy Zone radius must be between ${PRIVACY_ZONE_MIN_RADIUS_METERS}m and ${PRIVACY_ZONE_MAX_RADIUS_METERS}m.`,
+    );
+  }
+  return Math.round(radius);
+}
+
+async function resolvePrivacyZoneOwner(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  authUserId: string,
+): Promise<Id<'users'>> {
+  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!userId) {
+    throw new Error('Unauthorized: user not found');
+  }
+  return userId;
+}
+
+async function getPrivacyZonesForUser(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>,
+): Promise<Doc<'privacyZones'>[]> {
+  return await ctx.db
+    .query('privacyZones')
+    .withIndex('by_userId', (q: any) => q.eq('userId', userId))
+    .collect();
+}
+
+function isPointInsidePrivacyZone(
+  latitude: number,
+  longitude: number,
+  zone: Pick<Doc<'privacyZones'>, 'latitude' | 'longitude' | 'radiusMeters'>,
+): boolean {
+  const distance = calculateDistanceMeters(
+    latitude,
+    longitude,
+    zone.latitude,
+    zone.longitude,
+  );
+  return distance <= zone.radiusMeters;
+}
+
+async function isPointInsideUserPrivacyZone(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>,
+  latitude: number,
+  longitude: number,
+  prefetchedZones?: Doc<'privacyZones'>[],
+): Promise<boolean> {
+  if (
+    !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+    !Number.isFinite(longitude) || longitude < -180 || longitude > 180
+  ) {
+    return false;
+  }
+
+  const zones = prefetchedZones ?? await getPrivacyZonesForUser(ctx, userId);
+  return zones.some((zone) => isPointInsidePrivacyZone(latitude, longitude, zone));
+}
+
+function logPrivacyZoneSkip(source: string, userId: Id<'users'> | string) {
+  if (!PRIVACY_ZONE_AUDIT_ENABLED) return;
+  console.log('[PRIVACY_ZONE] skipped location write', {
+    source,
+    userId,
+    reason: 'privacy_zone',
+  });
+}
+
+export const listPrivacyZones = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolvePrivacyZoneOwner(ctx, args.authUserId);
+    const zones = await getPrivacyZonesForUser(ctx, userId);
+    return zones
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((zone) => ({
+        _id: zone._id,
+        userId: zone.userId,
+        label: zone.label,
+        latitude: zone.latitude,
+        longitude: zone.longitude,
+        radiusMeters: zone.radiusMeters,
+        createdAt: zone.createdAt,
+        updatedAt: zone.updatedAt,
+      }));
+  },
+});
+
+export const upsertPrivacyZone = mutation({
+  args: {
+    authUserId: v.string(),
+    zoneId: v.optional(v.id('privacyZones')),
+    label: v.string(),
+    latitude: v.number(),
+    longitude: v.number(),
+    radiusMeters: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolvePrivacyZoneOwner(ctx, args.authUserId);
+    const label = sanitizePrivacyZoneLabel(args.label);
+    validatePrivacyZoneCoordinate(args.latitude, args.longitude);
+    const radiusMeters = validatePrivacyZoneRadius(args.radiusMeters);
+    const now = Date.now();
+
+    if (args.zoneId) {
+      const existing = await ctx.db.get(args.zoneId);
+      if (!existing || existing.userId !== userId) {
+        throw new Error('Privacy Zone not found.');
+      }
+      await ctx.db.patch(args.zoneId, {
+        label,
+        latitude: args.latitude,
+        longitude: args.longitude,
+        radiusMeters,
+        updatedAt: now,
+      });
+      return { success: true, zoneId: args.zoneId };
+    }
+
+    const existingZones = await getPrivacyZonesForUser(ctx, userId);
+    if (existingZones.length >= PRIVACY_ZONE_MAX_ZONES) {
+      throw new Error(`You can create up to ${PRIVACY_ZONE_MAX_ZONES} Privacy Zones.`);
+    }
+
+    const zoneId = await ctx.db.insert('privacyZones', {
+      userId,
+      label,
+      latitude: args.latitude,
+      longitude: args.longitude,
+      radiusMeters,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return { success: true, zoneId };
+  },
+});
+
+export const deletePrivacyZone = mutation({
+  args: {
+    authUserId: v.string(),
+    zoneId: v.id('privacyZones'),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolvePrivacyZoneOwner(ctx, args.authUserId);
+    const existing = await ctx.db.get(args.zoneId);
+    if (!existing || existing.userId !== userId) {
+      throw new Error('Privacy Zone not found.');
+    }
+
+    await ctx.db.delete(args.zoneId);
+    return { success: true };
+  },
+});
 
 // ---------------------------------------------------------------------------
 // publishLocation — updates published location (max once per 6 hours)
@@ -477,6 +1235,37 @@ export const publishLocation = mutation({
     }
     if (user.incognitoMode === true) {
       return { success: false, published: false, reason: 'incognito' };
+    }
+
+    // Server-side consent gate: drop writes from clients that have not
+    // accepted the current Nearby / Crossed Paths disclosure.
+    if (!hasNearbyConsent(user)) {
+      return { success: false, published: false, reason: 'consent_required' };
+    }
+
+    // Fix 3 — Impossible Travel / GPS spoof protection. Reject writes that
+    // imply >250 km/h travel from the user's last accepted point and bump
+    // server-side counters; surfacing 'suspicious_location' or
+    // 'impossible_travel' as the reject reason.
+    const locationSafety = await rejectIfUnsafeLocation(
+      ctx,
+      userId,
+      user,
+      latitude,
+      longitude,
+      now,
+    );
+    if (locationSafety.rejected) {
+      return {
+        success: false,
+        published: false,
+        reason: locationSafety.reason ?? 'suspicious_location',
+      };
+    }
+
+    if (await isPointInsideUserPrivacyZone(ctx, userId, latitude, longitude)) {
+      logPrivacyZoneSkip('publishLocation', userId);
+      return { success: true, published: false, skipped: true, reason: 'privacy_zone' };
     }
 
     // Safe Nearby v2 — Snapshot regeneration gate.
@@ -587,6 +1376,26 @@ export const detectCrossedUsers = mutation({
     if (currentUser.incognitoMode === true) {
       return { triggered: false, reason: 'incognito' };
     }
+    // Server-side consent gate.
+    if (!hasNearbyConsent(currentUser)) {
+      return { triggered: false, reason: 'consent_required' };
+    }
+    // Fix 3 — Impossible Travel / GPS spoof protection.
+    const locationSafety = await rejectIfUnsafeLocation(
+      ctx,
+      userId,
+      currentUser,
+      myLat,
+      myLng,
+      now,
+    );
+    if (locationSafety.rejected) {
+      return { triggered: false, reason: locationSafety.reason ?? 'suspicious_location' };
+    }
+    if (await isPointInsideUserPrivacyZone(ctx, userId, myLat, myLng)) {
+      logPrivacyZoneSkip('detectCrossedUsers', userId);
+      return { triggered: false, reason: 'privacy_zone' };
+    }
 
     // 2) Enforce cooldown — check most recent crossedEvent for this user
     const lastEvent = await ctx.db
@@ -634,6 +1443,16 @@ export const detectCrossedUsers = mutation({
       if (user.incognitoMode === true) continue;
       // Skip if no published location
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
+      if (
+        await isPointInsideUserPrivacyZone(
+          ctx,
+          user._id,
+          user.publishedLat,
+          user.publishedLng,
+        )
+      ) {
+        continue;
+      }
       // Skip stale foreground snapshots so old stored locations do not create crossings.
       if (now - user.publishedAt > FOREGROUND_FRESHNESS_MS) continue;
 
@@ -767,6 +1586,40 @@ export const recordLocation = mutation({
     }
     if (currentUser.incognitoMode === true) {
       return { success: true, nearbyCount: 0, skipped: true, reason: 'incognito' };
+    }
+    // Server-side consent gate.
+    if (!hasNearbyConsent(currentUser)) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'consent_required' };
+    }
+    // Fix 3 — Impossible Travel / GPS spoof protection.
+    const locationSafety = await rejectIfUnsafeLocation(
+      ctx,
+      userId,
+      currentUser,
+      latitude,
+      longitude,
+      now,
+    );
+    if (locationSafety.rejected) {
+      return {
+        success: true,
+        nearbyCount: 0,
+        skipped: true,
+        reason: locationSafety.reason ?? 'suspicious_location',
+      };
+    }
+    const currentUserPrivacyZones = await getPrivacyZonesForUser(ctx, userId);
+    if (
+      await isPointInsideUserPrivacyZone(
+        ctx,
+        userId,
+        latitude,
+        longitude,
+        currentUserPrivacyZones,
+      )
+    ) {
+      logPrivacyZoneSkip('recordLocation', userId);
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'privacy_zone' };
     }
 
     // ---------------------------------------------------------------------------
@@ -934,6 +1787,10 @@ export const recordLocation = mutation({
       // very old stored locations.
       const userLocationUpdatedAt = user.lastLocationUpdatedAt ?? user.lastActive;
       if (now - userLocationUpdatedAt > FOREGROUND_FRESHNESS_MS) { preFilterRejects.push({ candidate: user._id as string, reason: 'location_stale' }); continue; }
+      if (await isPointInsideUserPrivacyZone(ctx, user._id, user.latitude, user.longitude)) {
+        preFilterRejects.push({ candidate: user._id as string, reason: 'privacy_zone' });
+        continue;
+      }
 
       const distance = calculateDistanceMeters(
         latitude,
@@ -1060,8 +1917,8 @@ export const recordLocation = mutation({
         .first();
 
       if (crossedPath) {
-        // 1-hour cooldown per pair (faster notification for better UX)
-        if (now - crossedPath.lastCrossedAt < NOTIFICATION_COOLDOWN_MS) {
+        // 1-hour write cooldown per pair (debounces lastCrossedAt updates)
+        if (now - crossedPath.lastCrossedAt < CROSSED_PATH_WRITE_COOLDOWN_MS) {
           if (CROSSED_PATHS_AUDIT_ENABLED) {
             console.log('[CROSSED_PATHS_AUDIT][reject]', {
               pair: [userId, candidateId],
@@ -1079,16 +1936,38 @@ export const recordLocation = mutation({
           count: newCount,
           lastCrossedAt: now,
           // Legacy coordinate fields store grid-snapped approximate crossing
-          // coordinates only. Never write raw GPS here and never return these
-          // fields from public queries.
+          // coordinates only. They hold the LATEST crossing location and are
+          // not used as the marker source. Never write raw GPS here and never
+          // return these fields from public queries.
           crossingLatitude: approxLocation.lat,
           crossingLongitude: approxLocation.lng,
         };
+        // STABILITY FIX (Crossed Paths): Lazy back-fill the immutable
+        // first-crossing fields on the next crossing for legacy rows that
+        // pre-date this fix. Once set, these fields are NEVER patched again
+        // so the marker location stays anchored to the first crossing.
+        const cp = crossedPath as Doc<'crossedPaths'> & {
+          firstCrossedAt?: number;
+          firstCrossingLatitude?: number;
+          firstCrossingLongitude?: number;
+        };
+        if (typeof cp.firstCrossedAt !== 'number') {
+          updates.firstCrossedAt = now;
+        }
+        if (
+          typeof cp.firstCrossingLatitude !== 'number' ||
+          typeof cp.firstCrossingLongitude !== 'number'
+        ) {
+          updates.firstCrossingLatitude = approxLocation.lat;
+          updates.firstCrossingLongitude = approxLocation.lng;
+        }
 
         await ctx.db.patch(crossedPath._id, updates);
       } else {
         const approxLocation = roundToGrid(latitude, longitude);
         // BUGFIX #28: Insert new record, then check for race condition duplicate
+        // STABILITY FIX (Crossed Paths): Set immutable first-crossing fields
+        // on first insert. Repeat crossings will only update count/lastCrossedAt.
         const newId = await ctx.db.insert('crossedPaths', {
           user1Id,
           user2Id,
@@ -1096,6 +1975,9 @@ export const recordLocation = mutation({
           lastCrossedAt: now,
           crossingLatitude: approxLocation.lat,
           crossingLongitude: approxLocation.lng,
+          firstCrossedAt: now,
+          firstCrossingLatitude: approxLocation.lat,
+          firstCrossingLongitude: approxLocation.lng,
         });
 
         // BUGFIX #28: Re-query to detect concurrent insert race condition
@@ -1130,7 +2012,7 @@ export const recordLocation = mutation({
       const existingHistory = [...pairHistories]
         .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 
-      if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
+      if (existingHistory && now - existingHistory.createdAt < CROSSED_PATH_WRITE_COOLDOWN_MS) {
         // Already have a recent history entry for this pair — skip
         if (CROSSED_PATHS_AUDIT_ENABLED) {
           console.log('[CROSSED_PATHS_AUDIT][reject]', {
@@ -1231,9 +2113,10 @@ export const recordLocation = mutation({
         .first();
 
       // Check notification cooldown on the canonical crossedPaths record
+      // (sliding 6h per pair)
       const canNotify = currentCrossedPath && (
         !currentCrossedPath.lastNotifiedAt ||
-        now - currentCrossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS
+        now - currentCrossedPath.lastNotifiedAt >= CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS
       );
 
       if (canNotify && currentCrossedPath) {
@@ -1277,6 +2160,9 @@ export const recordLocation = mutation({
         let title: string;
         let body: string;
 
+        // Use capped display ("1" / "2" / "3+") in user-visible body text so
+        // we never reveal raw crossing counts to clients (Fix 4).
+        const crossingCountDisplay = getCrossingCountDisplay(crossingCount);
         if (crossingCount === 1) {
           // First crossing
           title = 'Someone crossed your path';
@@ -1284,15 +2170,16 @@ export const recordLocation = mutation({
         } else if (crossingCount < 5) {
           // Early crossings
           title = 'Someone interesting crossed your path';
-          body = `You've crossed paths ${crossingCount} times. ${reasonText}`;
+          body = `You've crossed paths ${crossingCountDisplay} times. ${reasonText}`;
         } else {
           // Frequent crossings - stronger suggestion
           title = 'You keep crossing paths with someone';
-          body = `${crossingCount} times now! ${reasonText}. Maybe say hi?`;
+          body = `${crossingCountDisplay} times now! ${reasonText}. Maybe say hi?`;
         }
 
-        // Generate deterministic dedupeKey using sorted user IDs + time bucket (symmetric)
-        const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id, now);
+        // Stable per-pair dedupeKey (symmetric, no time bucket).
+        // One notification row per pair per recipient — upserted in place.
+        const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id);
 
         // IDEMPOTENCY: Check for existing notification with same dedupeKey within cooldown window
         // This prevents duplicate notifications even with concurrent updates
@@ -1311,15 +2198,15 @@ export const recordLocation = mutation({
           .first();
 
         // Only send notification if:
-        // 1. Under rate limit (max 3/hour)
-        // 2. No existing notification with same dedupeKey within cooldown window
+        // 1. Under daily rate limit (max 3/day)
+        // 2. No existing notification within sliding 6h pair cooldown
         const shouldNotifyUser1 = !user1Dismissed &&
           recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_DAY &&
-          (!existingNotifUser1 || now - existingNotifUser1.createdAt >= NOTIFICATION_COOLDOWN_MS);
+          (!existingNotifUser1 || now - existingNotifUser1.createdAt >= CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS);
 
         const shouldNotifyUser2 = !user2Dismissed &&
           recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_DAY &&
-          (!existingNotifUser2 || now - existingNotifUser2.createdAt >= NOTIFICATION_COOLDOWN_MS);
+          (!existingNotifUser2 || now - existingNotifUser2.createdAt >= CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS);
 
         if (shouldNotifyUser1) {
           // Upsert pattern: update existing or insert new
@@ -1582,6 +2469,11 @@ export const recordLocationBatch = mutation({
     if (user.incognitoMode === true) {
       return { success: true, accepted: 0, reason: 'incognito' };
     }
+    // Server-side consent gate.
+    if (!hasNearbyConsent(user)) {
+      return { success: true, accepted: 0, reason: 'consent_required' };
+    }
+    const userPrivacyZones = await getPrivacyZonesForUser(ctx, userId);
 
     const currentStatus = user.verificationStatus || 'unverified';
     const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
@@ -1605,9 +2497,15 @@ export const recordLocationBatch = mutation({
     let droppedStale = 0;
     let droppedFuture = 0;
     let droppedDedupe = 0;
+    let droppedPrivacyZone = 0;
     let duplicateCount = 0;
     let droppedInvalid = 0;
+    // Fix 3 — count samples rejected by impossible-travel evaluation.
+    let droppedSuspiciousLocation = 0;
     let latestAcceptedSample: { lat: number; lng: number; capturedAt: number; accuracy?: number } | null = null;
+    // Fix 3 — track the latest accepted location across the loop so each
+    // sample is checked against the running point (not a stale user doc).
+    let lastAcceptedSafetyPoint = getLatestAcceptedLocation(user);
 
     for (const raw of sortedSamples) {
       // Basic coord validity (reject NaN / out-of-range).
@@ -1632,6 +2530,31 @@ export const recordLocationBatch = mutation({
       // Reject samples dated in the future (clock skew / replay).
       if (raw.capturedAt > now + 5 * 60 * 1000) {
         droppedFuture++;
+        continue;
+      }
+      if (
+        await isPointInsideUserPrivacyZone(
+          ctx,
+          userId,
+          raw.lat,
+          raw.lng,
+          userPrivacyZones,
+        )
+      ) {
+        droppedPrivacyZone++;
+        logPrivacyZoneSkip(`recordLocationBatch:${raw.source}`, userId);
+        continue;
+      }
+      // Fix 3 — evaluate impossible-travel against the running last-accepted
+      // safety point so each sample in the batch is checked in isolation.
+      const locationSafety = evaluateImpossibleTravel(lastAcceptedSafetyPoint, {
+        latitude: raw.lat,
+        longitude: raw.lng,
+        acceptedAt: raw.capturedAt,
+      });
+      if (locationSafety.rejected) {
+        droppedSuspiciousLocation++;
+        await recordLocationSafetyReject(ctx, userId, locationSafety);
         continue;
       }
       const snapped = roundToGrid(raw.lat, raw.lng);
@@ -1674,6 +2597,13 @@ export const recordLocationBatch = mutation({
         capturedAt: raw.capturedAt,
         accuracy: raw.accuracy,
       };
+      // Fix 3 — advance the running safety point so subsequent samples in
+      // this batch are evaluated against the most recent accepted location.
+      lastAcceptedSafetyPoint = {
+        latitude: snapped.lat,
+        longitude: snapped.lng,
+        acceptedAt: raw.capturedAt,
+      };
 
       if (BG_LOCATION_AUDIT_ENABLED) {
         console.log('[BG_LOCATION][sample_written]', {
@@ -1685,7 +2615,8 @@ export const recordLocationBatch = mutation({
     }
 
     if (BG_LOCATION_AUDIT_ENABLED) {
-      const droppedCount = droppedDedupe + droppedStale + droppedFuture + droppedInvalid;
+      const droppedCount =
+        droppedDedupe + droppedStale + droppedFuture + droppedInvalid + droppedPrivacyZone + droppedSuspiciousLocation;
       const skippedCount = droppedCount + duplicateCount;
       console.log('[BG_LOCATION][batch_result]', {
         userId,
@@ -1696,7 +2627,9 @@ export const recordLocationBatch = mutation({
         droppedDedupe,
         droppedStale,
         droppedFuture,
+        droppedPrivacyZone,
         droppedInvalid,
+        droppedSuspiciousLocation,
         sources: Array.from(sources),
       });
     }
@@ -1704,7 +2637,8 @@ export const recordLocationBatch = mutation({
     // Only continue to user-doc update + detection if at least one sample
     // was accepted. Otherwise the batch is effectively a no-op.
     if (!latestAcceptedSample) {
-      const droppedCount = droppedDedupe + droppedStale + droppedFuture + droppedInvalid;
+      const droppedCount =
+        droppedDedupe + droppedStale + droppedFuture + droppedInvalid + droppedPrivacyZone + droppedSuspiciousLocation;
       return {
         success: true,
         accepted: 0,
@@ -1712,10 +2646,18 @@ export const recordLocationBatch = mutation({
         droppedStale,
         droppedFuture,
         droppedDedupe,
+        droppedPrivacyZone,
         duplicateCount,
         droppedInvalid,
+        droppedSuspiciousLocation,
         droppedCount,
         skippedCount: droppedCount + duplicateCount,
+        reason:
+          droppedSuspiciousLocation > 0
+            ? 'suspicious_location'
+            : droppedPrivacyZone > 0
+              ? 'privacy_zone'
+              : undefined,
       };
     }
 
@@ -1746,15 +2688,18 @@ export const recordLocationBatch = mutation({
       accuracy: latestAcceptedSample.accuracy,
     });
 
-    const droppedCount = droppedDedupe + droppedStale + droppedFuture + droppedInvalid;
+    const droppedCount =
+      droppedDedupe + droppedStale + droppedFuture + droppedInvalid + droppedPrivacyZone + droppedSuspiciousLocation;
     return {
       success: true,
       accepted,
       droppedStale,
       droppedFuture,
       droppedDedupe,
+      droppedPrivacyZone,
       duplicateCount,
       droppedInvalid,
+      droppedSuspiciousLocation,
       droppedCount,
       skippedCount: droppedCount + duplicateCount,
       acceptedCount: accepted,
@@ -1794,6 +2739,10 @@ async function detectCrossingsForSample(
   const windowEnd = sampleTime + SAMPLE_TIME_WINDOW_MS;
 
   if (viewer.incognitoMode === true) {
+    return { crossingsWritten: 0 };
+  }
+  if (await isPointInsideUserPrivacyZone(ctx, viewerId, lat, lng)) {
+    logPrivacyZoneSkip('detectCrossingsForSample', viewerId);
     return { crossingsWritten: 0 };
   }
 
@@ -1846,6 +2795,16 @@ async function detectCrossingsForSample(
   type Candidate = { peerId: string; peerSample: SampleRow; distance: number };
   const candidates: Candidate[] = [];
   for (const [peerId, peerSample] of latestByPeer) {
+    if (
+      await isPointInsideUserPrivacyZone(
+        ctx,
+        peerId as Id<'users'>,
+        peerSample.lat,
+        peerSample.lng,
+      )
+    ) {
+      continue;
+    }
     const distance = calculateDistanceMeters(lat, lng, peerSample.lat, peerSample.lng);
     if (distance >= CROSSED_MIN_METERS && distance <= CROSSED_MAX_METERS) {
       candidates.push({ peerId, peerSample, distance });
@@ -1916,21 +2875,42 @@ async function detectCrossingsForSample(
       .first();
 
     if (crossedPath) {
-      if (now - crossedPath.lastCrossedAt < NOTIFICATION_COOLDOWN_MS) {
-        continue; // pair cooldown
+      if (now - crossedPath.lastCrossedAt < CROSSED_PATH_WRITE_COOLDOWN_MS) {
+        continue; // pair write cooldown (1h)
       }
       const approxLocation = roundToGrid(lat, lng);
-      await ctx.db.patch(crossedPath._id, {
+      const updates: Record<string, unknown> = {
         count: crossedPath.count + 1,
         lastCrossedAt: now,
         // Legacy coordinate fields store grid-snapped approximate crossing
-        // coordinates only. Never write raw GPS here and never return these
-        // fields from public queries.
+        // coordinates only. They hold the LATEST crossing location and are
+        // not used as the marker source. Never write raw GPS here and never
+        // return these fields from public queries.
         crossingLatitude: approxLocation.lat,
         crossingLongitude: approxLocation.lng,
-      });
+      };
+      // STABILITY FIX (Crossed Paths): Lazy back-fill immutable first-crossing
+      // fields for legacy rows. Once set, these fields are NEVER patched again.
+      const cp = crossedPath as Doc<'crossedPaths'> & {
+        firstCrossedAt?: number;
+        firstCrossingLatitude?: number;
+        firstCrossingLongitude?: number;
+      };
+      if (typeof cp.firstCrossedAt !== 'number') {
+        updates.firstCrossedAt = now;
+      }
+      if (
+        typeof cp.firstCrossingLatitude !== 'number' ||
+        typeof cp.firstCrossingLongitude !== 'number'
+      ) {
+        updates.firstCrossingLatitude = approxLocation.lat;
+        updates.firstCrossingLongitude = approxLocation.lng;
+      }
+      await ctx.db.patch(crossedPath._id, updates);
     } else {
       const approxLocation = roundToGrid(lat, lng);
+      // STABILITY FIX (Crossed Paths): Set immutable first-crossing fields
+      // on first insert.
       await ctx.db.insert('crossedPaths', {
         user1Id,
         user2Id,
@@ -1938,6 +2918,9 @@ async function detectCrossingsForSample(
         lastCrossedAt: now,
         crossingLatitude: approxLocation.lat,
         crossingLongitude: approxLocation.lng,
+        firstCrossedAt: now,
+        firstCrossingLatitude: approxLocation.lat,
+        firstCrossingLongitude: approxLocation.lng,
       });
     }
 
@@ -1951,7 +2934,7 @@ async function detectCrossingsForSample(
         (a: Doc<'crossPathHistory'>, b: Doc<'crossPathHistory'>) =>
           b.createdAt - a.createdAt,
       )[0] ?? null;
-    if (existingHistory && now - existingHistory.createdAt < NOTIFICATION_COOLDOWN_MS) {
+    if (existingHistory && now - existingHistory.createdAt < CROSSED_PATH_WRITE_COOLDOWN_MS) {
       continue;
     }
 
@@ -2017,7 +3000,7 @@ async function detectCrossingsForSample(
     if (!currentCrossedPath) continue;
 
     const canNotify = !currentCrossedPath.lastNotifiedAt ||
-      now - currentCrossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS;
+      now - currentCrossedPath.lastNotifiedAt >= CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS;
     if (!canNotify) continue;
 
     const user1Dismissed = isPairDismissedForViewer(currentCrossedPath, user1Id);
@@ -2030,17 +3013,20 @@ async function detectCrossingsForSample(
     const crossingCount = currentCrossedPath.count;
     let title: string;
     let body: string;
+    // Use capped display ("1" / "2" / "3+") in user-visible body text so
+    // we never reveal raw crossing counts to clients (Fix 4).
+    const crossingCountDisplay = getCrossingCountDisplay(crossingCount);
     if (crossingCount === 1) {
       title = 'Someone crossed your path';
       body = `${reasonText}`;
     } else if (crossingCount < 5) {
       title = 'Someone interesting crossed your path';
-      body = `You've crossed paths ${crossingCount} times. ${reasonText}`;
+      body = `You've crossed paths ${crossingCountDisplay} times. ${reasonText}`;
     } else {
       title = 'You keep crossing paths with someone';
-      body = `${crossingCount} times now! ${reasonText}. Maybe say hi?`;
+      body = `${crossingCountDisplay} times now! ${reasonText}. Maybe say hi?`;
     }
-    const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id, now);
+    const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id);
 
     for (const [recipient, other] of [
       [user1Id, user2Id],
@@ -2066,7 +3052,7 @@ async function detectCrossingsForSample(
           .collect()
       ).length;
       const shouldNotify = recentCount < MAX_NOTIFICATIONS_PER_DAY &&
-        (!existing || now - existing.createdAt >= NOTIFICATION_COOLDOWN_MS);
+        (!existing || now - existing.createdAt >= CROSSED_PATH_PAIR_NOTIFICATION_COOLDOWN_MS);
       if (!shouldNotify) continue;
       if (existing) {
         await ctx.db.patch(existing._id, {
@@ -2176,6 +3162,10 @@ export const getNearbyUsers = query({
     ]);
 
     const latestHistoryByUser = new Map<string, Doc<'crossPathHistory'>>();
+    // STABILITY FIX (Crossed Paths): Track the EARLIEST history entry per
+    // pair as well. We anchor the marker to this immutable origin event when
+    // the pair record's firstCrossing* fields are absent (legacy rows).
+    const earliestHistoryByUser = new Map<string, Doc<'crossPathHistory'>>();
     for (const entry of [...asUser1, ...asUser2]) {
       if (entry.expiresAt <= now) continue;
       const isUser1 = entry.user1Id === userId;
@@ -2192,6 +3182,10 @@ export const getNearbyUsers = query({
       const previous = latestHistoryByUser.get(otherUserId as string);
       if (!previous || entry.createdAt > previous.createdAt) {
         latestHistoryByUser.set(otherUserId as string, entry);
+      }
+      const previousEarliest = earliestHistoryByUser.get(otherUserId as string);
+      if (!previousEarliest || entry.createdAt < previousEarliest.createdAt) {
+        earliestHistoryByUser.set(otherUserId as string, entry);
       }
     }
 
@@ -2305,12 +3299,26 @@ export const getNearbyUsers = query({
           ? 'earlier'
           : 'stale';
 
-      // Start from the stored approximate crossed-path event coordinate.
-      // Strong Privacy Mode shifts the approximate cell again, then re-snaps.
-      let cellLat = entry.crossedLatApprox!;
-      let cellLng = entry.crossedLngApprox!;
+      // STABILITY FIX (Crossed Paths): Anchor the marker to the immutable
+      // first-crossing point so the pin does NOT move on repeat crossings.
+      // Resolution order (see pickStableCrossingCoords):
+      //   1. crossedPaths.firstCrossingLat/Long (set on first crossing).
+      //   2. earliest crossPathHistory entry (immutable per-event approx).
+      //   3. legacy crossedPaths.crossingLat/Long (latest; only as fallback).
+      //   4. latest crossPathHistory entry as a final fallback.
+      const earliestEntry = earliestHistoryByUser.get(otherUserId);
+      const stableCoords = pickStableCrossingCoords(
+        crossedPath,
+        earliestEntry,
+        entry,
+      );
+      if (!stableCoords) continue;
+      let cellLat = stableCoords.lat;
+      let cellLng = stableCoords.lng;
       if (user.strongPrivacyMode === true) {
-        const seed = simpleHash(`${String(user._id)}:${String(entry._id)}`);
+        // Pair-stable seed so the Strong Privacy fuzz does NOT change when a
+        // new crossPathHistory row is inserted for the same pair.
+        const seed = simpleHash(`${String(user._id)}:pair:${String(crossedPath?._id ?? otherUserId)}`);
         const bearingRad = (seed % 360) * (Math.PI / 180);
         const distanceMeters = 200 + (seed % 201);
         const fuzzed = offsetCoords(cellLat, cellLng, distanceMeters, bearingRad);
@@ -2319,10 +3327,17 @@ export const getNearbyUsers = query({
         cellLng = resnapped.lng;
       }
 
-      // Event-bound seed: stable for this crossed-path event and unrelated to
-      // the candidate's current/latest location.
-      const displaySeed = `crossed:${String(entry._id)}:${entry.createdAt}`;
-      const display = makeDisplayLatLng(cellLat, cellLng, displaySeed);
+      // STABILITY FIX (Crossed Paths): Pair-stable jitter seed. The previous
+      // event-bound seed (`crossed:${entry._id}:${entry.createdAt}`) caused
+      // the marker to wobble whenever a new crossPathHistory entry was
+      // inserted for the same pair. Anchoring on the pair record id (or the
+      // ordered pair as a fallback) keeps the displayed point stable across
+      // refreshes and across repeat crossings while still randomising
+      // *inside* the same ~300 m grid cell for privacy.
+      const pairStableSeedKey = crossedPath?._id
+        ? `crossed-pair:${String(crossedPath._id)}`
+        : `crossed-pair:${String(userId)}:${String(otherUserId)}`;
+      const display = makeDisplayLatLng(cellLat, cellLng, pairStableSeedKey);
       const cellId = makeCellId(cellLat, cellLng);
 
       let distanceBucket: NearbyDistanceBucket | undefined;
@@ -2390,6 +3405,9 @@ export const getNearbyUsers = query({
           strongPrivacyMode: user.strongPrivacyMode ?? false,
           hideDistance: user.hideDistance ?? false,
           crossingCount,
+          // Capped display ("1" / "2" / "3+") — clients should prefer this
+          // over crossingCount for any UI string.
+          crossingCountDisplay: getCrossingCountDisplay(crossingCount),
           lastCrossedAt,
           areaName: entry.areaName,
           // Phase-3 preview payload.
@@ -2403,12 +3421,85 @@ export const getNearbyUsers = query({
     // ranked by latest published location or exact distance.
     results.sort((a, b) => b.crossedAt - a.crossedAt);
 
-    return results.map((result) => result.item);
+    // Fix 7 — apply per-viewer daily distinct crossed-profile cap. Existing
+    // pairs and same-day re-displays pass through; brand-new pairs consume
+    // one slot until the daily quota is exhausted.
+    const flatResults = results.map((result) => result.item);
+    return await applyDailyDistinctCrossedProfileCap(ctx, userId, flatResults, now);
   },
 });
 
 // ---------------------------------------------------------------------------
-// getCrossPathHistory — crossed paths history list (14-day retention)
+// Fix 7 — markDailyCrossedProfilesShown
+// Persist the set of crossed profiles a viewer actually saw today so the
+// daily-cap helper above can correctly count "new" surfaces vs re-displays.
+// Clients call this after the Nearby list renders. The mutation is
+// idempotent: re-marking the same pair on the same UTC day patches
+// lastShownAt without consuming an additional slot.
+// ---------------------------------------------------------------------------
+export const markDailyCrossedProfilesShown = mutation({
+  args: {
+    authUserId: v.string(),
+    targetUserIds: v.array(v.id('users')),
+  },
+  handler: async (ctx, args) => {
+    const viewerId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!viewerId) {
+      return { success: false, reason: 'unauthorized' };
+    }
+
+    const now = Date.now();
+    const dateKey = getDailyShownDateKey(now);
+    // Bound the work per call so a misbehaving client cannot make us scan
+    // unbounded pairs in a single mutation.
+    const uniqueTargetIds = [...new Set(args.targetUserIds.map(String))]
+      .filter((id) => id !== (viewerId as string))
+      .slice(0, MAX_DAILY_NEW_CROSSED_PROFILES * 2) as Id<'users'>[];
+
+    let inserted = 0;
+    let updated = 0;
+
+    for (const targetUserId of uniqueTargetIds) {
+      const pairKey = makeDailyShownPairKey(viewerId, targetUserId);
+      const existingShown = await ctx.db
+        .query('crossedPathDailyShown')
+        .withIndex('by_viewer_date_pair', (q) =>
+          q.eq('viewerId', viewerId).eq('dateKey', dateKey).eq('pairKey', pairKey),
+        )
+        .first();
+      const existingCrossedPath = await getCrossedPathPair(ctx, viewerId, targetUserId);
+      const wasExistingCrossedPath = existingCrossedPath !== null;
+
+      if (existingShown) {
+        await ctx.db.patch(existingShown._id, {
+          lastShownAt: now,
+          // Latch this flag — once a pair was "free" because it was already
+          // crossed, future re-displays should remain "free" even if the
+          // crossedPaths row is later removed.
+          wasExistingCrossedPath:
+            existingShown.wasExistingCrossedPath === true || wasExistingCrossedPath,
+        });
+        updated++;
+      } else {
+        await ctx.db.insert('crossedPathDailyShown', {
+          viewerId,
+          dateKey,
+          pairKey,
+          targetUserId,
+          firstShownAt: now,
+          lastShownAt: now,
+          wasExistingCrossedPath,
+        });
+        inserted++;
+      }
+    }
+
+    return { success: true, inserted, updated };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// getCrossPathHistory — crossed paths history list (30-day retention)
 // Returns crossed paths with approximate location and reason tags.
 // Filters out hidden entries for the requesting user.
 //
@@ -2572,10 +3663,12 @@ export const getCrossPathHistory = query({
         ? formatReasonForNotification(reasonTags[0])
         : null;
 
-      // Build "why am I seeing this" explanation
+      // Build "why am I seeing this" explanation. Use the bucketed display so
+      // we never leak raw crossing counts (Fix 4).
+      const crossingCountDisplayForWhy = getCrossingCountDisplay(crossingCount);
       let whyExplanation: string;
       if (crossingCount > 1) {
-        whyExplanation = `You've crossed paths ${crossingCount} times in similar areas. ${reasonText || 'You have something in common.'}`;
+        whyExplanation = `You've crossed paths ${crossingCountDisplayForWhy} times in similar areas. ${reasonText || 'You have something in common.'}`;
       } else {
         whyExplanation = `You were in the same area within the last 24 hours. ${reasonText || 'You have something in common.'}`;
       }
@@ -2641,6 +3734,9 @@ export const getCrossPathHistory = query({
         crossedLngApprox: approxLng,
         // Crossing count (for UI display)
         crossingCount,
+        // Capped display ("1" / "2" / "3+") — clients should prefer this
+        // over crossingCount for any UI string.
+        crossingCountDisplay: getCrossingCountDisplay(crossingCount),
         // Distance range (e.g., "4-5 km")
         distanceRange,
         // Relative time (e.g., "today", "yesterday", "3 days ago")
@@ -3047,6 +4143,9 @@ export const getCrossedPaths = query({
       result.push({
         id: cp._id,
         count: cp.count,
+        // Capped display — clients never see the precise count once it
+        // crosses 3. Use this for any UI string.
+        crossingCountDisplay: getCrossingCountDisplay(cp.count),
         lastCrossedAt: cp.lastCrossedAt,
         relativeTime,
         distanceRange,

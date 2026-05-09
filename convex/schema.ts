@@ -244,6 +244,24 @@ export default defineSchema({
     nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true) — gates map visibility
     crossedPathsEnabled: v.optional(v.boolean()),     // LEGACY: superseded by recordCrossedPaths in Phase-2; kept for back-compat and migrations only, no longer read
     recordCrossedPaths: v.optional(v.boolean()),      // Phase-2: separate opt-in for crossed-paths pipeline (default true when undefined)
+    // Server-side Nearby / Crossed Paths consent. A user is treated as
+    // un-consented (and all location writes are dropped) unless both fields
+    // are present and nearbyConsentVersion matches the current
+    // NEARBY_CONSENT_VERSION constant in convex/crossedPaths.ts.
+    nearbyConsentAt: v.optional(v.number()),
+    nearbyConsentVersion: v.optional(v.string()),
+    // Fix 3 — Impossible Travel / GPS spoof protection (server-only).
+    // Backend tracking for impossible-travel rejects. None of these are
+    // exposed to clients. `locationLastRejectAt` is also used as a short
+    // dedupe window so a flood of rejects within a few seconds counts as one.
+    // `locationRejectWindowStartedAt` + `locationRejectCount` define a 24h
+    // sliding window — once 3 rejects accumulate inside the same window the
+    // user is flagged via `locationSpoofSuspect` (+ `locationSpoofSuspectAt`).
+    locationLastRejectAt: v.optional(v.number()),
+    locationRejectCount: v.optional(v.number()),
+    locationRejectWindowStartedAt: v.optional(v.number()),
+    locationSpoofSuspect: v.optional(v.boolean()),
+    locationSpoofSuspectAt: v.optional(v.number()),
     // Phase-1 Background Crossed Paths: iOS-only opt-in for Significant Location
     // Change-driven background sampling. Default is OFF; must be explicitly
     // enabled by the user via enableBackgroundLocation(). Android does NOT
@@ -1070,9 +1088,22 @@ export default defineSchema({
     lastLocation: v.optional(v.string()),
     unlockExpiresAt: v.optional(v.number()),
     // Legacy fields: store approximate/grid-snapped crossing coordinates only.
+    // These hold the LATEST crossing location and may be overwritten on
+    // repeat crossings. They MUST NOT be used as the marker source — use
+    // the immutable firstCrossing* fields below instead.
     // Public queries must never return these fields or raw user lat/lng.
     crossingLatitude: v.optional(v.number()),
     crossingLongitude: v.optional(v.number()),
+    // STABILITY FIX (Crossed Paths): Immutable first-crossing point. Set on
+    // the very first crossing for a pair (or lazily back-filled on the next
+    // crossing for legacy rows that pre-date these fields) and NEVER patched
+    // afterwards. Repeat crossings only update count + lastCrossedAt; the
+    // marker location is anchored to firstCrossingLatitude/Longitude so it
+    // never moves once a pair has crossed paths.
+    // Optional for backward compatibility with rows written before this fix.
+    firstCrossedAt: v.optional(v.number()),
+    firstCrossingLatitude: v.optional(v.number()),
+    firstCrossingLongitude: v.optional(v.number()),
     // BUGFIX #28: Track last notification time to prevent duplicate notifications
     lastNotifiedAt: v.optional(v.number()),
     // Pair-level viewer dismissals. If set, that viewer no longer sees this
@@ -1099,13 +1130,30 @@ export default defineSchema({
     hiddenByUser1: v.optional(v.boolean()),
     hiddenByUser2: v.optional(v.boolean()),
     createdAt: v.number(),
-    expiresAt: v.number(),            // auto-expire after 14 days
+    expiresAt: v.number(),            // auto-expire after 30 days
     lastNotifiedAt: v.optional(v.number()), // 24h cooldown tracking
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
     .index('by_users', ['user1Id', 'user2Id'])
     .index('by_expires', ['expiresAt']),
+
+  // Fix 7 — Daily distinct crossed-profile cap.
+  // Private backend-only tracking for the daily cap on newly surfaced
+  // Nearby/Crossed Paths profiles. Not exposed to clients.
+  crossedPathDailyShown: defineTable({
+    viewerId: v.id('users'),
+    dateKey: v.string(),                    // ISO date "YYYY-MM-DD" (UTC slice)
+    pairKey: v.string(),                    // ordered "user1Id:user2Id"
+    targetUserId: v.id('users'),
+    firstShownAt: v.number(),
+    lastShownAt: v.number(),
+    // True when the pair already had a crossedPaths row at the time we surfaced
+    // it — those don't consume daily-new slots.
+    wasExistingCrossedPath: v.optional(v.boolean()),
+  })
+    .index('by_viewer_date', ['viewerId', 'dateKey'])
+    .index('by_viewer_date_pair', ['viewerId', 'dateKey', 'pairKey']),
 
   // Phase-1 Background Crossed Paths: short-lived ring-buffer of location
   // samples (foreground, background, SLC). Used by recordLocationBatch +
@@ -1127,6 +1175,22 @@ export default defineSchema({
     .index('by_user_capturedAt', ['userId', 'capturedAt'])
     .index('by_capturedAt', ['capturedAt'])
     .index('by_expires', ['expiresAt']),
+
+  // Privacy Zones
+  // User-owned private areas such as Home, Work, Hostel, College, or Gym.
+  // Crossed Paths / Nearby location writes must skip samples inside the
+  // current user's own zones. These coordinates are only returned to the
+  // owning user through crossedPaths privacy-zone APIs.
+  privacyZones: defineTable({
+    userId: v.id('users'),
+    label: v.string(),
+    latitude: v.number(),
+    longitude: v.number(),
+    radiusMeters: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_userId', ['userId']),
 
   // Dares table (Truth or Dare feature)
   dares: defineTable({

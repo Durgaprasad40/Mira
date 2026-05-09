@@ -45,6 +45,9 @@ export interface NearbyPreviewData {
   isVerified?: boolean;
   verificationStatus?: string | null;
   crossingCount?: number;
+  // Capped display ("1" / "2" / "3+") — clients should prefer this over
+  // crossingCount for any UI string (Fix 4: no raw counts to displays).
+  crossingCountDisplay?: string;
   lastCrossedAt?: number;
   areaName?: string;
 }
@@ -70,10 +73,14 @@ function prettifyInterest(raw: string): string {
     .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-function formatCrossingCount(count?: number): string | null {
+function formatCrossingCount(count?: number, display?: string): string | null {
   if (typeof count !== 'number' || count < 1) return null;
   const safeCount = Math.floor(count);
-  return safeCount === 1 ? 'Crossed once' : `Crossed ${safeCount} times`;
+  if (safeCount === 1) return 'Crossed once';
+  // Prefer the server-provided bucketed display ("2" / "3+") so we never leak
+  // raw counts in user-visible strings (Fix 4).
+  const label = display && display.trim().length > 0 ? display : String(safeCount);
+  return `Crossed ${label} times`;
 }
 
 function formatLastCrossed(timestamp?: number): string | null {
@@ -129,7 +136,7 @@ export function NearbyPreviewCard({
   if (!user) return null;
 
   const freshness = user.freshnessLabel ? FRESHNESS_COPY[user.freshnessLabel] : null;
-  const crossingCountText = formatCrossingCount(user.crossingCount);
+  const crossingCountText = formatCrossingCount(user.crossingCount, user.crossingCountDisplay);
   const lastCrossedText = formatLastCrossed(user.lastCrossedAt);
   const areaName = user.areaName?.trim();
   const hasCrossingMeta = Boolean(crossingCountText || areaName || lastCrossedText);

@@ -7,13 +7,6 @@ import { initSentry, captureException, setUserContext, clearUserContext, trackRo
 import { AppErrorBoundary } from "@/components/safety/AppErrorBoundary";
 import { DEBUG_ONBOARDING_HYDRATION, DEBUG_STARTUP } from "@/lib/debugFlags";
 
-// Phase-1 Background Crossed Paths (iOS): side-effect import registers the
-// TaskManager task definition at module load. Required so the OS can resolve
-// the task name when the app is launched from a terminated state by a
-// Significant Location Change. Does NOT start updates — enableBackgroundLocation()
-// is the only way to activate background sampling.
-import "@/tasks/backgroundLocationTask";
-
 // Initialize Sentry FIRST, before any other code runs
 // This ensures we catch errors during app initialization
 initSentry();

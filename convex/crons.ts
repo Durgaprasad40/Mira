@@ -151,7 +151,7 @@ crons.daily(
 );
 
 // Nearby/Crossed Paths: Cleanup expired crossed path history every 6 hours
-// Removes history entries past their 14-day expiration
+// Removes history entries past their 30-day expiration
 crons.interval(
   'cleanup-expired-crossed-path-history',
   { hours: 6 },

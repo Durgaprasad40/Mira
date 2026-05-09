@@ -52,6 +52,9 @@ interface CrossedPathItem {
   otherUserAge: number;
   areaName: string;
   crossingCount: number;
+  // Capped display ("1" / "2" / "3+") — clients should prefer this over
+  // crossingCount for any UI string (Fix 4: no raw counts to displays).
+  crossingCountDisplay?: string;
   distanceRange: string | null;
   relativeTime: string;
   reasonTags: string[];
@@ -178,6 +181,12 @@ export default function CrossedPathsScreen() {
   // Mutations for hide/delete (live mode only)
   const hideCrossedPathMutation = useMutation(api.crossedPaths.hideCrossedPath);
   const deleteCrossedPathMutation = useMutation(api.crossedPaths.deleteCrossedPath);
+  // Fix 7 — daily distinct crossed-profile cap. Best-effort write so the
+  // backend can correctly count "new" surfaces vs re-displays.
+  const markDailyCrossedProfilesShown = useMutation(
+    api.crossedPaths.markDailyCrossedProfilesShown,
+  );
+  const markedDailyShownKeyRef = useRef<string>('');
 
   // Loading state
   const isLoading = !isDemo && crossedPathsQuery === undefined;
@@ -201,6 +210,38 @@ export default function CrossedPathsScreen() {
     }
     return crossedPathsQuery ?? [];
   }, [isDemo, crossedPathsQuery, hiddenDemoIds]);
+
+  // Fix 7 — after the crossed-paths list renders, tell the backend which
+  // distinct profiles the viewer saw today. This is best-effort: a failure
+  // does not affect the UI, but it does let the daily cap correctly count
+  // "new" surfaces vs re-displays. The markerKey guard prevents the same
+  // identical list from being re-marked on every render.
+  useEffect(() => {
+    if (isDemo || !userId || crossedPaths.length === 0) return;
+    const targetUserIds = Array.from(
+      new Set(
+        crossedPaths
+          .map((item) => item.otherUserId)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0),
+      ),
+    );
+    if (targetUserIds.length === 0) return;
+
+    const markerKey = `${userId}:${targetUserIds.join('|')}`;
+    if (markedDailyShownKeyRef.current === markerKey) return;
+    markedDailyShownKeyRef.current = markerKey;
+
+    markDailyCrossedProfilesShown({
+      authUserId: userId,
+      targetUserIds: targetUserIds as any,
+    }).catch((err) => {
+      if (__DEV__) {
+        console.log('[CROSSED_PATHS] daily shown tracking skipped', {
+          reason: String(err).slice(0, 80),
+        });
+      }
+    });
+  }, [isDemo, userId, crossedPaths, markDailyCrossedProfilesShown]);
 
   // ---------------------------------------------------------------------------
   // Section Data - Split into "Just Crossed", "Frequent Crosses", "Recent"
@@ -475,7 +516,9 @@ export default function CrossedPathsScreen() {
               {item.crossingCount > 1 && (
                 <View style={styles.crossingBadge}>
                   <Ionicons name="footsteps" size={12} color={COLORS.primary} />
-                  <Text style={styles.crossingCount}>{item.crossingCount}x</Text>
+                  <Text style={styles.crossingCount}>
+                    {item.crossingCountDisplay ?? String(item.crossingCount)}x
+                  </Text>
                 </View>
               )}
             </View>
@@ -605,7 +648,9 @@ export default function CrossedPathsScreen() {
             <View style={styles.frequentStatsRow}>
               <View style={styles.frequentCountBadge}>
                 <Ionicons name="footsteps" size={12} color="#fff" />
-                <Text style={styles.frequentCountText}>Crossed {item.crossingCount}x</Text>
+                <Text style={styles.frequentCountText}>
+                  Crossed {item.crossingCountDisplay ?? String(item.crossingCount)}x
+                </Text>
               </View>
             </View>
             <Text style={styles.frequentTime}>Last seen {item.relativeTime.toLowerCase()}</Text>

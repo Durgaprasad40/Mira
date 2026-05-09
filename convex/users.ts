@@ -961,6 +961,38 @@ export const toggleIncognito = mutation({
  * All fields are optional - only provided fields will be updated.
  * P1 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
  */
+/**
+ * Server-side acceptance of the current Nearby / Crossed Paths consent
+ * disclosure. Stamps `nearbyConsentAt` and `nearbyConsentVersion` on the
+ * user; the location pipeline (publishLocation / recordLocation /
+ * recordLocationBatch / detectCrossedUsers) drops writes when these fields
+ * do not match the active NEARBY_CONSENT_VERSION.
+ *
+ * Also flips `nearbyEnabled` to true since acceptance implies opting in.
+ */
+export const acceptNearbyConsent = mutation({
+  args: {
+    authUserId: v.string(),
+    consentVersion: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) throw new Error('Unauthorized: user not found');
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error('User not found');
+
+    const now = Date.now();
+    await ctx.db.patch(userId, {
+      nearbyConsentAt: now,
+      nearbyConsentVersion: args.consentVersion,
+      nearbyEnabled: true,
+    });
+
+    return { success: true, nearbyConsentAt: now };
+  },
+});
+
 export const updateNearbySettings = mutation({
   args: {
     authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
@@ -1428,7 +1460,15 @@ export const blockUser = mutation({
       )
       .first();
 
-    if (existing) return { success: true };
+    if (existing) {
+      // Defensive idempotent re-purge: if a block row already exists, ensure
+      // any lingering crossed-paths state for the pair is also cleared.
+      await ctx.runMutation(internal.crossedPaths.purgeCrossedPathPairForBlock, {
+        userAId: blockerId,
+        userBId: blockedUserId,
+      });
+      return { success: true };
+    }
 
     await ctx.db.insert("blocks", {
       blockerId,
@@ -1442,6 +1482,13 @@ export const blockUser = mutation({
       const prev = typeof blockedUser.blockCount === 'number' ? blockedUser.blockCount : 0;
       await ctx.db.patch(blockedUserId, { blockCount: prev + 1 });
     }
+
+    // Purge any existing crossed-paths state for this pair so the blocked
+    // user no longer surfaces in Crossed Paths or notifications.
+    await ctx.runMutation(internal.crossedPaths.purgeCrossedPathPairForBlock, {
+      userAId: blockerId,
+      userBId: blockedUserId,
+    });
 
     return { success: true };
   },
