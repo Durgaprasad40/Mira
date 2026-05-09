@@ -60,6 +60,10 @@ function getRevealStatusText(
   }
 }
 
+function getTaggedUserId(confession: any): string | undefined {
+  return confession?.taggedUserId ?? confession?.targetUserId;
+}
+
 export default function ConfessionChatScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -212,8 +216,9 @@ export default function ConfessionChatScreen() {
   const handleViewRevealProfile = useCallback(() => {
     if (!chat || !confession) return;
     // Determine who the other person is
-    const isTagged = confession.targetUserId === currentUserId;
-    const otherUserId = isTagged ? confession.userId : confession.targetUserId;
+    const taggedUserId = getTaggedUserId(confession);
+    const isTagged = taggedUserId === currentUserId;
+    const otherUserId = isTagged ? confession.userId : taggedUserId;
     if (!otherUserId) return;
 
     // Navigate to profile with confess_reveal mode
@@ -248,7 +253,7 @@ export default function ConfessionChatScreen() {
 
   // Per spec: Only the TAGGED person can request reveal
   // Confessor (author) can only accept/decline after tagged person requests
-  const isTaggedPerson = confession?.targetUserId === currentUserId;
+  const isTaggedPerson = getTaggedUserId(confession) === currentUserId;
   const isConfessor = confession?.userId === currentUserId;
 
   // Track reveal agreement states based on chat role (initiator/responder in chat)

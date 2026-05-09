@@ -50,6 +50,8 @@ export interface TaggedConfessionItem {
   isExpired: boolean;
   replyCount: number;
   reactionCount: number;
+  taggedUserId?: string;
+  taggedUserName?: string;
   // P1-PREVIEW FIX: Track if one-time preview has been consumed (persisted on backend)
   previewConsumed?: boolean;
 }
@@ -472,19 +474,25 @@ export function buildDemoTaggedConfessions(
   now: number = Date.now(),
 ): TaggedConfessionItem[] {
   return confessions
-    .filter((c) => c.targetUserId === currentUserId)
-    .map((c) => ({
-      notificationId: `notif_${c.id}`,
-      confessionId: c.id,
-      seen: seenIds.has(c.id),
-      notificationCreatedAt: c.createdAt,
-      confessionText: c.text,
-      confessionMood: c.mood,
-      confessionCreatedAt: c.createdAt,
-      confessionExpiresAt: c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS),
-      isExpired: now > (c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS)),
-      replyCount: c.replyCount,
-      reactionCount: c.reactionCount,
-    }))
+    .filter((c) => (c.taggedUserId ?? (c as any).targetUserId) === currentUserId)
+    .map((c) => {
+      const taggedUserId = c.taggedUserId ?? (c as any).targetUserId;
+      const taggedUserName = c.taggedUserName ?? (c as any).targetUserName;
+      return {
+        notificationId: `notif_${c.id}`,
+        confessionId: c.id,
+        seen: seenIds.has(c.id),
+        notificationCreatedAt: c.createdAt,
+        confessionText: c.text,
+        confessionMood: c.mood,
+        confessionCreatedAt: c.createdAt,
+        confessionExpiresAt: c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS),
+        isExpired: now > (c.expiresAt ?? (c.createdAt + TWENTY_FOUR_HOURS_MS)),
+        replyCount: c.replyCount,
+        reactionCount: c.reactionCount,
+        taggedUserId,
+        taggedUserName,
+      };
+    })
     .sort((a, b) => b.notificationCreatedAt - a.notificationCreatedAt);
 }

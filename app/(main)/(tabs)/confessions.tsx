@@ -59,8 +59,8 @@ type FeedConfession = {
   authorPhotoUrl?: string;
   authorAge?: number;
   authorGender?: string;
-  targetUserId?: string;
-  targetUserName?: string;
+  taggedUserId?: string;
+  taggedUserName?: string;
   topEmojis: { emoji: string; count: number }[];
   replyPreviews: Array<{ text: string; isAnonymous: boolean; type: string; createdAt: number }>;
   replyCount: number;
@@ -82,6 +82,13 @@ type TaggedConfessionItem = {
   isExpired: boolean;
   replyCount: number;
   reactionCount: number;
+  authorVisibility?: 'anonymous' | 'open' | 'blur_photo';
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+  taggedUserId?: string;
+  taggedUserName?: string;
 };
 
 // P0/P1 MENTION_RULE:
@@ -327,8 +334,8 @@ export default function ConfessionsScreen() {
           authorPhotoUrl: confession.authorPhotoUrl,
           authorAge: confession.authorAge,
           authorGender: confession.authorGender,
-          targetUserId: confession.taggedUserId,
-          targetUserName: confession.taggedUserName,
+          taggedUserId: confession.taggedUserId,
+          taggedUserName: confession.taggedUserName,
           topEmojis: confession.topEmojis ?? [],
           replyPreviews: confession.replyPreviews ?? [],
           replyCount: confession.replyCount ?? 0,
@@ -358,8 +365,8 @@ export default function ConfessionsScreen() {
         authorPhotoUrl: confession.authorPhotoUrl,
         authorAge: confession.authorAge,
         authorGender: confession.authorGender,
-        targetUserId: confession.targetUserId,
-        targetUserName: confession.targetUserName,
+        taggedUserId: confession.taggedUserId ?? confession.targetUserId,
+        taggedUserName: confession.taggedUserName ?? confession.targetUserName,
         topEmojis: confession.topEmojis ?? [],
         replyPreviews: confession.replyPreviews ?? [],
         replyCount: confession.replyCount ?? 0,
@@ -384,14 +391,23 @@ export default function ConfessionsScreen() {
         isExpired: item.isExpired,
         replyCount: item.replyCount ?? 0,
         reactionCount: item.reactionCount ?? 0,
+        authorVisibility: item.authorVisibility,
+        authorName: item.authorName,
+        authorPhotoUrl: item.authorPhotoUrl,
+        authorAge: item.authorAge,
+        authorGender: item.authorGender,
+        taggedUserId: item.taggedUserId,
+        taggedUserName: item.taggedUserName,
       }));
     }
 
     return demoConfessions
-      .filter((confession: any) => confession.targetUserId === currentUserId)
+      .filter((confession: any) => (confession.taggedUserId ?? confession.targetUserId) === currentUserId)
       .sort((a: any, b: any) => b.createdAt - a.createdAt)
       .map((confession: any) => {
         const expiresAt = confession.expiresAt ?? confession.createdAt + 24 * 60 * 60 * 1000;
+        const taggedUserId = confession.taggedUserId ?? confession.targetUserId;
+        const taggedUserName = confession.taggedUserName ?? confession.targetUserName;
         return {
           notificationId: confession.id,
           confessionId: confession.id,
@@ -404,6 +420,13 @@ export default function ConfessionsScreen() {
           isExpired: expiresAt <= Date.now(),
           replyCount: confession.replyCount ?? 0,
           reactionCount: confession.reactionCount ?? 0,
+          authorVisibility: confession.authorVisibility ?? (confession.isAnonymous ? 'anonymous' : 'open'),
+          authorName: confession.authorName,
+          authorPhotoUrl: confession.authorPhotoUrl,
+          authorAge: confession.authorAge,
+          authorGender: confession.authorGender,
+          taggedUserId,
+          taggedUserName,
         };
       });
   }, [currentUserId, demoConfessions, liveTaggedConfessions, seenTaggedConfessionIds]);
@@ -641,8 +664,8 @@ export default function ConfessionsScreen() {
           createdAt,
           expiresAt: createdAt + 24 * 60 * 60 * 1000,
           revealPolicy: 'never',
-          targetUserId: taggedUser?.id,
-          targetUserName: taggedUser?.name,
+          taggedUserId: taggedUser?.id,
+          taggedUserName: taggedUser?.name,
           ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
           ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
           ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
@@ -691,11 +714,37 @@ export default function ConfessionsScreen() {
   ]);
 
   const handleOpenTaggedSection = useCallback(() => {
+    const unreadActiveTaggedConfessions = taggedConfessions.filter((item) => !item.seen && !item.isExpired);
+    if (unreadActiveTaggedConfessions.length === 1) {
+      const singleUnread = unreadActiveTaggedConfessions[0];
+      if (!singleUnread) return;
+      if (isDemoMode) {
+        markTaggedConfessionSeen(singleUnread.confessionId);
+      } else if (currentUserId) {
+        markTaggedSeenMutation({
+          userId: currentUserId,
+          notificationIds: [singleUnread.notificationId as any],
+        }).catch(() => {
+          // Keep navigation usable even if badge clearing fails.
+        });
+      }
+      setShowTaggedSection(false);
+      safePush(
+        router,
+        {
+          pathname: '/(main)/confession-thread',
+          params: { confessionId: singleUnread.confessionId },
+        } as any,
+        'confessions->singleTaggedThread'
+      );
+      return;
+    }
+
     setShowTaggedSection(true);
     if (!currentUserId) return;
 
     if (isDemoMode) {
-      const unseenIds = taggedConfessions.filter((item) => !item.seen && !item.isExpired).map((item) => item.confessionId);
+      const unseenIds = unreadActiveTaggedConfessions.map((item) => item.confessionId);
       if (unseenIds.length > 0) {
         markAllTaggedConfessionsSeen(unseenIds);
       }
@@ -705,7 +754,7 @@ export default function ConfessionsScreen() {
     markTaggedSeenMutation({ userId: currentUserId }).catch(() => {
       // Keep the feed usable even if badge clearing fails.
     });
-  }, [currentUserId, isDemoMode, markAllTaggedConfessionsSeen, markTaggedSeenMutation, taggedConfessions]);
+  }, [currentUserId, isDemoMode, markAllTaggedConfessionsSeen, markTaggedConfessionSeen, markTaggedSeenMutation, router, taggedConfessions]);
 
   const handleOpenThread = useCallback((confessionId?: string | null) => {
     if (!confessionId) {
@@ -1254,7 +1303,7 @@ export default function ConfessionsScreen() {
           const userEmoji = isDemoMode
             ? (demoUserReactions[item.id] && isProbablyEmoji(demoUserReactions[item.id]!) ? demoUserReactions[item.id]! : null)
             : (liveUserReactions[item.id] ?? null);
-          const isTaggedForMe = item.targetUserId != null && item.targetUserId === effectiveViewerId;
+          const isTaggedForMe = item.taggedUserId != null && item.taggedUserId === effectiveViewerId;
           const isOwnerCard = item.userId === effectiveViewerId;
           const reviewStatus = isOwnerCard ? getReviewBadgeStatus(item) : undefined;
 
@@ -1282,8 +1331,8 @@ export default function ConfessionsScreen() {
                 authorGender={item.authorGender}
                 createdAt={item.createdAt}
                 isTaggedForMe={isTaggedForMe}
-                taggedUserId={item.targetUserId}
-                taggedUserName={item.targetUserName}
+                taggedUserId={item.taggedUserId}
+                taggedUserName={item.taggedUserName}
                 authorId={item.userId}
                 viewerId={effectiveViewerId ?? undefined}
                 // EXPLICIT INTERACTION CONTRACT for main feed (/confessions)
@@ -1295,8 +1344,8 @@ export default function ConfessionsScreen() {
                 onReact={() => handleOpenReactionPicker(item.id)}
                 onToggleEmoji={(emoji) => void toggleReaction(item.id, emoji)}
                 onTagPress={
-                  item.targetUserId
-                    ? () => void handleTagPress(item.id, item.targetUserId)
+                  item.taggedUserId
+                    ? () => void handleTagPress(item.id, item.taggedUserId)
                     : undefined
                 }
               />
@@ -1604,37 +1653,107 @@ export default function ConfessionsScreen() {
               keyExtractor={(item) => item.notificationId}
               contentContainerStyle={styles.taggedList}
               showsVerticalScrollIndicator={false}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[styles.taggedCard, item.isExpired && styles.taggedCardExpired]}
-                  activeOpacity={item.isExpired ? 1 : 0.82}
-                  onPress={() => handleSelectTaggedConfession(item)}
-                >
-                  <View style={styles.taggedCardHeader}>
-                    <Text maxFontSizeMultiplier={1.2} style={styles.taggedCardAuthor}>Anonymous</Text>
-                    <Text maxFontSizeMultiplier={1.2} style={styles.taggedCardTime}>{getTimeAgoSimple(item.confessionCreatedAt)}</Text>
-                    {!item.seen && !item.isExpired && <View style={styles.unseenDot} />}
-                    {item.isExpired && (
-                      <View style={styles.expiredPill}>
-                        <Text maxFontSizeMultiplier={1.2} style={styles.expiredPillText}>Expired</Text>
+              renderItem={({ item }) => {
+                const taggedAuthorVisibility = item.authorVisibility ?? 'anonymous';
+                const taggedAuthorIsAnonymous = taggedAuthorVisibility === 'anonymous';
+                const taggedAuthorIsBlurPhoto =
+                  (taggedAuthorVisibility as string) === 'blur_photo' ||
+                  (taggedAuthorVisibility as string) === 'blur';
+                const taggedAuthorGenderSymbol = taggedAuthorIsAnonymous
+                  ? null
+                  : getConfessGenderSymbol(item.authorGender);
+                const taggedAuthorDisplayName = taggedAuthorIsAnonymous
+                  ? 'Anonymous'
+                  : item.authorName || 'Someone';
+
+                return (
+                  <TouchableOpacity
+                    style={[styles.taggedCard, item.isExpired && styles.taggedCardExpired]}
+                    activeOpacity={item.isExpired ? 1 : 0.82}
+                    onPress={() => handleSelectTaggedConfession(item)}
+                  >
+                    <View style={styles.taggedCardHeader}>
+                      <View style={styles.taggedAuthorIdentity}>
+                        {taggedAuthorIsAnonymous ? (
+                          <View style={[styles.taggedAuthorAvatar, styles.taggedAuthorAvatarAnonymous]}>
+                            <Ionicons name="eye-off" size={10} color={COLORS.textMuted} />
+                          </View>
+                        ) : taggedAuthorIsBlurPhoto && item.authorPhotoUrl ? (
+                          <Image
+                            source={{ uri: item.authorPhotoUrl }}
+                            style={styles.taggedAuthorAvatarImage}
+                            contentFit="cover"
+                            blurRadius={BLUR_PHOTO_RADIUS}
+                          />
+                        ) : item.authorPhotoUrl ? (
+                          <Image
+                            source={{ uri: item.authorPhotoUrl }}
+                            style={styles.taggedAuthorAvatarImage}
+                            contentFit="cover"
+                          />
+                        ) : (
+                          <View style={styles.taggedAuthorAvatar}>
+                            <Ionicons name="person" size={10} color={COLORS.primary} />
+                          </View>
+                        )}
+                        <View style={styles.taggedAuthorIdentityText}>
+                          <Text
+                            maxFontSizeMultiplier={1.2}
+                            style={[
+                              styles.taggedCardAuthor,
+                              !taggedAuthorIsAnonymous && styles.taggedCardAuthorPublic,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {taggedAuthorDisplayName}
+                          </Text>
+                          {!taggedAuthorIsAnonymous && item.authorAge ? (
+                            <Text maxFontSizeMultiplier={1.2} style={styles.taggedAuthorAge}>
+                              , {item.authorAge}
+                            </Text>
+                          ) : null}
+                          {taggedAuthorGenderSymbol ? (
+                            <Text
+                              maxFontSizeMultiplier={1.2}
+                              style={[
+                                styles.taggedAuthorGenderSymbol,
+                                { color: taggedAuthorGenderSymbol.color },
+                              ]}
+                            >
+                              {taggedAuthorGenderSymbol.symbol}
+                            </Text>
+                          ) : null}
+                        </View>
+                        {taggedAuthorIsBlurPhoto ? (
+                          <View style={styles.taggedBlurBadge}>
+                            <Ionicons name="eye-off-outline" size={10} color={COLORS.textMuted} />
+                          </View>
+                        ) : null}
                       </View>
-                    )}
-                  </View>
-                  <Text maxFontSizeMultiplier={1.2} style={[styles.taggedCardText, item.isExpired && styles.taggedCardTextExpired]} numberOfLines={4}>
-                    {item.confessionText}
-                  </Text>
-                  <View style={styles.taggedMetaRow}>
-                    <View style={styles.taggedMetaItem}>
-                      <Ionicons name="heart" size={12} color={COLORS.primary} />
-                      <Text maxFontSizeMultiplier={1.2} style={styles.taggedMetaText}>Confess-to: You</Text>
+                      <Text maxFontSizeMultiplier={1.2} style={styles.taggedCardTime}>{getTimeAgoSimple(item.confessionCreatedAt)}</Text>
+                      {!item.seen && !item.isExpired && <View style={styles.unseenDot} />}
+                      {item.isExpired && (
+                        <View style={styles.expiredPill}>
+                          <Text maxFontSizeMultiplier={1.2} style={styles.expiredPillText}>Expired</Text>
+                        </View>
+                      )}
                     </View>
-                    <View style={styles.taggedMetaItem}>
-                      <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
-                      <Text maxFontSizeMultiplier={1.2} style={styles.taggedMetaCount}>{item.replyCount}</Text>
+                    <Text maxFontSizeMultiplier={1.2} style={[styles.taggedCardText, item.isExpired && styles.taggedCardTextExpired]} numberOfLines={4}>
+                      {item.confessionText}
+                    </Text>
+                    <View style={styles.taggedMetaRow}>
+                      <View style={styles.taggedMetaItem}>
+                        <Ionicons name="heart" size={12} color={COLORS.primary} />
+                        <Text maxFontSizeMultiplier={1.2} style={styles.taggedMetaText}>Confess-to: You</Text>
+                      </View>
+                      <View style={styles.taggedMetaItem}>
+                        <Ionicons name="chatbubble-outline" size={12} color={COLORS.textMuted} />
+                        <Text maxFontSizeMultiplier={1.2} style={styles.taggedMetaCount}>{item.replyCount}</Text>
+                      </View>
                     </View>
-                  </View>
-                </TouchableOpacity>
-              )}
+                  </TouchableOpacity>
+                );
+              }}
               ListEmptyComponent={
                 <View style={styles.taggedEmptyState}>
                   <Text maxFontSizeMultiplier={1.2} style={styles.taggedEmptyText}>No tagged confessions yet</Text>
@@ -2364,14 +2483,67 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     marginBottom: SPACING.sm,
   },
+  taggedAuthorIdentity: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    flex: 1,
+    minWidth: 0,
+  },
+  taggedAuthorIdentityText: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  taggedAuthorAvatar: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,107,107,0.12)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  taggedAuthorAvatarAnonymous: {
+    backgroundColor: 'rgba(153,153,153,0.12)',
+  },
+  taggedAuthorAvatarImage: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+  },
   taggedCardAuthor: {
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
+    color: COLORS.textLight,
+    flexShrink: 1,
+    minWidth: 0,
+  },
+  taggedCardAuthorPublic: {
     color: COLORS.text,
+  },
+  taggedAuthorAge: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '600',
+    color: COLORS.text,
+    flexShrink: 0,
+  },
+  taggedAuthorGenderSymbol: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '700',
+    marginLeft: SPACING.xxs,
+    flexShrink: 0,
+  },
+  taggedBlurBadge: {
+    padding: SPACING.xxs,
+    backgroundColor: 'rgba(153,153,153,0.12)',
+    borderRadius: 4,
+    flexShrink: 0,
   },
   taggedCardTime: {
     fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
+    flexShrink: 0,
   },
   unseenDot: {
     width: 8,

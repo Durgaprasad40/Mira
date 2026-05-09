@@ -68,6 +68,14 @@ function migrateConfessionReactions(c: Confession): Confession {
   return c;
 }
 
+function getTaggedUserId(confession: Confession | undefined | null): string | undefined {
+  return confession?.taggedUserId ?? (confession as any)?.targetUserId;
+}
+
+function getTaggedUserName(confession: Confession | undefined | null): string | undefined {
+  return confession?.taggedUserName ?? (confession as any)?.targetUserName;
+}
+
 // Track confession-based threads to prevent duplicates (confessionId → conversationId)
 // This is stored separately to support idempotent thread creation
 interface ConfessionThreads {
@@ -121,7 +129,7 @@ interface ConfessionState {
   declineMutualReveal: (chatId: string, userId: string) => void;
 
   // Time-Locked Reveal
-  setTimedReveal: (confessionId: string, option: TimedRevealOption, targetUserId?: string) => void;
+  setTimedReveal: (confessionId: string, option: TimedRevealOption, taggedUserId?: string) => void;
   cancelTimedReveal: (confessionId: string) => void;
 
   // Integrity / Cleanup actions
@@ -345,11 +353,13 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     // Only when: 1) new reaction 2) tagged confession 3) liker is the tagged user
     let chatUnlocked = false;
     const confession = state.confessions.find((c) => c.id === confessionId);
+    const taggedUserId = getTaggedUserId(confession);
     if (
       isNewReaction &&
       userId &&
-      confession?.targetUserId &&
-      userId === confession.targetUserId &&
+      confession &&
+      taggedUserId &&
+      userId === taggedUserId &&
       !state.confessionThreads[confessionId] // idempotency check
     ) {
       // CONSISTENCY FIX B4: Prevent concurrent thread creation race
@@ -625,7 +635,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
   },
 
   // ── Time-Locked Reveal ──
-  setTimedReveal: (confessionId, option, _targetUserId) => {
+  setTimedReveal: (confessionId, option, _taggedUserId) => {
     set((state) => ({
       confessions: state.confessions.map((c) =>
         c.id === confessionId
@@ -817,9 +827,10 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
   connectToConfession: (confessionId, currentUserId) => {
     const state = get();
     const confession = state.confessions.find((c) => c.id === confessionId);
+    const taggedUserId = getTaggedUserId(confession);
 
     // Hard gate: only tagged user can connect
-    if (!confession || confession.targetUserId !== currentUserId) {
+    if (!confession || taggedUserId !== currentUserId) {
       return false;
     }
 
@@ -930,11 +941,13 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
 
     // Determine the other user's display name
     // If fromUserId is the tagged person, toUserId is the confessor
-    const isFromTagged = confession.targetUserId === fromUserId;
-    const otherUserId = isFromTagged ? confession.userId : confession.targetUserId;
+    const taggedUserId = getTaggedUserId(confession);
+    const taggedUserName = getTaggedUserName(confession);
+    const isFromTagged = taggedUserId === fromUserId;
+    const otherUserId = isFromTagged ? confession.userId : taggedUserId;
     const otherUserName = isFromTagged
       ? (confession.isAnonymous ? 'Confessor' : (confession.authorName || 'Someone'))
-      : (confession.targetUserName || 'Someone');
+      : (taggedUserName || 'Someone');
 
     // Create a PERMANENT conversation (no expiry)
     const convoId = `demo_convo_reveal_match_${confessionId}_${fromUserId}`;

@@ -738,8 +738,8 @@ export interface Confession {
   reactions?: Record<string, number>;
   topEmojis?: { emoji: string; count: number }[];
   replyPreviews?: { text: string; isAnonymous: boolean; type: string; createdAt: number }[];
-  targetUserId?: string;
-  targetUserName?: string; // Name of tagged user (for display)
+  taggedUserId?: string;
+  taggedUserName?: string; // Name of tagged user (for display)
   visibility: ConfessionVisibility;
   replyCount: number;
   reactionCount: number;

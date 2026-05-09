@@ -6,7 +6,7 @@
  *
  * Tracks two types of previews:
  * 1. Confession previews: `${confessionId}_${receiverId}` - one preview per confession per receiver
- * 2. Tagged profile views: `${viewerId}_${targetUserId}` - soft tracking for tagged profiles
+ * 2. Tagged profile views: `${viewerId}_${taggedUserId}` - soft tracking for tagged profiles
  *
  * Tagged profile views use soft tracking:
  * - First view: shown as "special" preview
@@ -27,10 +27,10 @@ interface ConfessPreviewState {
   markPreviewUsed: (confessionId: string, receiverId: string) => void;
 
   // Check if tagged profile has been viewed (soft tracking)
-  hasViewedTaggedProfile: (viewerId: string, targetUserId: string) => boolean;
+  hasViewedTaggedProfile: (viewerId: string, taggedUserId: string) => boolean;
 
   // Mark tagged profile as viewed (soft tracking - doesn't block, just tracks)
-  markTaggedProfileViewed: (viewerId: string, targetUserId: string) => void;
+  markTaggedProfileViewed: (viewerId: string, taggedUserId: string) => void;
 
   // Reset for testing/debugging
   resetAllPreviews: () => void;
@@ -44,8 +44,8 @@ const getPreviewKey = (confessionId: string, receiverId: string): string => {
   return `${confessionId}_${receiverId}`;
 };
 
-const getViewerTargetKey = (viewerId: string, targetUserId: string): string => {
-  return `view_${viewerId}_${targetUserId}`;
+const getViewerTaggedKey = (viewerId: string, taggedUserId: string): string => {
+  return `view_${viewerId}_${taggedUserId}`;
 };
 
 export const useConfessPreviewStore = create<ConfessPreviewState>()((set, get) => ({
@@ -70,13 +70,13 @@ export const useConfessPreviewStore = create<ConfessPreviewState>()((set, get) =
     }));
   },
 
-  hasViewedTaggedProfile: (viewerId: string, targetUserId: string) => {
-    const key = getViewerTargetKey(viewerId, targetUserId);
+  hasViewedTaggedProfile: (viewerId: string, taggedUserId: string) => {
+    const key = getViewerTaggedKey(viewerId, taggedUserId);
     return !!get().viewedTaggedProfiles[key];
   },
 
-  markTaggedProfileViewed: (viewerId: string, targetUserId: string) => {
-    const key = getViewerTargetKey(viewerId, targetUserId);
+  markTaggedProfileViewed: (viewerId: string, taggedUserId: string) => {
+    const key = getViewerTaggedKey(viewerId, taggedUserId);
     set((state) => ({
       viewedTaggedProfiles: {
         ...state.viewedTaggedProfiles,

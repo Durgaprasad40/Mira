@@ -273,12 +273,13 @@ const skeletonStyles = StyleSheet.create({
 });
 
 export default function ViewProfileScreen() {
-  const { id: userId, mode, fromChat, source, actionScope, freshness, intent } = useLocalSearchParams<{
+  const { id: userId, mode, fromChat, source, actionScope, freshness, intent, fromConfessionId } = useLocalSearchParams<{
     id: string;
     mode?: string;
     fromChat?: string;
     source?: string;
     actionScope?: string;
+    fromConfessionId?: string;
     // Phase-2.5: coarse Nearby recency label passed from the Nearby marker tap.
     // Values: 'recent' (<=24h) | 'earlier' (<=7d) | 'stale' (<=14d).
     // Only shown when source=nearby.
@@ -289,6 +290,7 @@ export default function ViewProfileScreen() {
   }>();
   const normalizedSource = Array.isArray(source) ? source[0] : source;
   const normalizedActionScope = Array.isArray(actionScope) ? actionScope[0] : actionScope;
+  const normalizedFromConfessionId = Array.isArray(fromConfessionId) ? fromConfessionId[0] : fromConfessionId;
   // Phase-2.5: coarse Nearby recency chip. Only rendered for source=nearby with
   // a valid three-state label; never reveals minutes/hours/exact timestamp.
   //   'recent'  → "Recently here"  (<=24h)
@@ -317,6 +319,7 @@ export default function ViewProfileScreen() {
   // and never auto-triggers any action.
   const isFromNearby = normalizedSource === 'nearby';
   const isNearbyPrivacySource = isFromNearby || normalizedSource === 'crossed_paths';
+  const isConfessTagSource = normalizedSource === 'confess_tag';
   const normalizedIntent = Array.isArray(intent) ? intent[0] : intent;
   const nearbyIntentLike = isFromNearby && normalizedIntent === 'like';
   const isPhase2 = mode === 'phase2';
@@ -330,6 +333,16 @@ export default function ViewProfileScreen() {
     !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
   );
   const currentViewerId = currentViewer?._id as Id<'users'> | undefined;
+  const confessTagActionEligibility = useQuery(
+    api.confessions.canUseConfessTagActions,
+    !isDemoMode && isConfessTagSource && token && normalizedFromConfessionId && userId
+        ? {
+          token,
+          confessionId: normalizedFromConfessionId,
+          taggedUserId: userId,
+        }
+      : 'skip'
+  );
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const photoListRef = useRef<FlatList<any>>(null);
   // Phase-1 premium polish: tap-zone press feedback + action-button press
@@ -791,7 +804,9 @@ export default function ViewProfileScreen() {
       : null;
 
   // P1-FIX: Determine if action buttons should be shown
-  const showActionButtons = fromChat !== '1' && !isConfessPreview;
+  const canUseConfessTagActions =
+    !isConfessTagSource || confessTagActionEligibility?.allowed === true;
+  const showActionButtons = fromChat !== '1' && !isConfessPreview && canUseConfessTagActions;
 
   // Floating Phase-1 action-row layout (Skip / Super Like / Like). Mirrors
   // the Phase-2 helper shape so the opened profile shows three independent

@@ -45,9 +45,28 @@ type SerializedConfession = {
   isUnderReview?: boolean;
 };
 
+type ConfessionAuthorVisibility = 'anonymous' | 'open' | 'blur_photo';
+
 // Canonical reply identity mode used by the current product contract.
 // Legacy 'blur' literal maps to 'blur_photo'; unknown/missing maps using isAnonymous.
 type ReplyIdentityMode = 'anonymous' | 'blur_photo' | 'open';
+
+function effectiveConfessionAuthorVisibility(
+  raw: Doc<'confessions'>['authorVisibility'] | undefined,
+  isAnonymousFallback: boolean
+): ConfessionAuthorVisibility {
+  const visibility = raw ?? (isAnonymousFallback ? 'anonymous' : 'open');
+  switch (visibility) {
+    case 'anonymous':
+      return 'anonymous';
+    case 'blur':
+    case 'blur_photo':
+      return 'blur_photo';
+    case 'open':
+    default:
+      return 'open';
+  }
+}
 
 function canonicalIdentityMode(
   raw: string | undefined,
@@ -165,19 +184,29 @@ function serializeConfession(
     trendingScore?: number;
     isExpired?: boolean;
     viewerIsOwner?: boolean;
+    // P1-1: Viewer is the tagged recipient of this confession. The recipient
+    // already received the tag through their notification + Tagged-for-you
+    // sheet, so the thread is allowed to surface taggedUserId/taggedUserName
+    // even for anonymous mode. Author identity (name/photo/age/gender)
+    // remains stripped — only the tag fields are carved out.
+    viewerIsTaggedRecipient?: boolean;
     livePhotoUrlByUserId?: Map<string, string | undefined>;
   }
 ): SerializedConfession {
+  const effectiveVisibility = effectiveConfessionAuthorVisibility(
+    confession.authorVisibility,
+    confession.isAnonymous
+  );
+  const isAnonymousMode = effectiveVisibility === 'anonymous';
+
   // Resolve the author photo URL.
-  //   anonymous (mode or legacy isAnonymous) → never leak a photo.
+  //   anonymous (effective mode) → never leak a photo.
   //   open / blur_photo → return the live primary photo from the users
   //                       table when the caller pre-fetched the map. The
   //                       client decides whether to blur it based on
   //                       `authorVisibility`.
   // Falls back to the persisted snapshot only if the caller did not supply
   // the override map (defensive — every current call site does).
-  const isAnonymousMode =
-    confession.authorVisibility === 'anonymous' || confession.isAnonymous;
   const resolvedAuthorPhotoUrl: string | undefined = isAnonymousMode
     ? undefined
     : options?.livePhotoUrlByUserId
@@ -190,14 +219,14 @@ function serializeConfession(
     userId: confession.userId,
     text: confession.text,
     isAnonymous: confession.isAnonymous,
-    authorVisibility: confession.authorVisibility as 'anonymous' | 'open' | 'blur_photo' | undefined,
+    authorVisibility: effectiveVisibility,
     mood: confession.mood,
     visibility: confession.visibility,
     imageUrl: confession.imageUrl,
-    authorName: confession.authorName,
+    authorName: isAnonymousMode ? undefined : confession.authorName,
     authorPhotoUrl: resolvedAuthorPhotoUrl,
-    authorAge: confession.authorAge,
-    authorGender: confession.authorGender,
+    authorAge: isAnonymousMode ? undefined : confession.authorAge,
+    authorGender: isAnonymousMode ? undefined : confession.authorGender,
     replyCount: confession.replyCount,
     reactionCount: confession.reactionCount,
     voiceReplyCount: confession.voiceReplyCount,
@@ -207,11 +236,23 @@ function serializeConfession(
     deletedAt: confession.deletedAt,
   };
 
-  if (options?.includeTaggedUserId && !confession.isAnonymous) {
+  // Tag-field exposure rule:
+  //   - non-anonymous → expose to all callers that asked for the tag.
+  //   - anonymous → expose ONLY to the tagged recipient (so the thread can
+  //                 render "Confess-to: You") and to the owner (their own
+  //                 confession). Unrelated viewers still get nothing.
+  // Author identity remains stripped for anonymous mode regardless of viewer.
+  const allowTaggedFields =
+    !!options?.includeTaggedUserId &&
+    (effectiveVisibility !== 'anonymous' ||
+      options?.viewerIsTaggedRecipient === true ||
+      options?.viewerIsOwner === true);
+
+  if (allowTaggedFields) {
     result.taggedUserId = confession.taggedUserId;
-    // Mention chip needs both id + name. Anonymous confessions never expose
-    // either; for non-anonymous, surface the denormalised tagged user name
-    // captured at create time.
+    // Mention chip needs both id + name. The denormalised tagged user name
+    // captured at create time is used here; thread is viewer-aware and will
+    // substitute "You" when the viewer is the tagged recipient.
     if (confession.taggedUserId && confession.taggedUserName) {
       result.taggedUserName = confession.taggedUserName;
     }
@@ -664,6 +705,13 @@ export const getConfession = query({
     const isExpired = confession.expiresAt !== undefined && confession.expiresAt <= now;
     const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
     const viewerIsOwner = !!validatedViewerId && validatedViewerId === confession.userId;
+    // P1-1: Identify the tagged recipient so the serializer can carve out
+    // taggedUserId/taggedUserName for them even when the confession is
+    // anonymous. Author identity remains hidden — only the tag is exposed.
+    const viewerIsTaggedRecipient =
+      !!validatedViewerId &&
+      !!confession.taggedUserId &&
+      validatedViewerId === confession.taggedUserId;
 
     if (isExpired) {
       if (!viewerIsOwner) return null;
@@ -692,6 +740,7 @@ export const getConfession = query({
       includeTaggedUserId: true,
       isExpired,
       viewerIsOwner,
+      viewerIsTaggedRecipient,
       livePhotoUrlByUserId,
     });
   },
@@ -1467,6 +1516,7 @@ export const listTaggedConfessionsForUser = query({
 
     const now = Date.now();
     const reportedIds = await getReportedConfessionIdsForViewer(ctx, userId);
+    const taggedUserDoc = await ctx.db.get(userId);
 
     // Get notifications for this user (limit 50)
     const notifications = await ctx.db
@@ -1488,25 +1538,18 @@ export const listTaggedConfessionsForUser = query({
       //   anonymous   → leak nothing (matches feed behaviour for anonymous mode)
       //   blur_photo  → name + age + gender, photo is blurred client-side
       //   open        → full identity
-      // Note: authorVisibility is the canonical source of truth here; legacy
-      // 'blur' literal maps to 'blur_photo'. Confessions with no
-      // authorVisibility but isAnonymous=false default to 'open'.
-      const effectiveVisibility: 'anonymous' | 'open' | 'blur_photo' =
-        confession.authorVisibility === 'anonymous' || confession.isAnonymous
-          ? 'anonymous'
-          : confession.authorVisibility === 'blur' ||
-            confession.authorVisibility === 'blur_photo'
-          ? 'blur_photo'
-          : 'open';
-      const allowName = effectiveVisibility !== 'anonymous';
-      const allowPhoto = effectiveVisibility === 'open';
+      const effectiveVisibility = effectiveConfessionAuthorVisibility(
+        confession.authorVisibility,
+        confession.isAnonymous
+      );
+      const allowIdentity = effectiveVisibility !== 'anonymous';
 
       // Resolve the live primary photo from `users.primaryPhotoUrl` so the
       // sheet reflects the author's current main photo, not the snapshot
-      // captured at create time. Only fetched when the visibility rule
-      // allows leaking the photo, to avoid an unnecessary user lookup.
+      // captured at create time. For blur_photo rows, the client applies the
+      // blur; anonymous rows never fetch or return author identity.
       let liveAuthorPhotoUrl: string | undefined;
-      if (allowPhoto) {
+      if (allowIdentity) {
         const authorDoc = await ctx.db.get(confession.userId);
         liveAuthorPhotoUrl = authorDoc?.primaryPhotoUrl;
       }
@@ -1526,10 +1569,12 @@ export const listTaggedConfessionsForUser = query({
         reactionCount: confession.reactionCount,
         // Author identity (privacy-gated — never leaked for anonymous mode)
         authorVisibility: effectiveVisibility,
-        authorName: allowName ? confession.authorName : undefined,
+        authorName: allowIdentity ? confession.authorName : undefined,
         authorPhotoUrl: liveAuthorPhotoUrl,
-        authorAge: allowName ? confession.authorAge : undefined,
-        authorGender: allowName ? confession.authorGender : undefined,
+        authorAge: allowIdentity ? confession.authorAge : undefined,
+        authorGender: allowIdentity ? confession.authorGender : undefined,
+        taggedUserId: confession.taggedUserId ?? userId,
+        taggedUserName: confession.taggedUserName ?? taggedUserDoc?.name,
       });
     }
 
@@ -1601,6 +1646,98 @@ export const markTaggedConfessionsSeen = mutation({
 // ═══════════════════════════════════════════════════════════════════════════
 const TAG_PROFILE_VIEW_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
 
+export const canUseConfessTagActions = query({
+  args: {
+    token: v.string(),
+    confessionId: v.union(v.id('confessions'), v.string()),
+    taggedUserId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, { token, confessionId, taggedUserId }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      return { allowed: false };
+    }
+
+    let confession: Doc<'confessions'> | null = null;
+    try {
+      confession = await ctx.db.get(confessionId as Id<'confessions'>);
+    } catch {
+      return { allowed: false };
+    }
+
+    if (!confession || confession.isDeleted) {
+      return { allowed: false };
+    }
+
+    const now = Date.now();
+    if (confession.expiresAt !== undefined && confession.expiresAt <= now) {
+      return { allowed: false };
+    }
+
+    if (isHiddenByReports(confession)) {
+      return { allowed: false };
+    }
+
+    if (await hasViewerReportedConfession(ctx, viewerId, confession._id)) {
+      return { allowed: false };
+    }
+
+    // Confess-tag dating actions are only for the tagged recipient. The
+    // confession author and unrelated viewers always get profile-only context.
+    if (
+      !confession.taggedUserId ||
+      confession.taggedUserId !== viewerId ||
+      confession.userId === viewerId
+    ) {
+      return { allowed: false };
+    }
+
+    const resolvedTaggedUserId = await resolveUserIdByAuthId(ctx, taggedUserId as string);
+    if (!resolvedTaggedUserId || resolvedTaggedUserId !== confession.taggedUserId) {
+      return { allowed: false };
+    }
+
+    const target = await ctx.db.get(resolvedTaggedUserId);
+    if (!target || !target.isActive || target.deletedAt || target.isBanned) {
+      return { allowed: false };
+    }
+
+    if (viewerId !== resolvedTaggedUserId) {
+      const blockedByViewer = await ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', viewerId).eq('blockedUserId', resolvedTaggedUserId)
+        )
+        .first();
+      if (blockedByViewer) {
+        return { allowed: false };
+      }
+
+      const blockedByTarget = await ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', resolvedTaggedUserId).eq('blockedUserId', viewerId)
+        )
+        .first();
+      if (blockedByTarget) {
+        return { allowed: false };
+      }
+
+      const reportedByViewer = await ctx.db
+        .query('reports')
+        .withIndex('by_reporter_reported_created', (q) =>
+          q.eq('reporterId', viewerId).eq('reportedUserId', resolvedTaggedUserId)
+        )
+        .first();
+      if (reportedByViewer) {
+        return { allowed: false };
+      }
+    }
+
+    return { allowed: true };
+  },
+});
+
 export const consumeConfessionTagProfileViewGrant = mutation({
   args: {
     token: v.string(),
@@ -1664,6 +1801,8 @@ export const consumeConfessionTagProfileViewGrant = mutation({
         profileUserId: String(profileUserId),
         fromConfessionId: String(confessionId),
         source: 'confess_tag' as const,
+        canUseDatingActions:
+          confession.taggedUserId === viewerId && confession.userId !== viewerId,
       };
     }
 
@@ -1733,6 +1872,8 @@ export const consumeConfessionTagProfileViewGrant = mutation({
       profileUserId: String(profileUserId),
       fromConfessionId: String(confessionId),
       source: 'confess_tag' as const,
+      canUseDatingActions:
+        confession.taggedUserId === viewerId && confession.userId !== viewerId,
     };
   },
 });

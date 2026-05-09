@@ -1123,7 +1123,7 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
       useConfessionStore: {
         getState: () => {
           confessionThreads: Record<string, string>;
-          confessions: Array<{ id: string; userId: string; targetUserId?: string }>;
+          confessions: Array<{ id: string; userId: string; taggedUserId?: string; targetUserId?: string }>;
           blockUser: (userId: string) => void;
         };
         setState: (state: { confessionThreads: Record<string, string> }) => void;
@@ -1138,7 +1138,7 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
     for (const [confessionId, convoId] of Object.entries(confessionThreads)) {
       const confession = confessions.find((c) => c.id === confessionId);
       // If confession author is blocked or if tagged user is blocked
-      if (confession?.userId === userId || confession?.targetUserId === userId) {
+      if (confession?.userId === userId || (confession?.taggedUserId ?? confession?.targetUserId) === userId) {
         confessionIdsToClean.push(confessionId);
         // Also delete the conversation from DM store if not already deleted
         if (!convoIdsToDelete.includes(convoId)) {

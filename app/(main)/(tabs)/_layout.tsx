@@ -94,7 +94,7 @@ export default function MainTabsLayout() {
   const demoTaggedCount = useConfessionStore((s) => {
     if (!isDemoMode) return 0;
     // Count tagged confessions in demo store
-    return s.confessions.filter((c) => c.targetUserId === currentUserId).length;
+    return s.confessions.filter((c) => (c.taggedUserId ?? (c as any).targetUserId) === currentUserId).length;
   });
 
   const taggedBadgeCount = isDemoMode ? demoTaggedCount : (convexTaggedCount || 0);

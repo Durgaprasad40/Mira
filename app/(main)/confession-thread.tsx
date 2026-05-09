@@ -904,6 +904,18 @@ export default function ConfessionThreadScreen() {
     const isFullyAnonymous = effectiveVisibility === 'anonymous';
     const isBlurPhoto =
       effectiveVisibility === 'blur_photo' || (effectiveVisibility as string) === 'blur';
+    const viewerIdCandidates = [
+      currentUserId,
+      !isDemoMode ? String((convexCurrentUser as any)?._id ?? '') : undefined,
+    ].filter((candidate): candidate is string => Boolean(candidate));
+    const taggedUserName = confession.taggedUserName?.trim();
+    const isTaggedViewer = Boolean(
+      confession.taggedUserId &&
+      viewerIdCandidates.includes(String(confession.taggedUserId))
+    );
+    const taggedDisplayName = taggedUserName
+      ? (isTaggedViewer ? 'You' : taggedUserName)
+      : null;
 
     const getDisplayName = (): string => {
       if (isFullyAnonymous) return 'Anonymous';
@@ -959,7 +971,7 @@ export default function ConfessionThreadScreen() {
           {/* Tagged user chip — opens the tagged user's profile via a
               server-validated one-tap grant. Hidden when the confession is
               fully anonymous (serializer never exposes the tag in that case). */}
-          {confession.taggedUserId && confession.taggedUserName ? (
+          {confession.taggedUserId && taggedDisplayName ? (
             <TouchableOpacity
               style={styles.taggedRow}
               onPress={() => void handleTagPress(confession._id, confession.taggedUserId)}
@@ -972,7 +984,7 @@ export default function ConfessionThreadScreen() {
                 style={styles.taggedName}
                 numberOfLines={1}
               >
-                @{confession.taggedUserName}
+                {taggedDisplayName}
               </Text>
             </TouchableOpacity>
           ) : null}
@@ -1014,7 +1026,7 @@ export default function ConfessionThreadScreen() {
         ) : null}
       </View>
     );
-  }, [closedThreadMessage, confession, handleTagPress, isThreadClosed, topLevelReplies.length]);
+  }, [closedThreadMessage, confession, convexCurrentUser, currentUserId, handleTagPress, isDemoMode, isThreadClosed, topLevelReplies.length]);
 
   const renderEmpty = useCallback(() => {
     if (isLoading) return null;
