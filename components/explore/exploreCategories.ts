@@ -1,14 +1,27 @@
 import { isWithinAllowedDistance, EXPLORE_NEARBY_RADIUS_KM } from "@/lib/distanceRules";
 import { isFreeTonightActive } from "@/lib/freeTonight";
+import {
+  FRONTEND_RELATIONSHIP_INTENT_IDS,
+  normalizeRelationshipIntentValues,
+} from "@/lib/discoveryNaming";
 
 export type ExploreCategory = {
   id: string;
   label: string;
   title?: string;
+  tagLabel?: string;
   icon: string;
   color: string;
-  kind: "relationship" | "interest";
-  predicate: (p: any) => boolean;
+  predicate: (p: ExploreProfileLike) => boolean;
+};
+
+export type ExploreProfileLike = {
+  relationshipIntent?: readonly string[] | string | null;
+  distance?: number | null;
+  isOnline?: boolean | null;
+  lastActive?: number | null;
+  activities?: readonly string[] | null;
+  freeTonightExpiresAt?: number | null;
 };
 
 // ============================================
@@ -21,14 +34,8 @@ const KNOWN_INTENTS = new Set([
   "open_to_vibes", "just_friends", "open_to_anything", "single_parent", "new_to_dating",
 ]);
 
-const getIntents = (p: any): string[] => {
-  const raw =
-    p?.relationshipIntent ??
-    p?.relationshipGoal ??
-    p?.lookingFor ??
-    p?.intent ??
-    null;
-
+const getIntents = (p: ExploreProfileLike): string[] => {
+  const raw = p?.relationshipIntent ?? null;
   const out: string[] = [];
 
   if (typeof raw === "string" && KNOWN_INTENTS.has(raw)) {
@@ -39,18 +46,10 @@ const getIntents = (p: any): string[] => {
     }
   }
 
-  if (out.length > 0) return out;
-
-  // Fallback: derive from tags
-  const tags: string[] = Array.isArray(p?.tags) ? p.tags : [];
-  for (const t of tags) {
-    if (KNOWN_INTENTS.has(t)) out.push(t);
-  }
-
   return out;
 };
 
-const hasIntent = (p: any, ...targets: string[]): boolean => {
+const hasIntent = (p: ExploreProfileLike, ...targets: string[]): boolean => {
   const intents = getIntents(p);
   return targets.some((t) => intents.includes(t));
 };
@@ -89,81 +88,81 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     id: "serious_vibes",
     label: "Serious Intentions",
     title: "Serious Intentions",
+    tagLabel: "Looking for something serious",
     icon: "💑",
     color: TILE_COLORS.pink,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "serious_vibes"),
   },
   {
     id: "keep_it_casual",
     label: "Keep It Casual",
     title: "Keep It Casual",
+    tagLabel: "Looking for casual",
     icon: "🎉",
     color: TILE_COLORS.orange,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "keep_it_casual"),
   },
   {
     id: "exploring_vibes",
     label: "Still Exploring",
     title: "Still Exploring",
+    tagLabel: "Still figuring it out",
     icon: "🤔",
     color: TILE_COLORS.sky,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "exploring_vibes"),
   },
   {
     id: "see_where_it_goes",
     label: "See Where It Goes",
     title: "See Where It Goes",
+    tagLabel: "Open to more",
     icon: "📈",
     color: TILE_COLORS.indigo,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "see_where_it_goes"),
   },
   {
     id: "open_to_vibes",
     label: "Open-Minded",
     title: "Open-Minded",
+    tagLabel: "Flexible on commitment",
     icon: "📉",
     color: TILE_COLORS.purple,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "open_to_vibes"),
   },
   {
     id: "just_friends",
     label: "Just Friends",
     title: "Just Friends",
+    tagLabel: "Looking for friends",
     icon: "👋",
     color: TILE_COLORS.teal,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "just_friends"),
   },
   {
     id: "open_to_anything",
     label: "Open to Anything",
     title: "Open to Anything",
+    tagLabel: "Open to anything",
     icon: "✨",
     color: TILE_COLORS.gold,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "open_to_anything"),
   },
   {
     id: "single_parent",
     label: "Single Parent",
     title: "Single Parent",
+    tagLabel: "Single parent",
     icon: "👨‍👧",
     color: TILE_COLORS.rose,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "single_parent"),
   },
   {
     id: "new_to_dating",
     label: "New to Dating",
     title: "New to Dating",
+    tagLabel: "New to dating",
     icon: "🌱",
     color: TILE_COLORS.mint,
-    kind: "relationship",
     predicate: (p) => hasIntent(p, "new_to_dating"),
   },
 ];
@@ -177,36 +176,36 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     id: "nearby",
     label: "Nearby",
     title: "Nearby",
+    tagLabel: "Close to you",
     icon: "📍",
     color: TILE_COLORS.emerald,
-    kind: "relationship",
     predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, EXPLORE_NEARBY_RADIUS_KM),
   },
   {
     id: "online_now",
     label: "Online Now",
     title: "Online Now",
+    tagLabel: "Online now",
     icon: "🟢",
     color: TILE_COLORS.mint,
-    kind: "relationship",
-    predicate: (p) => p?.isOnline === true || minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 10,
+    predicate: (p) => p?.isOnline === true || minutesAgo(p?.lastActive ?? undefined) <= 10,
   },
   {
     id: "active_today",
     label: "Active Today",
     title: "Active Today",
+    tagLabel: "Active today",
     icon: "📱",
     color: TILE_COLORS.blue,
-    kind: "relationship",
-    predicate: (p) => minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 24 * 60,
+    predicate: (p) => minutesAgo(p?.lastActive ?? undefined) <= 24 * 60,
   },
   {
     id: "free_tonight",
     label: "Free Tonight",
     title: "Free Tonight",
+    tagLabel: "Free tonight",
     icon: "🌙",
     color: TILE_COLORS.indigo,
-    kind: "relationship",
     predicate: (p) => isFreeTonightActive(p?.activities, p?.freeTonightExpiresAt),
   },
 ];
@@ -222,13 +221,62 @@ export const EXPLORE_CATEGORIES: ExploreCategory[] = [
 export const RELATIONSHIP_CATEGORIES = RELATIONSHIP_TILES;
 export const RIGHT_NOW_CATEGORIES = RIGHT_NOW_TILES;
 
-// ============================================
-// COUNT HELPER FUNCTION
-// ============================================
-export function countProfilesPerCategory(
+const EXPLORE_CATEGORY_BY_ID = new Map(EXPLORE_CATEGORIES.map((category) => [category.id, category]));
+
+const RELATIONSHIP_CATEGORY_IDS = new Set<string>(FRONTEND_RELATIONSHIP_INTENT_IDS);
+
+export function getMutualRelationshipCategory(
+  viewerRelationshipIntent: readonly string[] | string | undefined | null,
+  candidateRelationshipIntent: readonly string[] | string | undefined | null,
+): string | null {
+  const viewerGoals = new Set<string>(normalizeRelationshipIntentValues(viewerRelationshipIntent));
+  if (viewerGoals.size === 0) return null;
+
+  const candidateGoals = new Set<string>(normalizeRelationshipIntentValues(candidateRelationshipIntent));
+  if (candidateGoals.size === 0) return null;
+
+  for (const categoryId of FRONTEND_RELATIONSHIP_INTENT_IDS) {
+    if (viewerGoals.has(categoryId) && candidateGoals.has(categoryId)) {
+      return categoryId;
+    }
+  }
+
+  return null;
+}
+
+export function profileMatchesExploreCategory(
   category: ExploreCategory,
-  profiles: any[]
-): number {
-  if (!profiles || !Array.isArray(profiles)) return 0;
-  return profiles.filter(category.predicate).length;
+  profile: ExploreProfileLike,
+  viewerRelationshipIntent: readonly string[] | string | undefined | null,
+): boolean {
+  if (RELATIONSHIP_CATEGORY_IDS.has(category.id)) {
+    return getMutualRelationshipCategory(
+      viewerRelationshipIntent,
+      profile?.relationshipIntent,
+    ) === category.id;
+  }
+
+  return category.predicate(profile);
+}
+
+export function countDemoProfilesPerExploreCategory(
+  profiles: ExploreProfileLike[],
+  viewerRelationshipIntent: readonly string[] | string | undefined | null,
+): Record<string, number> {
+  const counts = Object.fromEntries(EXPLORE_CATEGORIES.map((category) => [category.id, 0]));
+
+  for (const profile of profiles) {
+    for (const category of EXPLORE_CATEGORIES) {
+      if (profileMatchesExploreCategory(category, profile, viewerRelationshipIntent)) {
+        counts[category.id] += 1;
+      }
+    }
+  }
+
+  return counts;
+}
+
+export function getExploreCategoryTagLabel(categoryId: string | null | undefined): string | undefined {
+  if (!categoryId) return undefined;
+  return EXPLORE_CATEGORY_BY_ID.get(categoryId)?.tagLabel;
 }

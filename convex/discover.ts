@@ -73,6 +73,10 @@ const MAX_EXPLORE_CANDIDATES = 1500;
 // same faces. Mirrors Phase-2 SUPPRESSION_WINDOW_MS (4 hours).
 const EXPLORE_SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
 
+// Bound the 4-hour suppression lookup so a noisy category cannot force an
+// unbounded read. The index still scopes by viewer/category/time first.
+const MAX_EXPLORE_SUPPRESSION_READS = 500;
+
 // Per-call bound on how many viewedUserIds the recordExploreImpression
 // mutation will accept in a single batch. Keeps mutation cost predictable
 // and matches the maximum page size the client typically requests.
@@ -1241,6 +1245,7 @@ const RIGHT_NOW_EXPLORE_CATEGORY_IDS = [
 ] as const;
 
 type RightNowExploreCategoryId = (typeof RIGHT_NOW_EXPLORE_CATEGORY_IDS)[number];
+type ExploreNearbyAvailabilityStatus = 'ok' | 'location_required' | 'verification_required';
 
 type ExploreCandidateBase = {
   id: Id<'users'>;
@@ -1334,6 +1339,32 @@ function matchesRightNowExploreCategory(candidate: ExploreCandidateBase, categor
 
 function createEmptyExploreCounts(): Record<string, number> {
   return Object.fromEntries(EXPLORE_CATEGORY_IDS.map((id) => [id, 0]));
+}
+
+function hasUsableExploreLocation(user: { latitude?: number; longitude?: number }): boolean {
+  return (
+    typeof user.latitude === 'number' &&
+    Number.isFinite(user.latitude) &&
+    typeof user.longitude === 'number' &&
+    Number.isFinite(user.longitude)
+  );
+}
+
+function getExploreNearbyAvailabilityStatus(user: {
+  latitude?: number;
+  longitude?: number;
+  verificationStatus?: string;
+}): ExploreNearbyAvailabilityStatus {
+  if (!hasUsableExploreLocation(user)) {
+    return 'location_required';
+  }
+
+  const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+  if ((user.verificationStatus || 'unverified') !== 'verified' && !isDevBypass) {
+    return 'verification_required';
+  }
+
+  return 'ok';
 }
 
 // ---------------------------------------------------------------------------
@@ -1626,13 +1657,24 @@ async function buildExploreCandidates(
     categoryId?: string;
     maxPerGender: number;
   }
-): Promise<{ status: 'ready' | 'viewer_not_found' | 'invalid_category'; currentUser: any | null; candidates: ExploreCandidateBase[] }> {
+): Promise<{ status: 'ready' | 'viewer_not_found' | 'invalid_category' | 'location_required' | 'verification_required'; currentUser: any | null; candidates: ExploreCandidateBase[] }> {
   const resolvedViewer = await resolveExploreViewer(ctx, args.rawUserId);
   if (!resolvedViewer) {
     return { status: 'viewer_not_found', currentUser: null, candidates: [] };
   }
 
   const { userId, currentUser } = resolvedViewer;
+  const activeCategoryId = normalizePublicExploreCategoryId(args.categoryId);
+  if (args.categoryId && !activeCategoryId) {
+    return { status: 'invalid_category', currentUser, candidates: [] };
+  }
+  if (activeCategoryId === 'nearby') {
+    const nearbyStatus = getExploreNearbyAvailabilityStatus(currentUser);
+    if (nearbyStatus !== 'ok') {
+      return { status: nearbyStatus, currentUser, candidates: [] };
+    }
+  }
+
   const exclusions = await loadExploreExclusions(ctx, userId);
 
   const effectiveGender = Array.from(
@@ -1647,10 +1689,6 @@ async function buildExploreCandidates(
   const effectiveMaxDistance = args.maxDistance ?? currentUser.maxDistance;
   const normalizedRelationshipIntentFilter = normalizeRelationshipIntentValues(args.relationshipIntent);
   const viewerAge = calculateAge(currentUser.dateOfBirth);
-  const activeCategoryId = normalizePublicExploreCategoryId(args.categoryId);
-  if (args.categoryId && !activeCategoryId) {
-    return { status: 'invalid_category', currentUser, candidates: [] };
-  }
 
   const userBuckets = await Promise.all(
     effectiveGender.map((gender) =>
@@ -1693,6 +1731,24 @@ async function buildExploreCandidates(
       const normalizedCandidateRelationshipIntent = normalizeRelationshipIntentValues(candidateRelationshipIntent);
 
       if (!candidateLookingFor.includes(currentUser.gender)) continue;
+      if (
+        !orientationAllowsCandidateGender({
+          viewerGender: currentUser.gender ?? undefined,
+          viewerOrientation: currentUser.orientation ?? undefined,
+          candidateGender: user.gender ?? undefined,
+        })
+      ) {
+        continue;
+      }
+      if (
+        !orientationAllowsCandidateGender({
+          viewerGender: user.gender ?? undefined,
+          viewerOrientation: user.orientation ?? undefined,
+          candidateGender: currentUser.gender ?? undefined,
+        })
+      ) {
+        continue;
+      }
 
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < effectiveMinAge || userAge > effectiveMaxAge) continue;
@@ -1830,7 +1886,7 @@ async function hydrateExploreProfiles(
 
 export const getExploreCategoryProfiles = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
     genderFilter: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')))),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
@@ -1869,11 +1925,29 @@ export const getExploreCategoryProfiles = query({
   },
   handler: async (ctx, args) => {
     const {
-      userId, genderFilter, minAge, maxAge, maxDistance,
+      token, genderFilter, minAge, maxAge, maxDistance,
       relationshipIntent, activities, sortByInterests,
       limit = 20, offset = 0,
       categoryId,
     } = args;
+
+    const sessionToken = typeof token === 'string' ? token.trim() : '';
+    if (sessionToken.length === 0) {
+      return {
+        profiles: [],
+        totalCount: 0,
+        status: 'viewer_missing' as const,
+      };
+    }
+
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) {
+      return {
+        profiles: [],
+        totalCount: 0,
+        status: 'viewer_missing' as const,
+      };
+    }
 
     const baseWindow = Math.max(offset + limit, 24);
     const fetchMultiplier = categoryId ? 30 : ((relationshipIntent && relationshipIntent.length > 0) || (activities && activities.length > 0) || sortByInterests ? 24 : 16);
@@ -1888,7 +1962,7 @@ export const getExploreCategoryProfiles = query({
     const maxPerGender = Math.min(heuristicMaxPerGender, MAX_EXPLORE_CANDIDATES);
 
     const built = await buildExploreCandidates(ctx, {
-      rawUserId: userId,
+      rawUserId: viewerId,
       genderFilter,
       minAge,
       maxAge,
@@ -1937,7 +2011,7 @@ export const getExploreCategoryProfiles = query({
             .eq('categoryId', categoryId)
             .gt('lastSeenAt', suppressionCutoff)
         )
-        .collect();
+        .take(MAX_EXPLORE_SUPPRESSION_READS);
       if (recentImpressions.length > 0) {
         const recentlySeen = new Set(
           recentImpressions.map((imp) => imp.viewedUserId as string)
@@ -1977,22 +2051,17 @@ export const getExploreCategoryProfiles = query({
 
 export const recordExploreImpression = mutation({
   args: {
+    token: v.string(),
     viewedUserIds: v.array(v.id('users')),
     categoryId: v.string(),
-    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     if (!args.categoryId || args.categoryId.trim().length === 0) return;
 
-    // Resolve viewer from server-side auth first, then authUserId fallback.
-    let viewerId: Id<'users'> | null = null;
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      viewerId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-    if (!viewerId && args.authUserId?.trim()) {
-      viewerId = await resolveUserIdByAuthId(ctx, args.authUserId.trim());
-    }
+    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
+    if (sessionToken.length === 0) return;
+
+    const viewerId = await validateSessionToken(ctx, sessionToken);
     if (!viewerId) return;
     const resolvedViewerId: Id<'users'> = viewerId;
 
@@ -2004,7 +2073,7 @@ export const recordExploreImpression = mutation({
     const now = Date.now();
 
     for (const viewedUserId of dedupedIds) {
-      const existing = await ctx.db
+      const existingRows = await ctx.db
         .query('exploreViewerImpressions')
         .withIndex('by_pair_category', (q) =>
           q
@@ -2012,21 +2081,68 @@ export const recordExploreImpression = mutation({
             .eq('viewedUserId', viewedUserId)
             .eq('categoryId', args.categoryId)
         )
-        .first();
+        .collect();
 
-      if (existing) {
-        await ctx.db.patch(existing._id, {
-          lastSeenAt: now,
-          seenCount: existing.seenCount + 1,
+      if (existingRows.length > 0) {
+        const [keeper, ...duplicates] = [...existingRows].sort((a, b) => {
+          const aTime = a.lastSeenAt ?? a._creationTime;
+          const bTime = b.lastSeenAt ?? b._creationTime;
+          return bTime - aTime;
         });
+        const mergedSeenCount = existingRows.reduce(
+          (total, row) => total + Math.max(row.seenCount ?? 1, 1),
+          1,
+        );
+
+        await ctx.db.patch(keeper._id, {
+          lastSeenAt: now,
+          seenCount: mergedSeenCount,
+        });
+        for (const duplicate of duplicates) {
+          await ctx.db.delete(duplicate._id);
+        }
       } else {
-        await ctx.db.insert('exploreViewerImpressions', {
+        const insertedId = await ctx.db.insert('exploreViewerImpressions', {
           viewerId: resolvedViewerId,
           viewedUserId,
           categoryId: args.categoryId,
           lastSeenAt: now,
           seenCount: 1,
         });
+
+        const rowsAfterInsert = await ctx.db
+          .query('exploreViewerImpressions')
+          .withIndex('by_pair_category', (q) =>
+            q
+              .eq('viewerId', resolvedViewerId)
+              .eq('viewedUserId', viewedUserId)
+              .eq('categoryId', args.categoryId)
+          )
+          .collect();
+
+        if (rowsAfterInsert.length > 1) {
+          const keeper =
+            rowsAfterInsert.find((row) => row._id === insertedId) ??
+            [...rowsAfterInsert].sort((a, b) => {
+              const aTime = a.lastSeenAt ?? a._creationTime;
+              const bTime = b.lastSeenAt ?? b._creationTime;
+              return bTime - aTime;
+            })[0];
+          const mergedSeenCount = rowsAfterInsert.reduce(
+            (total, row) => total + Math.max(row.seenCount ?? 1, 1),
+            0,
+          );
+
+          await ctx.db.patch(keeper._id, {
+            lastSeenAt: now,
+            seenCount: mergedSeenCount,
+          });
+          for (const duplicate of rowsAfterInsert) {
+            if (duplicate._id !== keeper._id) {
+              await ctx.db.delete(duplicate._id);
+            }
+          }
+        }
       }
     }
   },
@@ -2038,13 +2154,35 @@ export const recordExploreImpression = mutation({
 
 export const getExploreCategoryCounts = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
+    if (sessionToken.length === 0) {
+      const emptyCounts = createEmptyExploreCounts();
+      return {
+        counts: emptyCounts,
+        totalCount: 0,
+        status: 'viewer_missing' as const,
+        nearbyStatus: 'ok' as const,
+      };
+    }
+
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) {
+      const emptyCounts = createEmptyExploreCounts();
+      return {
+        counts: emptyCounts,
+        totalCount: 0,
+        status: 'viewer_missing' as const,
+        nearbyStatus: 'ok' as const,
+      };
+    }
+
     const built = await buildExploreCandidates(ctx, {
-      rawUserId: args.userId,
-      maxPerGender: 2500,
+      rawUserId: viewerId,
+      maxPerGender: MAX_EXPLORE_CANDIDATES,
     });
 
     if (built.status !== 'ready') {
@@ -2057,13 +2195,17 @@ export const getExploreCategoryCounts = query({
       };
     }
 
+    const nearbyStatus = getExploreNearbyAvailabilityStatus(built.currentUser);
     const counts = countExploreCategories(built.currentUser, built.candidates);
+    if (nearbyStatus !== 'ok') {
+      counts.nearby = 0;
+    }
 
     return {
       counts,
       totalCount: built.candidates.length,
       status: 'ok' as const,
-      nearbyStatus: 'ok' as const,
+      nearbyStatus,
     };
   },
 });

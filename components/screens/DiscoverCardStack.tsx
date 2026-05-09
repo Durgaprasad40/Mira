@@ -141,6 +141,7 @@ import { asUserId } from "@/convex/id";
 import { ProfileData, getRenderableProfilePhotos, toProfileData } from "@/lib/profileData";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
+import { getExploreCategoryTagLabel } from "@/components/explore/exploreCategories";
 // usePrivateChatStore - read-only for retention UI hints (conversations count)
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { usePrivateProfileStore } from "@/stores/privateProfileStore";
@@ -586,23 +587,6 @@ export interface DiscoverCardStackProps {
   /** Callback when user swipes through all profiles in stack */
   onStackEmpty?: () => void;
 }
-
-// "Why this profile" tag labels based on category
-const CATEGORY_TAG_LABELS: Record<string, string> = {
-  serious_vibes: "Looking for something serious",
-  keep_it_casual: "Looking for casual",
-  exploring_vibes: "Still figuring it out",
-  see_where_it_goes: "Open to more",
-  open_to_vibes: "Flexible on commitment",
-  just_friends: "Looking for friends",
-  open_to_anything: "Open to anything",
-  single_parent: "Single parent",
-  new_to_dating: "New to dating",
-  nearby: "Close to you",
-  online_now: "Online now",
-  active_today: "Active today",
-  free_tonight: "Free tonight",
-};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Shared swipe direction classifier — used by BOTH the live overlay preview
@@ -4329,7 +4313,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     privateIntentKeys={currentIntentKeys}
                     desireTagKeys={(current as any).desireTagKeys}
                     isIncognito={current.isIncognito}
-                    exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
+                    exploreTag={getExploreCategoryTagLabel(exploreCategoryId)}
                     presenceStatus={currentPresenceStatus}
                     activities={current.activities}
                     gender={current.gender}

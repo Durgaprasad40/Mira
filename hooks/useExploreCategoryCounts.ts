@@ -1,22 +1,18 @@
 /**
- * DISCOVER-CATEGORY-FIX: Hook for fetching category counts from backend
+ * Hook for fetching category counts from backend Explore assignment.
  *
- * Uses the backend assignment system for accurate category counts.
  * Relationship categories are exclusive per viewer-candidate pair and are
  * chosen from mutual relationship goals; Right Now categories keep their
  * existing signal priority. Swipe exclusions remain global.
- *
- * P1-001 FIX: Uses useQuery() so count reads stay reactive and cached within
- * the active Explore session.
- *
- * P2-003 FIX: Empty result {} is treated as valid data, not an error.
- * Only actual query failures result in error state.
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { useDemoStore } from '@/stores/demoStore';
+import { useExploreProfiles } from '@/hooks/useExploreProfiles';
+import { countDemoProfilesPerExploreCategory } from '@/components/explore/exploreCategories';
 
 export type ExploreCategoryCountsStatus = 'ok' | 'viewer_missing' | 'discovery_paused';
 export type ExploreNearbyAvailabilityStatus = 'ok' | 'location_required' | 'verification_required';
@@ -31,25 +27,7 @@ type ExploreCategoryCountsResult = {
 };
 
 const EXPLORE_COUNTS_ERROR = 'Unable to load Explore right now.';
-
-// Demo mode mock counts - realistic distribution for UI testing
-const DEMO_CATEGORY_COUNTS: Record<string, number> = {
-  // Relationship categories
-  serious_vibes: 12,
-  keep_it_casual: 8,
-  exploring_vibes: 15,
-  see_where_it_goes: 10,
-  open_to_vibes: 7,
-  just_friends: 5,
-  open_to_anything: 9,
-  single_parent: 3,
-  new_to_dating: 6,
-  // Right Now categories
-  nearby: 4,
-  online_now: 6,
-  active_today: 11,
-  free_tonight: 3,
-};
+const EMPTY_INTENTS: string[] = [];
 
 function normalizeExploreCategoryCountsStatus(
   status: string | null | undefined,
@@ -77,15 +55,27 @@ function normalizeExploreNearbyStatus(
  * P2-003: Empty {} is valid data (new user with no matches), not an error
  */
 export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsResult {
-  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
+  const sessionToken = typeof token === 'string' ? token.trim() : '';
+  const demoViewerRelationshipIntent = useDemoStore((s) => {
+    const currentDemoUserId = s.currentDemoUserId;
+    if (!currentDemoUserId) return EMPTY_INTENTS;
+    return s.demoProfiles[currentDemoUserId]?.relationshipIntent ?? EMPTY_INTENTS;
+  });
+  const demoProfiles = useExploreProfiles({ enabled: isDemoMode });
+  const demoCategoryCounts = useMemo(
+    () => countDemoProfilesPerExploreCategory(demoProfiles, demoViewerRelationshipIntent),
+    [demoProfiles, demoViewerRelationshipIntent],
+  );
   const lastGoodCountsRef = useRef<Record<string, number> | null>(null);
   const lastNearbyStatusRef = useRef<ExploreNearbyAvailabilityStatus>('ok');
+  const lastGoodTokenRef = useRef<string | null>(null);
 
   // Determine if we should skip the query
-  // Skip if: demo mode (legacy store mode) OR auth not ready OR userId missing
+  // Skip if: demo mode (legacy store mode) OR auth not ready OR session token missing
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  const shouldSkip = isDemoMode || !authReady || !userId;
+  const shouldSkip = isDemoMode || !authReady || sessionToken.length === 0;
 
   // P1-001 FIX: Use useQuery() for reactive caching during the current Explore session.
   // refreshKey in args triggers re-fetch when changed (for manual refresh)
@@ -93,21 +83,30 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   // Pass token so the backend can resolve the trusted session user.
   const queryResult = useQuery(
     api.discover.getExploreCategoryCounts,
-    shouldSkip ? 'skip' : { refreshKey, userId }
+    shouldSkip ? 'skip' : { refreshKey, token: sessionToken }
   );
 
   useEffect(() => {
     if (queryResult && queryResult.status === 'ok' && queryResult.counts) {
       lastGoodCountsRef.current = queryResult.counts;
       lastNearbyStatusRef.current = normalizeExploreNearbyStatus(queryResult.nearbyStatus);
+      lastGoodTokenRef.current = sessionToken;
     }
-  }, [queryResult]);
+  }, [queryResult, sessionToken]);
+
+  useEffect(() => {
+    if (lastGoodTokenRef.current && lastGoodTokenRef.current !== sessionToken) {
+      lastGoodCountsRef.current = null;
+      lastNearbyStatusRef.current = 'ok';
+      lastGoodTokenRef.current = null;
+    }
+  }, [sessionToken]);
 
   // Legacy demo mode only: return mock counts (query was skipped above)
   // NOTE: isDemoAuthMode uses real Convex backend - NOT handled here
   if (isDemoMode) {
     return {
-      data: DEMO_CATEGORY_COUNTS,
+      data: demoCategoryCounts,
       status: 'ok',
       nearbyStatus: 'ok',
       isLoading: false,
@@ -121,12 +120,12 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     return { data: null, status: null, nearbyStatus: 'ok', isLoading: true, isError: false, error: null };
   }
 
-  // Auth ready but no userId - viewer state is unavailable, not a healthy empty result
-  if (!userId) {
+  // Auth ready but no token - viewer state is unavailable, not a healthy empty result
+  if (sessionToken.length === 0) {
     return {
-      data: lastGoodCountsRef.current,
+      data: null,
       status: 'viewer_missing',
-      nearbyStatus: lastNearbyStatusRef.current,
+      nearbyStatus: 'ok',
       isLoading: false,
       isError: false,
       error: null,
@@ -135,10 +134,11 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
 
   // Query is loading (undefined means still fetching)
   if (queryResult === undefined) {
+    const canUseLastGood = lastGoodTokenRef.current === sessionToken;
     return {
-      data: lastGoodCountsRef.current,
-      status: lastGoodCountsRef.current ? 'ok' : null,
-      nearbyStatus: lastNearbyStatusRef.current,
+      data: canUseLastGood ? lastGoodCountsRef.current : null,
+      status: canUseLastGood && lastGoodCountsRef.current ? 'ok' : null,
+      nearbyStatus: canUseLastGood ? lastNearbyStatusRef.current : 'ok',
       isLoading: true,
       isError: false,
       error: null,
@@ -148,13 +148,14 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   // P2-003 FIX: Treat empty {} as valid data, not error
   // null result from query is a failure, but {} is valid (new user with no matches)
   if (queryResult === null) {
+    const canUseLastGood = lastGoodTokenRef.current === sessionToken;
     return {
-      data: lastGoodCountsRef.current,
-      status: lastGoodCountsRef.current ? 'ok' : null,
-      nearbyStatus: lastNearbyStatusRef.current,
+      data: canUseLastGood ? lastGoodCountsRef.current : null,
+      status: canUseLastGood && lastGoodCountsRef.current ? 'ok' : null,
+      nearbyStatus: canUseLastGood ? lastNearbyStatusRef.current : 'ok',
       isLoading: false,
-      isError: lastGoodCountsRef.current == null,
-      error: lastGoodCountsRef.current == null ? EXPLORE_COUNTS_ERROR : null,
+      isError: !canUseLastGood || lastGoodCountsRef.current == null,
+      error: !canUseLastGood || lastGoodCountsRef.current == null ? EXPLORE_COUNTS_ERROR : null,
     };
   }
 

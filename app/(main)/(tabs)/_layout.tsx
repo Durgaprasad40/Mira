@@ -234,7 +234,7 @@ export default function MainTabsLayout() {
           options={{
             title: "Vibes",
             tabBarIcon: ({ color, size }) => (
-              <Ionicons name="search" size={size} color={color} />
+              <Ionicons name="sparkles" size={size} color={color} />
             ),
           }}
         />

@@ -2,8 +2,11 @@
 export {
   EXPLORE_CATEGORIES,
   RELATIONSHIP_CATEGORIES,
-  countProfilesPerCategory,
+  RIGHT_NOW_CATEGORIES,
+  countDemoProfilesPerExploreCategory,
+  getExploreCategoryTagLabel,
+  profileMatchesExploreCategory,
 } from './exploreCategories';
-export type { ExploreCategory } from './exploreCategories';
+export type { ExploreCategory, ExploreProfileLike } from './exploreCategories';
 export { HorizontalCarousel } from './HorizontalCarousel';
 export { ProfileCard } from './ProfileCard';

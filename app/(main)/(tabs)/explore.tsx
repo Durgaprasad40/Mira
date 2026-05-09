@@ -1,10 +1,3 @@
-/*
- * LOCKED (EXPLORE TAB)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- *
- * Redesigned UI - Modern, visually rich explore experience
- */
-
 import React, { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
   StyleSheet,
@@ -14,6 +7,7 @@ import {
   ScrollView,
   Animated,
   ActivityIndicator,
+  RefreshControl,
   useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -641,6 +635,14 @@ export default function ExploreScreen() {
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={isLoading && hasLoadedDataOnceRef.current}
+              onRefresh={handleRefresh}
+              tintColor={COLORS.primary}
+              colors={[COLORS.primary]}
+            />
+          }
         >
           {/* ❤️ Relationship Section */}
           {relationshipItems.length > 0 && (

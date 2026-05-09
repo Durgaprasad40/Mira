@@ -125,7 +125,7 @@ export default function ExploreCategoryScreen() {
   const items = profiles;
   const isInitialLoading = isLoading && items.length === 0;
   const isRefreshingLoadedPage = isLoading && items.length > 0;
-  const profileActionScope = `${normalizedCategoryId ?? 'invalid'}:${refreshKey}:${pageOffset}`;
+  const profileActionScope = `${normalizedCategoryId ?? 'invalid'}:${refreshKey}`;
   const isUnavailableCategory = status === 'invalid_category' || !cat;
 
   useEffect(() => {
