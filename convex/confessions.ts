@@ -1,4 +1,4 @@
-import { mutation, query } from './_generated/server';
+import { internalMutation, mutation, query, type MutationCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
@@ -12,6 +12,9 @@ const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
 
 // Confession expiry duration (24 hours in milliseconds)
 const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
+const CONFESSION_CONNECT_EXPIRY_MS = 24 * 60 * 60 * 1000;
+const CONFESSION_CONNECT_LIST_LIMIT = 50;
+const CONFESSION_CONNECT_EXPIRY_CLEANUP_BATCH = 100;
 
 // P1-01: Server-side rate limit (5 confessions per 24 hours)
 const CONFESSION_RATE_LIMIT = 5;
@@ -46,6 +49,14 @@ type SerializedConfession = {
 };
 
 type ConfessionAuthorVisibility = 'anonymous' | 'open' | 'blur_photo';
+type ConfessionConnectStatus =
+  | 'pending'
+  | 'mutual'
+  | 'rejected_by_from'
+  | 'rejected_by_to'
+  | 'cancelled_by_from'
+  | 'expired';
+type ConfessionConnectViewerRole = 'requester' | 'owner';
 
 // Canonical reply identity mode used by the current product contract.
 // Legacy 'blur' literal maps to 'blur_photo'; unknown/missing maps using isAnonymous.
@@ -319,6 +330,261 @@ async function getValidatedViewerFromToken(
   const trimmed = token?.trim();
   if (!trimmed) return null;
   return validateSessionToken(ctx, trimmed);
+}
+
+function emptyConfessionConnectStatus() {
+  return {
+    exists: false as const,
+    status: undefined as ConfessionConnectStatus | undefined,
+    viewerRole: null as ConfessionConnectViewerRole | null,
+    canRequest: false,
+    canRespond: false,
+    canCancel: false,
+    expiresAt: undefined as number | undefined,
+    respondedAt: undefined as number | undefined,
+    conversationId: undefined as Id<'conversations'> | undefined,
+  };
+}
+
+function getEffectiveConnectStatus(
+  connect: Doc<'confessionConnects'>,
+  now: number
+): ConfessionConnectStatus {
+  if (connect.status === 'pending' && connect.expiresAt <= now) {
+    return 'expired';
+  }
+  return connect.status;
+}
+
+async function patchExpiredConnectIfNeeded(
+  ctx: MutationCtx,
+  connect: Doc<'confessionConnects'>,
+  now: number
+): Promise<Doc<'confessionConnects'>> {
+  if (connect.status !== 'pending' || connect.expiresAt > now) {
+    return connect;
+  }
+  await ctx.db.patch(connect._id, {
+    status: 'expired',
+    updatedAt: now,
+  });
+  return {
+    ...connect,
+    status: 'expired',
+    updatedAt: now,
+  };
+}
+
+function serializeConfessionConnect(connect: Doc<'confessionConnects'>) {
+  const promoted = connect.status === 'mutual' && !!connect.conversationId;
+  return {
+    connectId: connect._id,
+    confessionId: connect.confessionId,
+    status: connect.status,
+    expiresAt: connect.expiresAt,
+    respondedAt: connect.respondedAt,
+    conversationId: connect.conversationId,
+    promoted,
+    promotionPending: connect.status === 'mutual' && !promoted,
+  };
+}
+
+async function getExistingConfessionConnect(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  confessionId: Id<'confessions'>
+): Promise<Doc<'confessionConnects'> | null> {
+  return ctx.db
+    .query('confessionConnects')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
+    .first();
+}
+
+function userIsConnectEligible(user: Doc<'users'> | null): boolean {
+  return !!user && user.isActive !== false && !user.deletedAt && !user.isBanned;
+}
+
+async function ensureConversationParticipantRow(
+  ctx: MutationCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>
+): Promise<void> {
+  const existing = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user_conversation', (q) =>
+      q.eq('userId', userId).eq('conversationId', conversationId)
+    )
+    .first();
+  if (existing) return;
+
+  await ctx.db.insert('conversationParticipants', {
+    conversationId,
+    userId,
+    unreadCount: 0,
+  });
+}
+
+async function hasBlockBetweenUsers(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): Promise<boolean> {
+  const direct = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userA).eq('blockedUserId', userB)
+    )
+    .first();
+  if (direct) return true;
+
+  const reverse = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userB).eq('blockedUserId', userA)
+    )
+    .first();
+  return !!reverse;
+}
+
+async function hasReportBetweenUsers(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): Promise<boolean> {
+  const reportAToB = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userA).eq('reportedUserId', userB)
+    )
+    .first();
+  if (reportAToB) return true;
+
+  const reportBToA = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userB).eq('reportedUserId', userA)
+    )
+    .first();
+  return !!reportBToA;
+}
+
+function confessionIsConnectable(confession: Doc<'confessions'>, now: number): boolean {
+  return (
+    !confession.isDeleted &&
+    (confession.expiresAt === undefined || confession.expiresAt > now) &&
+    !isHiddenByReports(confession)
+  );
+}
+
+async function pairCanUseConfessionConnect(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  requesterId: Id<'users'>,
+  ownerId: Id<'users'>
+): Promise<boolean> {
+  if (requesterId === ownerId) return false;
+
+  const requester = await ctx.db.get(requesterId);
+  const owner = await ctx.db.get(ownerId);
+  if (!userIsConnectEligible(requester) || !userIsConnectEligible(owner)) return false;
+
+  if (await hasBlockBetweenUsers(ctx, requesterId, ownerId)) return false;
+  if (await hasReportBetweenUsers(ctx, requesterId, ownerId)) return false;
+
+  return true;
+}
+
+function confessionAllowsConnectPromotion(
+  confession: Doc<'confessions'>,
+  connect: Doc<'confessionConnects'>,
+  now: number,
+  beingMarkedMutual: boolean
+): boolean {
+  if (confession.isDeleted || isHiddenByReports(confession)) return false;
+
+  if (confession.expiresAt === undefined || confession.expiresAt > now) {
+    return true;
+  }
+
+  // Retry path: if a connect had already become mutual before confession
+  // expiry, a missing conversationId can still be repaired into a permanent
+  // conversation. A pending connect cannot be accepted after expiry.
+  return (
+    !beingMarkedMutual &&
+    connect.status === 'mutual' &&
+    typeof connect.respondedAt === 'number' &&
+    connect.respondedAt <= confession.expiresAt
+  );
+}
+
+async function ensureMutualConfessionConversation(
+  ctx: MutationCtx,
+  connect: Doc<'confessionConnects'>,
+  confession: Doc<'confessions'>,
+  now: number,
+  options?: { beingMarkedMutual?: boolean }
+): Promise<Id<'conversations'>> {
+  const beingMarkedMutual = options?.beingMarkedMutual === true;
+  if (connect.status !== 'mutual' && !beingMarkedMutual) {
+    throw new Error('Connect request unavailable');
+  }
+  if (
+    confession._id !== connect.confessionId ||
+    confession.userId !== connect.toUserId ||
+    confession.taggedUserId !== connect.fromUserId
+  ) {
+    throw new Error('Connect request unavailable');
+  }
+  if (!confessionAllowsConnectPromotion(confession, connect, now, beingMarkedMutual)) {
+    throw new Error('Connect request unavailable');
+  }
+  if (!(await pairCanUseConfessionConnect(ctx, connect.fromUserId, connect.toUserId))) {
+    throw new Error('Connect request unavailable');
+  }
+
+  let conversation: Doc<'conversations'> | null = null;
+  if (connect.conversationId) {
+    const existingById = await ctx.db.get(connect.conversationId);
+    if (
+      existingById &&
+      (!existingById.confessionId || existingById.confessionId === confession._id)
+    ) {
+      conversation = existingById;
+    }
+  }
+
+  if (!conversation) {
+    conversation = await ctx.db
+      .query('conversations')
+      .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
+      .first();
+  }
+
+  const participants = [connect.fromUserId, connect.toUserId];
+  if (conversation) {
+    await ctx.db.patch(conversation._id, {
+      confessionId: confession._id,
+      participants,
+      isPreMatch: false,
+      expiresAt: undefined,
+      anonymousParticipantId: undefined,
+      connectionSource: 'confession',
+    });
+    await ensureConversationParticipantRow(ctx, conversation._id, connect.fromUserId);
+    await ensureConversationParticipantRow(ctx, conversation._id, connect.toUserId);
+    return conversation._id;
+  }
+
+  const conversationId = await ctx.db.insert('conversations', {
+    confessionId: confession._id,
+    participants,
+    isPreMatch: false,
+    createdAt: now,
+    lastMessageAt: now,
+    connectionSource: 'confession',
+  });
+
+  await ensureConversationParticipantRow(ctx, conversationId, connect.fromUserId);
+  await ensureConversationParticipantRow(ctx, conversationId, connect.toUserId);
+  return conversationId;
 }
 
 // Create a new confession
@@ -1875,6 +2141,446 @@ export const consumeConfessionTagProfileViewGrant = mutation({
       canUseDatingActions:
         confession.taggedUserId === viewerId && confession.userId !== viewerId,
     };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Confess Connect / Reject backend foundation.
+//
+// Stores the authoritative two-sided decision state. Once mutual, the
+// backend promotes/creates a permanent Phase-1 conversation without revealing
+// identity before both sides have opted in.
+// ═══════════════════════════════════════════════════════════════════════════
+export const requestConfessionConnect = mutation({
+  args: {
+    token: v.string(),
+    confessionId: v.id('confessions'),
+  },
+  handler: async (ctx, { token, confessionId }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      throw new Error('Connect unavailable');
+    }
+
+    const confession = await ctx.db.get(confessionId);
+    const now = Date.now();
+    if (!confession || !confessionIsConnectable(confession, now)) {
+      throw new Error('Connect unavailable');
+    }
+
+    if (!confession.taggedUserId || confession.taggedUserId !== viewerId) {
+      throw new Error('Connect unavailable');
+    }
+
+    if (await hasViewerReportedConfession(ctx, viewerId, confessionId)) {
+      throw new Error('Connect unavailable');
+    }
+
+    if (!(await pairCanUseConfessionConnect(ctx, viewerId, confession.userId))) {
+      throw new Error('Connect unavailable');
+    }
+
+    const existing = await getExistingConfessionConnect(ctx, confessionId);
+    if (existing) {
+      if (existing.fromUserId !== viewerId || existing.toUserId !== confession.userId) {
+        throw new Error('Connect unavailable');
+      }
+      const current = await patchExpiredConnectIfNeeded(ctx, existing, now);
+      return serializeConfessionConnect(current);
+    }
+
+    const connectId = await ctx.db.insert('confessionConnects', {
+      confessionId,
+      fromUserId: viewerId,
+      toUserId: confession.userId,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+      expiresAt: now + CONFESSION_CONNECT_EXPIRY_MS,
+    });
+
+    const connect = await ctx.db.get(connectId);
+    if (!connect) {
+      throw new Error('Connect unavailable');
+    }
+    return serializeConfessionConnect(connect);
+  },
+});
+
+export const respondToConfessionConnect = mutation({
+  args: {
+    token: v.string(),
+    connectId: v.id('confessionConnects'),
+    decision: v.union(v.literal('connect'), v.literal('reject')),
+  },
+  handler: async (ctx, { token, connectId, decision }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      throw new Error('Connect request unavailable');
+    }
+
+    let connect = await ctx.db.get(connectId);
+    if (!connect || connect.toUserId !== viewerId) {
+      throw new Error('Connect request unavailable');
+    }
+
+    const now = Date.now();
+    connect = await patchExpiredConnectIfNeeded(ctx, connect, now);
+    if (connect.status === 'expired') {
+      return serializeConfessionConnect(connect);
+    }
+
+    const confession = await ctx.db.get(connect.confessionId);
+    if (
+      !confession ||
+      confession.userId !== viewerId ||
+      confession.userId !== connect.toUserId ||
+      confession.taggedUserId !== connect.fromUserId
+    ) {
+      throw new Error('Connect request unavailable');
+    }
+
+    if (decision === 'connect' && connect.status === 'mutual') {
+      const conversationId = await ensureMutualConfessionConversation(
+        ctx,
+        connect,
+        confession,
+        now
+      );
+      if (connect.conversationId !== conversationId) {
+        await ctx.db.patch(connectId, {
+          conversationId,
+          updatedAt: now,
+        });
+      }
+      const updated = await ctx.db.get(connectId);
+      if (!updated) {
+        throw new Error('Connect request unavailable');
+      }
+      return serializeConfessionConnect(updated);
+    }
+    if (decision === 'reject' && connect.status === 'rejected_by_to') {
+      return serializeConfessionConnect(connect);
+    }
+    if (connect.status !== 'pending') {
+      return serializeConfessionConnect(connect);
+    }
+
+    if (decision === 'reject') {
+      if (!confessionIsConnectable(confession, now)) {
+        throw new Error('Connect request unavailable');
+      }
+      if (!(await pairCanUseConfessionConnect(ctx, connect.fromUserId, connect.toUserId))) {
+        throw new Error('Connect request unavailable');
+      }
+      await ctx.db.patch(connectId, {
+        status: 'rejected_by_to',
+        updatedAt: now,
+        respondedAt: now,
+      });
+      const updated = await ctx.db.get(connectId);
+      if (!updated) {
+        throw new Error('Connect request unavailable');
+      }
+      return serializeConfessionConnect(updated);
+    }
+
+    const conversationId = await ensureMutualConfessionConversation(
+      ctx,
+      connect,
+      confession,
+      now,
+      { beingMarkedMutual: true }
+    );
+
+    await ctx.db.patch(connectId, {
+      status: 'mutual',
+      conversationId,
+      updatedAt: now,
+      respondedAt: now,
+    });
+
+    const updated = await ctx.db.get(connectId);
+    if (!updated) {
+      throw new Error('Connect request unavailable');
+    }
+    return serializeConfessionConnect(updated);
+  },
+});
+
+export const promoteConfessionConnectToConversation = mutation({
+  args: {
+    token: v.string(),
+    connectId: v.id('confessionConnects'),
+  },
+  handler: async (ctx, { token, connectId }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      throw new Error('Connect request unavailable');
+    }
+
+    const connect = await ctx.db.get(connectId);
+    if (
+      !connect ||
+      (connect.fromUserId !== viewerId && connect.toUserId !== viewerId) ||
+      connect.status !== 'mutual'
+    ) {
+      throw new Error('Connect request unavailable');
+    }
+
+    const confession = await ctx.db.get(connect.confessionId);
+    if (!confession) {
+      throw new Error('Connect request unavailable');
+    }
+
+    const now = Date.now();
+    const conversationId = await ensureMutualConfessionConversation(
+      ctx,
+      connect,
+      confession,
+      now
+    );
+
+    if (connect.conversationId !== conversationId) {
+      await ctx.db.patch(connectId, {
+        conversationId,
+        updatedAt: now,
+      });
+    }
+
+    const updated = await ctx.db.get(connectId);
+    if (!updated) {
+      throw new Error('Connect request unavailable');
+    }
+    return serializeConfessionConnect(updated);
+  },
+});
+
+export const cancelConfessionConnect = mutation({
+  args: {
+    token: v.string(),
+    connectId: v.id('confessionConnects'),
+  },
+  handler: async (ctx, { token, connectId }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      throw new Error('Connect request unavailable');
+    }
+
+    let connect = await ctx.db.get(connectId);
+    if (!connect || connect.fromUserId !== viewerId) {
+      throw new Error('Connect request unavailable');
+    }
+
+    const now = Date.now();
+    connect = await patchExpiredConnectIfNeeded(ctx, connect, now);
+    if (connect.status === 'expired' || connect.status === 'cancelled_by_from') {
+      return serializeConfessionConnect(connect);
+    }
+    if (connect.status !== 'pending') {
+      return serializeConfessionConnect(connect);
+    }
+
+    await ctx.db.patch(connectId, {
+      status: 'cancelled_by_from',
+      updatedAt: now,
+      respondedAt: now,
+    });
+
+    const updated = await ctx.db.get(connectId);
+    if (!updated) {
+      throw new Error('Connect request unavailable');
+    }
+    return serializeConfessionConnect(updated);
+  },
+});
+
+export const getConfessionConnectStatus = query({
+  args: {
+    token: v.string(),
+    confessionId: v.id('confessions'),
+  },
+  handler: async (ctx, { token, confessionId }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      return emptyConfessionConnectStatus();
+    }
+
+    const confession = await ctx.db.get(confessionId);
+    if (!confession) {
+      return emptyConfessionConnectStatus();
+    }
+
+    const viewerRole: ConfessionConnectViewerRole | null =
+      confession.taggedUserId === viewerId
+        ? 'requester'
+        : confession.userId === viewerId
+          ? 'owner'
+          : null;
+
+    if (!viewerRole) {
+      return emptyConfessionConnectStatus();
+    }
+
+    const now = Date.now();
+    const existing = await getExistingConfessionConnect(ctx, confessionId);
+    const effectiveStatus = existing
+      ? getEffectiveConnectStatus(existing, now)
+      : undefined;
+    const pendingIsActive =
+      existing !== null &&
+      effectiveStatus === 'pending' &&
+      existing.expiresAt > now;
+
+    let canRequest = false;
+    let canRespond = false;
+    let canCancel = false;
+
+    if (confession.taggedUserId) {
+      const confessionAvailable = confessionIsConnectable(confession, now);
+      const pairSafe = await pairCanUseConfessionConnect(
+        ctx,
+        confession.taggedUserId,
+        confession.userId
+      );
+
+      canRequest =
+        viewerRole === 'requester' &&
+        !existing &&
+        confessionAvailable &&
+        pairSafe &&
+        !(await hasViewerReportedConfession(ctx, viewerId, confessionId));
+
+      canRespond =
+        viewerRole === 'owner' &&
+        pendingIsActive &&
+        confessionAvailable &&
+        pairSafe;
+
+      canCancel = viewerRole === 'requester' && pendingIsActive;
+    }
+
+    if (!existing) {
+      return {
+        ...emptyConfessionConnectStatus(),
+        viewerRole,
+        canRequest,
+      };
+    }
+
+    return {
+      exists: true as const,
+      connectId: existing._id,
+      status: effectiveStatus,
+      viewerRole,
+      canRequest,
+      canRespond,
+      canCancel,
+      expiresAt: existing.expiresAt,
+      respondedAt: existing.respondedAt,
+      conversationId: existing.conversationId,
+    };
+  },
+});
+
+export const listPendingConfessionConnectsForMe = query({
+  args: {
+    token: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, { token, limit }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      return [];
+    }
+
+    const now = Date.now();
+    const boundedLimit = Math.max(
+      1,
+      Math.min(CONFESSION_CONNECT_LIST_LIMIT, limit ?? CONFESSION_CONNECT_LIST_LIMIT)
+    );
+    const rows = await ctx.db
+      .query('confessionConnects')
+      .withIndex('by_to_status', (q) =>
+        q.eq('toUserId', viewerId).eq('status', 'pending')
+      )
+      .order('desc')
+      .take(boundedLimit);
+
+    const result: Array<{
+      connectId: Id<'confessionConnects'>;
+      confessionId: Id<'confessions'>;
+      status: 'pending';
+      createdAt: number;
+      updatedAt: number;
+      expiresAt: number;
+      confessionText: string;
+      confessionMood: Doc<'confessions'>['mood'];
+      confessionCreatedAt: number;
+    }> = [];
+
+    for (const connect of rows) {
+      if (connect.expiresAt <= now) continue;
+
+      const confession = await ctx.db.get(connect.confessionId);
+      if (
+        !confession ||
+        confession.userId !== viewerId ||
+        confession.taggedUserId !== connect.fromUserId ||
+        !confessionIsConnectable(confession, now)
+      ) {
+        continue;
+      }
+
+      if (!(await pairCanUseConfessionConnect(ctx, connect.fromUserId, connect.toUserId))) {
+        continue;
+      }
+
+      result.push({
+        connectId: connect._id,
+        confessionId: connect.confessionId,
+        status: 'pending',
+        createdAt: connect.createdAt,
+        updatedAt: connect.updatedAt,
+        expiresAt: connect.expiresAt,
+        confessionText: confession.text,
+        confessionMood: confession.mood,
+        confessionCreatedAt: confession.createdAt,
+      });
+    }
+
+    return result;
+  },
+});
+
+export const cleanupExpiredConfessionConnects = internalMutation({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, { limit }) => {
+    const now = Date.now();
+    const boundedLimit = Math.max(
+      1,
+      Math.min(CONFESSION_CONNECT_EXPIRY_CLEANUP_BATCH, limit ?? CONFESSION_CONNECT_EXPIRY_CLEANUP_BATCH)
+    );
+    const expiredPending = await ctx.db
+      .query('confessionConnects')
+      .withIndex('by_status_expires', (q) =>
+        q.eq('status', 'pending').lte('expiresAt', now)
+      )
+      .take(boundedLimit);
+
+    let expired = 0;
+    for (const connect of expiredPending) {
+      if (connect.status !== 'pending' || connect.expiresAt > now) continue;
+      await ctx.db.patch(connect._id, {
+        status: 'expired',
+        updatedAt: now,
+      });
+      expired += 1;
+    }
+
+    return { expired };
   },
 });
 

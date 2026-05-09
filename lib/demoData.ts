@@ -2728,10 +2728,8 @@ export const DEMO_CONFESSION_CHATS: ConfessionChat[] = [
       { id: 'ccm_1', chatId: 'cc_1', senderId: 'demo_user_1', text: 'This hit me hard. Did you ever reach out?', createdAt: Date.now() - 1000 * 60 * 60 },
       { id: 'ccm_2', chatId: 'cc_1', senderId: 'demo_profile_2', text: 'No, I was too scared. Still am.', createdAt: Date.now() - 1000 * 60 * 55 },
     ],
-    isRevealed: false,
     createdAt: Date.now() - 1000 * 60 * 60,
     expiresAt: Date.now() + 1000 * 60 * 60 * 23,
-    mutualRevealStatus: 'none' as const,
   },
   {
     id: 'cc_2',
@@ -2743,10 +2741,8 @@ export const DEMO_CONFESSION_CHATS: ConfessionChat[] = [
       { id: 'ccm_4', chatId: 'cc_2', senderId: 'demo_profile_4', text: 'What if they have moved on?', createdAt: Date.now() - 1000 * 60 * 115 },
       { id: 'ccm_5', chatId: 'cc_2', senderId: 'demo_profile_5', text: 'Then at least you will know. Closure is a gift.', createdAt: Date.now() - 1000 * 60 * 110 },
     ],
-    isRevealed: false,
     createdAt: Date.now() - 1000 * 60 * 120,
     expiresAt: Date.now() + 1000 * 60 * 60 * 22,
-    mutualRevealStatus: 'none' as const,
   },
 ];
 

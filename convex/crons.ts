@@ -63,6 +63,15 @@ crons.interval(
   internal.truthDare.cleanupExpiredTodData
 );
 
+// Confess Connect: mark stale pending connect requests as expired. Rows are
+// retained for audit/idempotency; only pending rows are patched.
+crons.hourly(
+  'cleanup-expired-confession-connects',
+  { minuteUTC: 40 },
+  internal.confessions.cleanupExpiredConfessionConnects,
+  {}
+);
+
 // Phase-2 Chat Rooms: Cleanup expired messages every 5 minutes
 // Deletes messages past their 24h expiresAt (plus bounded legacy sweep for
 // pre-retention rows) and re-syncs per-room messageCount from source of truth.

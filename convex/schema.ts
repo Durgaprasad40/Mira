@@ -2221,6 +2221,33 @@ export default defineSchema({
     .index('by_user_created', ['userId', 'createdAt'])
     .index('by_confession', ['confessionId']),
 
+  // Backend-authoritative Confess Connect / Reject state. `conversationId` is
+  // set after both sides connect and the Phase-1 conversation is promoted.
+  confessionConnects: defineTable({
+    confessionId: v.id('confessions'),
+    fromUserId: v.id('users'), // tagged user / requester
+    toUserId: v.id('users'),   // confession author / owner
+    status: v.union(
+      v.literal('pending'),
+      v.literal('mutual'),
+      v.literal('rejected_by_from'),
+      v.literal('rejected_by_to'),
+      v.literal('cancelled_by_from'),
+      v.literal('expired')
+    ),
+    conversationId: v.optional(v.id('conversations')),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    respondedAt: v.optional(v.number()),
+    expiresAt: v.number(),
+  })
+    .index('by_confession', ['confessionId'])
+    .index('by_from_to', ['fromUserId', 'toUserId'])
+    .index('by_to_status', ['toUserId', 'status'])
+    .index('by_from_status', ['fromUserId', 'status'])
+    .index('by_expires', ['expiresAt'])
+    .index('by_status_expires', ['status', 'expiresAt']),
+
   // Confession-tag profile-view grants.
   // Records that a viewer was given permission to open a tagged user's
   // profile via the @mention chip on a specific confession. The grant is

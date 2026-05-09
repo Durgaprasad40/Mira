@@ -105,6 +105,29 @@ type Confession = {
   taggedUserName?: string;
 };
 
+type ConfessionConnectStatusValue =
+  | 'pending'
+  | 'mutual'
+  | 'rejected_by_from'
+  | 'rejected_by_to'
+  | 'cancelled_by_from'
+  | 'expired';
+
+type ConfessionConnectViewerRole = 'requester' | 'owner' | null;
+
+type ConfessionConnectStatusResult = {
+  exists: boolean;
+  connectId?: string;
+  status?: ConfessionConnectStatusValue;
+  viewerRole: ConfessionConnectViewerRole;
+  canRequest: boolean;
+  canRespond: boolean;
+  canCancel: boolean;
+  expiresAt?: number;
+  respondedAt?: number;
+  conversationId?: string;
+};
+
 // Match homepage avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
 const REPLY_AVATAR_SIZE = moderateScale(22, 0.3);
@@ -244,6 +267,15 @@ export default function ConfessionThreadScreen() {
   const consumeTagProfileViewGrantMutation = useMutation(
     api.confessions.consumeConfessionTagProfileViewGrant
   );
+  const requestConfessionConnectMutation = useMutation(api.confessions.requestConfessionConnect);
+  const respondToConfessionConnectMutation = useMutation(api.confessions.respondToConfessionConnect);
+  const cancelConfessionConnectMutation = useMutation(api.confessions.cancelConfessionConnect);
+  const connectStatus = useQuery(
+    api.confessions.getConfessionConnectStatus,
+    !isDemoMode && token && confessionId
+      ? { token, confessionId: confessionId as any }
+      : 'skip'
+  ) as ConfessionConnectStatusResult | undefined;
 
   // Composer state
   const [replyText, setReplyText] = useState('');
@@ -252,6 +284,8 @@ export default function ConfessionThreadScreen() {
   const [editingReplyId, setEditingReplyId] = useState<string | null>(null);
   const [replyingToReplyId, setReplyingToReplyId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [connectAction, setConnectAction] = useState<'request' | 'cancel' | 'connect' | 'reject' | null>(null);
+  const [connectDismissed, setConnectDismissed] = useState(false);
   const inputRef = useRef<TextInput>(null);
 
   // Long-press menu state (viewer's own comment).
@@ -363,6 +397,105 @@ export default function ConfessionThreadScreen() {
   const handleBack = useCallback(() => {
     router.back();
   }, [router]);
+
+  const openMessagesConversation = useCallback((conversationId?: string | null) => {
+    const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
+    if (!normalized) {
+      Alert.alert('Chat unavailable', 'The conversation is not ready yet.');
+      return;
+    }
+    safePush(
+      router,
+      `/(main)/(tabs)/messages/chat/${normalized}?source=confession` as any,
+      'thread->confessConnectChat'
+    );
+  }, [router]);
+
+  const handleRequestConnect = useCallback(async () => {
+    if (isDemoMode) {
+      setConnectDismissed(false);
+      Alert.alert('Demo mode', 'Connect requests are available in live mode.');
+      return;
+    }
+    if (!token || !confessionId || connectAction) return;
+    setConnectAction('request');
+    try {
+      const result = await requestConfessionConnectMutation({
+        token,
+        confessionId: confessionId as any,
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+      setConnectDismissed(false);
+      if (result?.status === 'mutual' && result.conversationId) {
+        openMessagesConversation(result.conversationId);
+      } else {
+        Alert.alert('Request sent', 'If they connect too, Mira will open a chat in Messages.');
+      }
+    } catch (error: any) {
+      Alert.alert('Connect unavailable', error?.message || 'Please try again later.');
+    } finally {
+      setConnectAction(null);
+    }
+  }, [
+    confessionId,
+    connectAction,
+    isDemoMode,
+    openMessagesConversation,
+    requestConfessionConnectMutation,
+    token,
+  ]);
+
+  const handleSkipConnect = useCallback(async () => {
+    if (!connectStatus?.connectId || !connectStatus.canCancel || !token || connectAction) {
+      setConnectDismissed(true);
+      return;
+    }
+    setConnectAction('cancel');
+    try {
+      await cancelConfessionConnectMutation({
+        token,
+        connectId: connectStatus.connectId as any,
+      });
+    } catch (error: any) {
+      Alert.alert('Unable to cancel', error?.message || 'Please try again later.');
+    } finally {
+      setConnectAction(null);
+    }
+  }, [cancelConfessionConnectMutation, connectAction, connectStatus, token]);
+
+  const handleOwnerConnectDecision = useCallback(async (decision: 'connect' | 'reject') => {
+    if (!connectStatus?.connectId || !token || connectAction) {
+      Alert.alert('Connect unavailable', 'This request is not ready yet.');
+      return;
+    }
+    setConnectAction(decision);
+    try {
+      const result = await respondToConfessionConnectMutation({
+        token,
+        connectId: connectStatus.connectId as any,
+        decision,
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+
+      if (decision === 'connect') {
+        if (result?.conversationId) {
+          openMessagesConversation(result.conversationId);
+        } else {
+          Alert.alert('Connected', 'The chat is being prepared. Please try opening it again.');
+        }
+      } else {
+        Alert.alert('Request declined', 'This connect request has been closed.');
+      }
+    } catch (error: any) {
+      Alert.alert('Connect unavailable', error?.message || 'Please try again later.');
+    } finally {
+      setConnectAction(null);
+    }
+  }, [
+    connectAction,
+    connectStatus,
+    openMessagesConversation,
+    respondToConfessionConnectMutation,
+    token,
+  ]);
 
   // Snapshot author info.
   //
@@ -893,6 +1026,223 @@ export default function ConfessionThreadScreen() {
     }
   }, [consumeTagProfileViewGrantMutation, router, token]);
 
+  const renderConnectPanel = useCallback(() => {
+    if (isDemoMode) return null;
+    if (!token || !confessionId) return null;
+    if (connectStatus === undefined) {
+      return (
+        <View style={styles.connectPanel}>
+          <ActivityIndicator size="small" color={COLORS.primary} />
+          <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
+            Checking connect status...
+          </Text>
+        </View>
+      );
+    }
+
+    const status = connectStatus.status;
+    const role = connectStatus.viewerRole;
+    const actionBusy = connectAction !== null;
+    const disabled = actionBusy || isThreadClosed;
+
+    if (!role) return null;
+
+    if (status === 'mutual') {
+      return (
+        <View style={[styles.connectPanel, styles.connectPanelSuccess]}>
+          <View style={styles.connectPanelHeader}>
+            <Ionicons name="checkmark-circle" size={16} color="#34C759" />
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connected</Text>
+          </View>
+          <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
+            You both agreed. Continue in Messages.
+          </Text>
+          <TouchableOpacity
+            style={styles.connectPrimaryButton}
+            onPress={() => openMessagesConversation(connectStatus.conversationId)}
+            disabled={!connectStatus.conversationId}
+            activeOpacity={0.82}
+          >
+            <Ionicons name="chatbubble-ellipses-outline" size={15} color={COLORS.white} />
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPrimaryButtonText}>Open Chat</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    if (
+      status === 'rejected_by_from' ||
+      status === 'rejected_by_to' ||
+      status === 'cancelled_by_from' ||
+      status === 'expired'
+    ) {
+      const copy =
+        status === 'expired'
+          ? 'This connect request expired.'
+          : status === 'cancelled_by_from'
+            ? 'This connect request was cancelled.'
+            : 'This connect request was declined.';
+      return (
+        <View style={styles.connectPanel}>
+          <View style={styles.connectPanelHeader}>
+            <Ionicons name="close-circle-outline" size={16} color={COLORS.textMuted} />
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connect closed</Text>
+          </View>
+          <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>{copy}</Text>
+        </View>
+      );
+    }
+
+    if (role === 'requester') {
+      if (status === 'pending') {
+        return (
+          <View style={styles.connectPanel}>
+            <View style={styles.connectPanelHeader}>
+              <Ionicons name="time-outline" size={16} color={COLORS.primary} />
+              <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Request sent</Text>
+            </View>
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
+              Waiting for them to connect. Your identity stays protected until both sides agree.
+            </Text>
+            {connectStatus.canCancel ? (
+              <TouchableOpacity
+                style={styles.connectSecondaryButton}
+                onPress={handleSkipConnect}
+                disabled={actionBusy}
+                activeOpacity={0.82}
+              >
+                {connectAction === 'cancel' ? (
+                  <ActivityIndicator size="small" color={COLORS.text} />
+                ) : (
+                  <>
+                    <Ionicons name="close" size={15} color={COLORS.text} />
+                    <Text maxFontSizeMultiplier={1.2} style={styles.connectSecondaryButtonText}>Cancel Request</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        );
+      }
+
+      if (!connectStatus.exists && connectStatus.canRequest && !connectDismissed) {
+        return (
+          <View style={styles.connectPanel}>
+            <View style={styles.connectPanelHeader}>
+              <Ionicons name="heart-outline" size={16} color={COLORS.primary} />
+              <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connect?</Text>
+            </View>
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
+              If you both choose Connect, Mira will open a real chat in Messages.
+            </Text>
+            <View style={styles.connectButtonRow}>
+              <TouchableOpacity
+                style={[styles.connectPrimaryButton, disabled && styles.connectButtonDisabled]}
+                onPress={handleRequestConnect}
+                disabled={disabled}
+                activeOpacity={0.82}
+              >
+                {connectAction === 'request' ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <>
+                    <Ionicons name="heart" size={15} color={COLORS.white} />
+                    <Text maxFontSizeMultiplier={1.2} style={styles.connectPrimaryButtonText}>Connect</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.connectSecondaryButton}
+                onPress={handleSkipConnect}
+                disabled={actionBusy}
+                activeOpacity={0.82}
+              >
+                <Ionicons name="close" size={15} color={COLORS.text} />
+                <Text maxFontSizeMultiplier={1.2} style={styles.connectSecondaryButtonText}>Skip</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        );
+      }
+
+      if (connectDismissed) {
+        return (
+          <View style={styles.connectPanel}>
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
+              Connect skipped for now.
+            </Text>
+          </View>
+        );
+      }
+    }
+
+    if (role === 'owner') {
+      if (status === 'pending' && connectStatus.canRespond) {
+        return (
+          <View style={styles.connectPanel}>
+            <View style={styles.connectPanelHeader}>
+              <Ionicons name="heart-outline" size={16} color={COLORS.primary} />
+              <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connect request</Text>
+            </View>
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
+              They want to connect. If you agree, Mira will open a real chat in Messages.
+            </Text>
+            <View style={styles.connectButtonRow}>
+              <TouchableOpacity
+                style={[styles.connectPrimaryButton, disabled && styles.connectButtonDisabled]}
+                onPress={() => void handleOwnerConnectDecision('connect')}
+                disabled={disabled}
+                activeOpacity={0.82}
+              >
+                {connectAction === 'connect' ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <>
+                    <Ionicons name="checkmark" size={15} color={COLORS.white} />
+                    <Text maxFontSizeMultiplier={1.2} style={styles.connectPrimaryButtonText}>Connect</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.connectSecondaryButton}
+                onPress={() => void handleOwnerConnectDecision('reject')}
+                disabled={actionBusy}
+                activeOpacity={0.82}
+              >
+                {connectAction === 'reject' ? (
+                  <ActivityIndicator size="small" color={COLORS.text} />
+                ) : (
+                  <>
+                    <Ionicons name="close" size={15} color={COLORS.text} />
+                    <Text maxFontSizeMultiplier={1.2} style={styles.connectSecondaryButtonText}>Reject</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        );
+      }
+
+      if (!connectStatus.exists) {
+        return null;
+      }
+    }
+
+    return null;
+  }, [
+    confessionId,
+    connectAction,
+    connectDismissed,
+    connectStatus,
+    handleOwnerConnectDecision,
+    handleRequestConnect,
+    handleSkipConnect,
+    isDemoMode,
+    isThreadClosed,
+    openMessagesConversation,
+    token,
+  ]);
+
   // ────────────────────────────────────────────────────────────
   // Header (hero confession)
   // ────────────────────────────────────────────────────────────
@@ -1016,6 +1366,8 @@ export default function ConfessionThreadScreen() {
           </View>
         ) : null}
 
+        {renderConnectPanel()}
+
         {topLevelReplies.length > 0 ? (
           <View style={styles.repliesSectionHeader}>
             <Text maxFontSizeMultiplier={1.2} style={styles.repliesSectionTitle}>
@@ -1026,7 +1378,7 @@ export default function ConfessionThreadScreen() {
         ) : null}
       </View>
     );
-  }, [closedThreadMessage, confession, convexCurrentUser, currentUserId, handleTagPress, isDemoMode, isThreadClosed, topLevelReplies.length]);
+  }, [closedThreadMessage, confession, convexCurrentUser, currentUserId, handleTagPress, isDemoMode, isThreadClosed, renderConnectPanel, topLevelReplies.length]);
 
   const renderEmpty = useCallback(() => {
     if (isLoading) return null;
@@ -1621,6 +1973,80 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
     flex: 1,
+  },
+  connectPanel: {
+    marginHorizontal: SPACING.md,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: 14,
+    backgroundColor: COLORS.background,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+    gap: SPACING.sm,
+  },
+  connectPanelSuccess: {
+    backgroundColor: 'rgba(52,199,89,0.08)',
+    borderColor: 'rgba(52,199,89,0.22)',
+  },
+  connectPanelHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+  },
+  connectPanelTitle: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  connectPanelText: {
+    fontSize: FONT_SIZE.caption,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
+    color: COLORS.textLight,
+  },
+  connectButtonRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  connectPrimaryButton: {
+    flex: 1,
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+  },
+  connectSecondaryButton: {
+    flex: 1,
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+  },
+  connectButtonDisabled: {
+    opacity: 0.55,
+  },
+  connectPrimaryButtonText: {
+    fontSize: FONT_SIZE.caption,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  connectSecondaryButtonText: {
+    fontSize: FONT_SIZE.caption,
+    fontWeight: '700',
+    color: COLORS.text,
   },
 
   // Replies section header

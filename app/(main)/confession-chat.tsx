@@ -11,21 +11,45 @@ import {
   NativeSyntheticEvent,
   NativeScrollEvent,
   Keyboard,
-  LayoutChangeEvent,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useMutation, useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { MutualRevealStatus } from '@/types';
 import { logDebugEvent } from '@/lib/debugEventLogger';
-import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
+import { formatTime } from '@/utils/chatTime';
 import { Toast } from '@/components/ui/Toast';
+
+type ConfessionConnectStatusValue =
+  | 'pending'
+  | 'mutual'
+  | 'rejected_by_from'
+  | 'rejected_by_to'
+  | 'cancelled_by_from'
+  | 'expired';
+
+type ConfessionConnectViewerRole = 'requester' | 'owner' | null;
+
+type ConfessionConnectStatusResult = {
+  exists: boolean;
+  connectId?: string;
+  status?: ConfessionConnectStatusValue;
+  viewerRole: ConfessionConnectViewerRole;
+  canRequest: boolean;
+  canRespond: boolean;
+  canCancel: boolean;
+  expiresAt?: number;
+  respondedAt?: number;
+  conversationId?: string;
+};
 
 function formatTimeLeft(expiresAt: number): string {
   const diff = expiresAt - Date.now();
@@ -36,56 +60,35 @@ function formatTimeLeft(expiresAt: number): string {
   return `${minutes}m left`;
 }
 
-function getRevealStatusText(
-  status: MutualRevealStatus,
-  currentUserId: string,
-  initiatorId: string,
-  declinedBy?: string,
-): string {
-  switch (status) {
-    case 'both_agreed':
-      return 'Both sides agreed — identities revealed!';
-    case 'declined':
-      return declinedBy === currentUserId
-        ? 'You declined the reveal request.'
-        : 'The other person declined the reveal.';
-    case 'initiator_agreed':
-      return currentUserId === initiatorId
-        ? 'You agreed to reveal. Waiting for the other person...'
-        : 'The other person wants to reveal. Your choice below.';
-    case 'responder_agreed':
-      return currentUserId !== initiatorId
-        ? 'You agreed to reveal. Waiting for the other person...'
-        : 'The other person wants to reveal. Your choice below.';
-    default:
-      return '';
-  }
-}
-
-function getTaggedUserId(confession: any): string | undefined {
-  return confession?.taggedUserId ?? confession?.targetUserId;
-}
-
 export default function ConfessionChatScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId ?? null);
   const liveUserLoading = !isDemoMode && !authReady;
-  const liveUserUnavailable = !isDemoMode && authReady && !currentUserId;
+  const liveUserUnavailable = !isDemoMode && authReady && (!currentUserId || !token);
 
   const chats = useConfessionStore((s) => s.chats);
   const confessions = useConfessionStore((s) => s.confessions);
   const addChatMessage = useConfessionStore((s) => s.addChatMessage);
-  const agreeMutualReveal = useConfessionStore((s) => s.agreeMutualReveal);
-  const declineMutualReveal = useConfessionStore((s) => s.declineMutualReveal);
   const cleanupExpiredChats = useConfessionStore((s) => s.cleanupExpiredChats);
 
   const chat = chats.find((c) => c.id === chatId) || null;
   const confession = chat ? confessions.find((c) => c.id === chat.confessionId) : null;
   const confessionText = confession?.text;
+  const liveConfessionId = !isDemoMode ? (chat?.confessionId ?? null) : null;
+  const connectStatus = useQuery(
+    api.confessions.getConfessionConnectStatus,
+    !isDemoMode && token && liveConfessionId
+      ? { token, confessionId: liveConfessionId as any }
+      : 'skip'
+  ) as ConfessionConnectStatusResult | undefined;
+  const requestConfessionConnectMutation = useMutation(api.confessions.requestConfessionConnect);
+  const respondToConfessionConnectMutation = useMutation(api.confessions.respondToConfessionConnect);
+  const cancelConfessionConnectMutation = useMutation(api.confessions.cancelConfessionConnect);
 
   // Navigation guard: prevent opening expired chats or chats for expired confessions
   const EXPIRY_MS = 24 * 60 * 60 * 1000;
@@ -137,6 +140,8 @@ export default function ConfessionChatScreen() {
   // Keyboard visibility and composer height for proper layout
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [composerH, setComposerH] = useState(0);
+  const [connectAction, setConnectAction] = useState<'request' | 'cancel' | 'connect' | 'reject' | null>(null);
+  const [connectDismissed, setConnectDismissed] = useState(false);
 
   useEffect(() => {
     const showSub = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true));
@@ -215,49 +220,122 @@ export default function ConfessionChatScreen() {
     scrollToBottom(true);
   }, [text, chat, currentUserId, addChatMessage, scrollToBottom, showUnavailableToast]);
 
-  const handleAgreeReveal = useCallback(() => {
-    if (!currentUserId) {
+  const openMessagesConversation = useCallback((conversationId?: string | null) => {
+    const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
+    if (!normalized) {
+      Toast.show('The chat is not ready yet.');
+      return;
+    }
+    safePush(
+      router,
+      `/(main)/(tabs)/messages/chat/${normalized}?source=confession` as any,
+      'confessionChat->messages'
+    );
+  }, [router]);
+
+  const handleRequestConnect = useCallback(async () => {
+    if (isDemoMode) {
+      Toast.show('Connect requests are available in live mode.');
+      return;
+    }
+    if (!token || !liveConfessionId || connectAction) {
       showUnavailableToast();
       return;
     }
-    if (!chat) return;
-    agreeMutualReveal(chat.id, currentUserId);
-  }, [chat, currentUserId, agreeMutualReveal, showUnavailableToast]);
+    setConnectAction('request');
+    try {
+      const result = await requestConfessionConnectMutation({
+        token,
+        confessionId: liveConfessionId as any,
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+      setConnectDismissed(false);
+      if (result?.status === 'mutual' && result.conversationId) {
+        openMessagesConversation(result.conversationId);
+      } else {
+        Toast.show('Request sent. Waiting for them to connect.');
+      }
+    } catch (error: any) {
+      Alert.alert('Connect unavailable', error?.message || 'Please try again later.');
+    } finally {
+      setConnectAction(null);
+    }
+  }, [
+    connectAction,
+    liveConfessionId,
+    openMessagesConversation,
+    requestConfessionConnectMutation,
+    showUnavailableToast,
+    token,
+  ]);
 
-  const handleDeclineReveal = useCallback(() => {
-    if (!currentUserId) {
+  const handleSkipOrCancelConnect = useCallback(async () => {
+    if (isDemoMode) {
+      Toast.show('Connect skipped for now.');
+      return;
+    }
+    if (!connectStatus?.connectId || !connectStatus.canCancel || !token) {
+      setConnectDismissed(true);
+      Toast.show('Connect skipped for now.');
+      return;
+    }
+    if (connectAction) return;
+    setConnectAction('cancel');
+    try {
+      await cancelConfessionConnectMutation({
+        token,
+        connectId: connectStatus.connectId as any,
+      });
+      Toast.show('Connect request cancelled.');
+    } catch (error: any) {
+      Alert.alert('Unable to cancel', error?.message || 'Please try again later.');
+    } finally {
+      setConnectAction(null);
+    }
+  }, [
+    cancelConfessionConnectMutation,
+    connectAction,
+    connectStatus,
+    token,
+  ]);
+
+  const handleOwnerConnectDecision = useCallback(async (decision: 'connect' | 'reject') => {
+    if (isDemoMode) {
+      Toast.show(decision === 'connect' ? 'Connected.' : 'Connect request declined.');
+      return;
+    }
+    if (!connectStatus?.connectId || !token || connectAction) {
       showUnavailableToast();
       return;
     }
-    if (!chat) return;
-    declineMutualReveal(chat.id, currentUserId);
-  }, [chat, currentUserId, declineMutualReveal, showUnavailableToast]);
-
-  // Navigate to other person's profile during active reveal
-  const handleViewRevealProfile = useCallback(() => {
-    if (!currentUserId) {
-      showUnavailableToast();
-      return;
+    setConnectAction(decision);
+    try {
+      const result = await respondToConfessionConnectMutation({
+        token,
+        connectId: connectStatus.connectId as any,
+        decision,
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+      if (decision === 'connect') {
+        if (result?.conversationId) {
+          openMessagesConversation(result.conversationId);
+        } else {
+          Toast.show('Connected. Chat is being prepared.');
+        }
+      } else {
+        Toast.show('Connect request declined.');
+      }
+    } catch (error: any) {
+      Alert.alert('Connect unavailable', error?.message || 'Please try again later.');
+    } finally {
+      setConnectAction(null);
     }
-    if (!chat || !confession) return;
-    // Determine who the other person is
-    const taggedUserId = getTaggedUserId(confession);
-    const isTagged = taggedUserId === currentUserId;
-    const otherUserId = isTagged ? confession.userId : taggedUserId;
-    if (!otherUserId) return;
-
-    // Navigate to profile with confess_reveal mode
-    const revealProfileHref = {
-      pathname: '/(main)/profile/[id]',
-      params: {
-        id: otherUserId,
-        mode: 'confess_reveal',
-        chatId: chat.id,
-        confessionId: confession.id,
-      },
-    } as Parameters<typeof router.push>[0];
-    safePush(router, revealProfileHref, 'confessionChat->revealProfile');
-  }, [chat, confession, currentUserId, router, showUnavailableToast]);
+  }, [
+    connectAction,
+    connectStatus,
+    openMessagesConversation,
+    respondToConfessionConnectMutation,
+    showUnavailableToast,
+    token,
+  ]);
 
   if (liveUserLoading || liveUserUnavailable) {
     return (
@@ -286,37 +364,219 @@ export default function ConfessionChatScreen() {
     );
   }
 
-  const revealStatus = chat.mutualRevealStatus || 'none';
-  const isRevealed = revealStatus === 'both_agreed';
-  const isDeclined = revealStatus === 'declined';
-
-  // Expiry check: hide reveal CTAs when chat is expired (expiry overrides pending reveal)
+  // Expiry check: hide connect CTAs when this legacy anonymous chat is expired.
   const isChatExpired = Date.now() > chat.expiresAt;
 
-  // Per spec: Only the TAGGED person can request reveal
-  // Confessor (author) can only accept/decline after tagged person requests
-  const isTaggedPerson = getTaggedUserId(confession) === currentUserId;
-  const isConfessor = confession?.userId === currentUserId;
+  const renderLiveConnectPanel = () => {
+    if (isDemoMode) {
+      return (
+        <View style={styles.connectActions}>
+          <View style={styles.connectWaitingRow}>
+            <Ionicons name="heart-outline" size={16} color={COLORS.textMuted} />
+            <Text style={styles.connectWaitingText}>Connect requests are available in live mode.</Text>
+          </View>
+        </View>
+      );
+    }
+    if (!token || !liveConfessionId) {
+      return (
+        <View style={styles.connectActions}>
+          <View style={styles.connectWaitingRow}>
+            <Ionicons name="alert-circle-outline" size={16} color={COLORS.textMuted} />
+            <Text style={styles.connectWaitingText}>Connect unavailable right now.</Text>
+          </View>
+        </View>
+      );
+    }
 
-  // Track reveal agreement states based on chat role (initiator/responder in chat)
-  const iAmChatInitiator = chat.initiatorId === currentUserId;
-  const iHaveAgreed =
-    (iAmChatInitiator && (revealStatus === 'initiator_agreed' || revealStatus === 'both_agreed')) ||
-    (!iAmChatInitiator && (revealStatus === 'responder_agreed' || revealStatus === 'both_agreed'));
+    if (connectStatus === undefined) {
+      return (
+        <View style={styles.connectActions}>
+          <View style={styles.connectWaitingRow}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.connectWaitingText}>Checking connect status...</Text>
+          </View>
+        </View>
+      );
+    }
 
-  // Tagged person requested reveal (regardless of chat role)
-  const taggedPersonRequested = revealStatus === 'initiator_agreed' || revealStatus === 'responder_agreed';
+    const status = connectStatus.status;
+    const actionBusy = connectAction !== null;
+    const disabled = actionBusy || isChatExpired;
 
-  // Show accept/decline to confessor only when tagged person has requested (and chat not expired)
-  const showConfessorPrompt = isConfessor && taggedPersonRequested && !iHaveAgreed && !isDeclined && !isChatExpired;
+    if (!connectStatus.viewerRole) return null;
 
-  // Show request button only to tagged person who hasn't agreed yet (and chat not expired)
-  const showTaggedRequestButton = isTaggedPerson && revealStatus === 'none' && !isDeclined && !isChatExpired;
+    if (status === 'mutual') {
+      return (
+        <>
+          <View style={[styles.connectBanner, styles.connectBannerSuccess]}>
+            <Ionicons name="checkmark-circle" size={16} color="#34C759" />
+            <Text style={[styles.connectBannerText, styles.connectBannerTextSuccess]}>
+              Connected. Continue in Messages.
+            </Text>
+          </View>
+          <View style={styles.connectActions}>
+            <TouchableOpacity
+              style={styles.openChatButton}
+              onPress={() => openMessagesConversation(connectStatus.conversationId)}
+              disabled={!connectStatus.conversationId}
+            >
+              <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.white} />
+              <Text style={styles.openChatButtonText}>Open Chat</Text>
+            </TouchableOpacity>
+          </View>
+        </>
+      );
+    }
 
-  // Show "waiting" status to tagged person after they requested (and chat not expired)
-  const showTaggedWaiting = isTaggedPerson && taggedPersonRequested && !isRevealed && !isDeclined && iHaveAgreed && !isChatExpired;
+    if (
+      status === 'rejected_by_from' ||
+      status === 'rejected_by_to' ||
+      status === 'cancelled_by_from' ||
+      status === 'expired'
+    ) {
+      const copy =
+        status === 'expired'
+          ? 'This connect request expired.'
+          : status === 'cancelled_by_from'
+            ? 'This connect request was cancelled.'
+            : 'This connect request was declined.';
+      return (
+        <View style={styles.connectBanner}>
+          <Ionicons name="close-circle-outline" size={16} color={COLORS.textMuted} />
+          <Text style={styles.connectBannerText}>{copy}</Text>
+        </View>
+      );
+    }
 
-  const statusText = getRevealStatusText(revealStatus, currentUserId ?? '', chat.initiatorId, chat.declinedBy);
+    if (connectStatus.viewerRole === 'requester') {
+      if (status === 'pending') {
+        return (
+          <View style={styles.connectActions}>
+            <View style={styles.connectWaitingRow}>
+              <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
+              <Text style={styles.connectWaitingText}>Request sent. Waiting for them to connect.</Text>
+            </View>
+            {connectStatus.canCancel ? (
+              <TouchableOpacity
+                style={styles.connectSecondaryButton}
+                onPress={handleSkipOrCancelConnect}
+                disabled={actionBusy}
+              >
+                {connectAction === 'cancel' ? (
+                  <ActivityIndicator size="small" color={COLORS.text} />
+                ) : (
+                  <>
+                    <Ionicons name="close" size={16} color={COLORS.text} />
+                    <Text style={styles.connectSecondaryButtonText}>Cancel Request</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        );
+      }
+
+      if (!connectStatus.exists && connectStatus.canRequest && !connectDismissed) {
+        return (
+          <View style={styles.connectActions}>
+            <Text style={styles.connectPrompt}>
+              Connect opens a real Messages chat only if both sides agree.
+            </Text>
+            <View style={styles.connectButtonRow}>
+              <TouchableOpacity
+                style={[styles.connectPrimaryButton, disabled && styles.sendButtonDisabled]}
+                onPress={handleRequestConnect}
+                disabled={disabled}
+              >
+                {connectAction === 'request' ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <>
+                    <Ionicons name="heart" size={16} color={COLORS.white} />
+                    <Text style={styles.connectPrimaryButtonText}>Connect</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.connectSecondaryButton}
+                onPress={handleSkipOrCancelConnect}
+                disabled={actionBusy}
+              >
+                <Ionicons name="close" size={16} color={COLORS.text} />
+                <Text style={styles.connectSecondaryButtonText}>Skip</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        );
+      }
+
+      if (connectDismissed) {
+        return (
+          <View style={styles.connectActions}>
+            <View style={styles.connectWaitingRow}>
+              <Ionicons name="checkmark-circle-outline" size={16} color={COLORS.textMuted} />
+              <Text style={styles.connectWaitingText}>Connect skipped for now.</Text>
+            </View>
+          </View>
+        );
+      }
+    }
+
+    if (connectStatus.viewerRole === 'owner') {
+      if (status === 'pending' && connectStatus.canRespond) {
+        return (
+          <View style={styles.connectActions}>
+            <Text style={styles.connectPrompt}>
+              They want to connect. If you agree, Mira will open a real chat in Messages.
+            </Text>
+            <View style={styles.connectButtonRow}>
+              <TouchableOpacity
+                style={[styles.connectPrimaryButton, disabled && styles.sendButtonDisabled]}
+                onPress={() => void handleOwnerConnectDecision('connect')}
+                disabled={disabled}
+              >
+                {connectAction === 'connect' ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <>
+                    <Ionicons name="checkmark" size={16} color={COLORS.white} />
+                    <Text style={styles.connectPrimaryButtonText}>Connect</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.connectSecondaryButton}
+                onPress={() => void handleOwnerConnectDecision('reject')}
+                disabled={actionBusy}
+              >
+                {connectAction === 'reject' ? (
+                  <ActivityIndicator size="small" color={COLORS.text} />
+                ) : (
+                  <>
+                    <Ionicons name="close" size={16} color={COLORS.text} />
+                    <Text style={styles.connectSecondaryButtonText}>Reject</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        );
+      }
+      if (!connectStatus.exists) {
+        return (
+          <View style={styles.connectActions}>
+            <View style={styles.connectWaitingRow}>
+              <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
+              <Text style={styles.connectWaitingText}>No connect request yet.</Text>
+            </View>
+          </View>
+        );
+      }
+    }
+
+    return null;
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -332,7 +592,7 @@ export default function ConfessionChatScreen() {
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>
-            {isRevealed ? 'Chat (Revealed)' : 'Anonymous Chat'}
+            Anonymous Chat
           </Text>
           <Text style={styles.headerSubtitle}>{formatTimeLeft(chat.expiresAt)}</Text>
         </View>
@@ -359,68 +619,7 @@ export default function ConfessionChatScreen() {
         </View>
       ) : null}
 
-      {/* Mutual Reveal Banner */}
-      {revealStatus !== 'none' && (
-        <View style={[styles.revealBanner, isRevealed && styles.revealBannerSuccess]}>
-          <Ionicons
-            name={isRevealed ? 'checkmark-circle' : isDeclined ? 'close-circle' : 'time'}
-            size={16}
-            color={isRevealed ? '#34C759' : isDeclined ? COLORS.textMuted : COLORS.primary}
-          />
-          <Text style={[styles.revealBannerText, isRevealed && styles.revealBannerTextSuccess]}>
-            {statusText}
-          </Text>
-        </View>
-      )}
-
-      {/* View Profile Button - Active when mutual reveal is complete */}
-      {isRevealed && (
-        <View style={styles.revealActions}>
-          <TouchableOpacity style={styles.viewRevealProfileButton} onPress={handleViewRevealProfile}>
-            <Ionicons name="person-circle-outline" size={18} color={COLORS.white} />
-            <Text style={styles.viewRevealProfileText}>View Their Profile</Text>
-          </TouchableOpacity>
-          <Text style={styles.viewRevealHint}>Like to connect in Messages • Skip to keep chatting anonymously</Text>
-        </View>
-      )}
-
-      {/* Reveal Action Buttons */}
-      {/* Tagged person: show request button (only they can initiate) */}
-      {showTaggedRequestButton && (
-        <View style={styles.revealActions}>
-          <TouchableOpacity style={styles.revealRequestButton} onPress={handleAgreeReveal}>
-            <Ionicons name="eye" size={16} color={COLORS.primary} />
-            <Text style={styles.revealRequestText}>Request Mutual Reveal</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* Tagged person: show waiting status after they requested */}
-      {showTaggedWaiting && (
-        <View style={styles.revealActions}>
-          <View style={styles.revealWaitingRow}>
-            <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
-            <Text style={styles.revealWaitingText}>Waiting for them to accept reveal...</Text>
-          </View>
-        </View>
-      )}
-
-      {/* Confessor: show accept/decline prompt when tagged person has requested */}
-      {showConfessorPrompt && (
-        <View style={styles.revealActions}>
-          <Text style={styles.revealPrompt}>The person you confessed to wants to reveal identities. Accept?</Text>
-          <View style={styles.revealButtonRow}>
-            <TouchableOpacity style={styles.revealAgreeButton} onPress={handleAgreeReveal}>
-              <Ionicons name="checkmark" size={16} color={COLORS.white} />
-              <Text style={styles.revealAgreeText}>Accept Reveal</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.revealDeclineButton} onPress={handleDeclineReveal}>
-              <Ionicons name="close" size={16} color={COLORS.text} />
-              <Text style={styles.revealDeclineText}>Decline</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
+      {renderLiveConnectPanel()}
 
         {/* Messages */}
         <FlatList
@@ -574,7 +773,7 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     fontStyle: 'italic',
   },
-  revealBanner: {
+  connectBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
@@ -582,36 +781,36 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     backgroundColor: 'rgba(255,107,107,0.06)',
   },
-  revealBannerSuccess: {
+  connectBannerSuccess: {
     backgroundColor: 'rgba(52,199,89,0.08)',
   },
-  revealBannerText: {
+  connectBannerText: {
     fontSize: 12,
     color: COLORS.textMuted,
     fontWeight: '500',
     flex: 1,
   },
-  revealBannerTextSuccess: {
+  connectBannerTextSuccess: {
     color: '#34C759',
   },
-  revealActions: {
+  connectActions: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     backgroundColor: COLORS.white,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
   },
-  revealPrompt: {
+  connectPrompt: {
     fontSize: 13,
     fontWeight: '600',
     color: COLORS.text,
     marginBottom: 8,
   },
-  revealButtonRow: {
+  connectButtonRow: {
     flexDirection: 'row',
     gap: 8,
   },
-  revealAgreeButton: {
+  connectPrimaryButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
@@ -621,12 +820,12 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: COLORS.primary,
   },
-  revealAgreeText: {
+  connectPrimaryButtonText: {
     fontSize: 13,
     fontWeight: '700',
     color: COLORS.white,
   },
-  revealDeclineButton: {
+  connectSecondaryButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
@@ -638,38 +837,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  revealDeclineText: {
+  connectSecondaryButtonText: {
     fontSize: 13,
     fontWeight: '700',
     color: COLORS.text,
   },
-  revealRequestButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,107,107,0.08)',
-  },
-  revealRequestText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  revealWaitingRow: {
+  connectWaitingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
     paddingVertical: 10,
   },
-  revealWaitingText: {
+  connectWaitingText: {
     fontSize: 13,
     fontWeight: '600',
     color: COLORS.textMuted,
   },
-  viewRevealProfileButton: {
+  openChatButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -679,16 +864,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: COLORS.primary,
   },
-  viewRevealProfileText: {
+  openChatButtonText: {
     fontSize: 14,
     fontWeight: '700',
     color: COLORS.white,
-  },
-  viewRevealHint: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    marginTop: 8,
   },
   messageList: {
     paddingHorizontal: 10,

@@ -767,7 +767,6 @@ export interface ConfessionReply {
   voiceDurationSec?: number;
   parentReplyId?: string; // For nested replies - if set, this is a child reply
   editedAt?: number; // Timestamp if reply was edited
-  hasActiveConnectRequest?: boolean; // FIX 3: Whether reply has active connect request (locked)
   createdAt: number;
 }
 
@@ -779,21 +778,14 @@ export interface ConfessionReaction {
   createdAt: number;
 }
 
-export type MutualRevealStatus = 'none' | 'initiator_agreed' | 'responder_agreed' | 'both_agreed' | 'declined';
-
 export interface ConfessionChat {
   id: string;
   confessionId: string;
   initiatorId: string;
   responderId: string;
   messages: ConfessionChatMessage[];
-  isRevealed: boolean;
   createdAt: number;
   expiresAt: number;
-  /** Mutual reveal: tracks which sides have agreed */
-  mutualRevealStatus: MutualRevealStatus;
-  /** Who declined (if any) — reveal is then permanently blocked */
-  declinedBy?: string;
 }
 
 export interface ConfessionChatMessage {

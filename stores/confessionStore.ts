@@ -16,7 +16,6 @@ import {
   ConfessionChatMessage,
   ConfessionReply,
   SecretCrush,
-  MutualRevealStatus,
   TimedRevealOption,
 } from '@/types';
 import {
@@ -72,12 +71,8 @@ function getTaggedUserId(confession: Confession | undefined | null): string | un
   return confession?.taggedUserId ?? (confession as any)?.targetUserId;
 }
 
-function getTaggedUserName(confession: Confession | undefined | null): string | undefined {
-  return confession?.taggedUserName ?? (confession as any)?.targetUserName;
-}
-
-// Track confession-based threads to prevent duplicates (confessionId → conversationId)
-// This is stored separately to support idempotent thread creation
+// Demo-only legacy reaction-created threads (confessionId -> conversationId).
+// Live Confess Connect / Reject no longer reads this local map.
 interface ConfessionThreads {
   [confessionId: string]: string; // conversationId
 }
@@ -101,7 +96,7 @@ interface ConfessionState {
   reportedIds: string[];
   blockedIds: string[];
   seeded: boolean;
-  confessionThreads: ConfessionThreads; // Track threads created from confessions
+  confessionThreads: ConfessionThreads; // Demo-only legacy reaction-created threads
 
   // Seen tracking for demo mode (tagged confessions)
   seenTaggedConfessionIds: string[];
@@ -124,10 +119,6 @@ interface ConfessionState {
   deleteReply: (confessionId: string, replyId: string) => void;
   getReplies: (confessionId: string) => ConfessionReply[];
 
-  // Mutual Reveal
-  agreeMutualReveal: (chatId: string, userId: string) => void;
-  declineMutualReveal: (chatId: string, userId: string) => void;
-
   // Time-Locked Reveal
   setTimedReveal: (confessionId: string, option: TimedRevealOption, taggedUserId?: string) => void;
   cancelTimedReveal: (confessionId: string) => void;
@@ -149,23 +140,6 @@ interface ConfessionState {
   deleteConfession: (confessionId: string) => void;
   /** Update a confession's text and mood (author edit) */
   updateConfession: (confessionId: string, newText: string, newMood?: 'romantic' | 'spicy' | 'emotional' | 'funny') => void;
-  /** Connect to a confession (tagged user starts chat with author) */
-  connectToConfession: (confessionId: string, currentUserId: string) => boolean;
-  /** Check if a confession is connected */
-  isConfessionConnected: (confessionId: string) => boolean;
-  /** Track connected confessions */
-  connectedConfessionIds: string[];
-
-  /** Track skip actions during reveal (chatId -> [userIds who skipped]) */
-  revealSkippedChats: Record<string, string[]>;
-
-  /** Mark that a user skipped during active reveal (hides buttons, keeps profile viewable) */
-  markRevealSkipped: (chatId: string, userId: string) => void;
-  /** Check if user has skipped a reveal */
-  hasSkippedReveal: (chatId: string, userId: string) => boolean;
-  /** Create a permanent match from confession reveal (Like action) */
-  createRevealMatch: (confessionId: string, chatId: string, fromUserId: string, toUserId: string) => void;
-
   // Rate limiting
   /** Check if user can post a new confession (rate limit check) */
   canPostConfession: () => boolean;
@@ -211,9 +185,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
   seeded: false,
   confessionThreads: {},
   seenTaggedConfessionIds: [],
-  connectedConfessionIds: [],
   confessionTimestamps: [],
-  revealSkippedChats: {},
   _hasHydrated: true,
 
   setHasHydrated: (state) => set({ _hasHydrated: true }),
@@ -254,7 +226,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       }
       return;
     }
-    // Backfill revealPolicy, replyPreviews, expiresAt, and mutualRevealStatus on demo data
+    // Backfill revealPolicy, replyPreviews, and expiresAt on demo data.
     const confessions = DEMO_CONFESSIONS.map((c) => {
       const replies = DEMO_CONFESSION_REPLIES[c.id] || [];
       const replyPreviews = replies.slice(0, 2).map((r) => ({
@@ -270,15 +242,11 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         expiresAt: c.expiresAt || (c.createdAt + CONFESSION_EXPIRY_MS),
       });
     });
-    const chats = DEMO_CONFESSION_CHATS.map((ch) => ({
-      ...ch,
-      mutualRevealStatus: ch.mutualRevealStatus || ('none' as MutualRevealStatus),
-    }));
     set({
       confessions,
       userReactions: DEMO_CONFESSION_USER_REACTIONS,
       replies: { ...DEMO_CONFESSION_REPLIES },
-      chats,
+      chats: DEMO_CONFESSION_CHATS,
       secretCrushes: DEMO_SECRET_CRUSHES,
       seeded: true,
     });
@@ -349,6 +317,8 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       return { ...c, reactions, topEmojis, reactionCount };
     });
 
+    // Demo-only legacy behavior: emoji reactions can create a pre-match thread.
+    // Live Confess Connect / Reject uses Convex confessionConnects instead.
     // Check if we should create a confession-based thread
     // Only when: 1) new reaction 2) tagged confession 3) liker is the tagged user
     let chatUnlocked = false;
@@ -572,68 +542,6 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     return get().replies[confessionId] || [];
   },
 
-  // ── Mutual Reveal ──
-  agreeMutualReveal: (chatId, userId) => {
-    // Guard: no-op if chat is expired (expiry overrides pending reveal)
-    const now = Date.now();
-    const targetChat = get().chats.find((c) => c.id === chatId);
-    if (!targetChat || now > targetChat.expiresAt) {
-      if (__DEV__) console.log('[CONFESS] agreeMutualReveal: skipped (chat expired or not found)');
-      return;
-    }
-
-    set((state) => ({
-      chats: state.chats.map((ch) => {
-        if (ch.id !== chatId) return ch;
-        if (ch.mutualRevealStatus === 'declined') return ch; // permanently blocked
-
-        const isInitiator = ch.initiatorId === userId;
-        const isResponder = ch.responderId === userId;
-        if (!isInitiator && !isResponder) return ch;
-
-        let newStatus: MutualRevealStatus = ch.mutualRevealStatus;
-
-        if (isInitiator) {
-          if (ch.mutualRevealStatus === 'none') {
-            newStatus = 'initiator_agreed';
-          } else if (ch.mutualRevealStatus === 'responder_agreed') {
-            newStatus = 'both_agreed';
-          }
-        } else if (isResponder) {
-          if (ch.mutualRevealStatus === 'none') {
-            newStatus = 'responder_agreed';
-          } else if (ch.mutualRevealStatus === 'initiator_agreed') {
-            newStatus = 'both_agreed';
-          }
-        }
-
-        return {
-          ...ch,
-          mutualRevealStatus: newStatus,
-          isRevealed: newStatus === 'both_agreed',
-        };
-      }),
-    }));
-  },
-
-  declineMutualReveal: (chatId, userId) => {
-    // Guard: no-op if chat is expired (expiry overrides pending reveal)
-    const now = Date.now();
-    const targetChat = get().chats.find((c) => c.id === chatId);
-    if (!targetChat || now > targetChat.expiresAt) {
-      if (__DEV__) console.log('[CONFESS] declineMutualReveal: skipped (chat expired or not found)');
-      return;
-    }
-
-    set((state) => ({
-      chats: state.chats.map((ch) =>
-        ch.id === chatId
-          ? { ...ch, mutualRevealStatus: 'declined' as MutualRevealStatus, declinedBy: userId }
-          : ch
-      ),
-    }));
-  },
-
   // ── Time-Locked Reveal ──
   setTimedReveal: (confessionId, option, _taggedUserId) => {
     set((state) => ({
@@ -778,28 +686,22 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     // 5. Remove chats tied to this confession
     const chats = state.chats.filter((c) => c.confessionId !== confessionId);
 
-    // 6. Remove from connectedConfessionIds if present
-    const connectedConfessionIds = state.connectedConfessionIds.filter(
-      (id) => id !== confessionId
-    );
-
-    // 7. Remove from seenTaggedConfessionIds if present (B5-minor fix)
+    // 6. Remove from seenTaggedConfessionIds if present (B5-minor fix)
     const seenTaggedConfessionIds = state.seenTaggedConfessionIds.filter(
       (id) => id !== confessionId
     );
 
-    // 8. Atomic state update - all or nothing
+    // 7. Atomic state update - all or nothing
     set({
       confessions,
       userReactions,
       confessionThreads,
       replies,
       chats,
-      connectedConfessionIds,
       seenTaggedConfessionIds,
     });
 
-    // 9. External cleanup (best effort, doesn't affect local state)
+    // 8. External cleanup (best effort, doesn't affect local state)
     if (convoId) {
       try {
         const dmStore = useDemoDmStore?.getState?.();
@@ -818,193 +720,6 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
           : c
       ),
     }));
-  },
-
-  isConfessionConnected: (confessionId) => {
-    return get().connectedConfessionIds.includes(confessionId);
-  },
-
-  connectToConfession: (confessionId, currentUserId) => {
-    const state = get();
-    const confession = state.confessions.find((c) => c.id === confessionId);
-    const taggedUserId = getTaggedUserId(confession);
-
-    // Hard gate: only tagged user can connect
-    if (!confession || taggedUserId !== currentUserId) {
-      return false;
-    }
-
-    // Idempotency: already connected?
-    if (state.connectedConfessionIds.includes(confessionId)) {
-      return true; // Already connected, don't create duplicate
-    }
-
-    // Create a conversation thread in the DM store
-    const convoId = `demo_convo_connect_${confessionId}`;
-    const dmStore = useDemoDmStore?.getState?.();
-    const demoStore = useDemoStore?.getState?.();
-    if (!dmStore || !demoStore) {
-      if (__DEV__) console.warn('[CONFESS] connectToConfession: stores not ready');
-      return false;
-    }
-    const now = Date.now();
-    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-
-    const otherUserName = confession.isAnonymous
-      ? 'Anonymous Confessor'
-      : (confession.authorName || 'Someone');
-
-    // Seed conversation with initial system message
-    dmStore.seedConversation(convoId, [{
-      _id: `sys_connect_${confessionId}`,
-      content: `💬 You connected with ${otherUserName} on their confession`,
-      type: 'system',
-      senderId: 'system',
-      createdAt: now,
-    }]);
-
-    dmStore.setMeta(convoId, {
-      otherUser: {
-        id: confession.userId,
-        name: otherUserName,
-        lastActive: now,
-        isVerified: false,
-      },
-      isPreMatch: true,
-      isConfessionChat: true,
-      expiresAt: now + TWENTY_FOUR_HOURS,
-    });
-
-    // Add to matches so it appears in Messages list
-    const newMatch: DemoMatch = {
-      id: `match_connect_${confessionId}`,
-      conversationId: convoId,
-      otherUser: {
-        id: confession.userId,
-        name: otherUserName,
-        photoUrl: confession.authorPhotoUrl || '',
-        lastActive: now,
-        isVerified: false,
-      },
-      lastMessage: {
-        content: `💬 Connected via confession`,
-        type: 'system',
-        senderId: 'system',
-        createdAt: now,
-      },
-      unreadCount: 0,
-      isPreMatch: true,
-    };
-    demoStore.addMatch(newMatch);
-
-    // Mark as connected
-    set({
-      connectedConfessionIds: [...state.connectedConfessionIds, confessionId],
-    });
-
-    return true;
-  },
-
-  // ── Reveal Actions (Like/Skip during active mutual reveal) ──
-
-  markRevealSkipped: (chatId, userId) => {
-    set((state) => {
-      const existing = state.revealSkippedChats[chatId] || [];
-      if (existing.includes(userId)) return state; // Already skipped
-      return {
-        revealSkippedChats: {
-          ...state.revealSkippedChats,
-          [chatId]: [...existing, userId],
-        },
-      };
-    });
-    if (__DEV__) console.log('[CONFESS] markRevealSkipped:', { chatId, userId });
-  },
-
-  hasSkippedReveal: (chatId, userId) => {
-    const skipped = get().revealSkippedChats[chatId] || [];
-    return skipped.includes(userId);
-  },
-
-  createRevealMatch: (confessionId, chatId, fromUserId, toUserId) => {
-    const state = get();
-    const confession = state.confessions.find((c) => c.id === confessionId);
-    if (!confession) return;
-
-    const dmStore = useDemoDmStore?.getState?.();
-    const demoStore = useDemoStore?.getState?.();
-    if (!dmStore || !demoStore) {
-      if (__DEV__) console.warn('[CONFESS] createRevealMatch: stores not ready');
-      return;
-    }
-    const now = Date.now();
-
-    // Determine the other user's display name
-    // If fromUserId is the tagged person, toUserId is the confessor
-    const taggedUserId = getTaggedUserId(confession);
-    const taggedUserName = getTaggedUserName(confession);
-    const isFromTagged = taggedUserId === fromUserId;
-    const otherUserId = isFromTagged ? confession.userId : taggedUserId;
-    const otherUserName = isFromTagged
-      ? (confession.isAnonymous ? 'Confessor' : (confession.authorName || 'Someone'))
-      : (taggedUserName || 'Someone');
-
-    // Create a PERMANENT conversation (no expiry)
-    const convoId = `demo_convo_reveal_match_${confessionId}_${fromUserId}`;
-    const matchId = `match_reveal_${confessionId}_${fromUserId}`;
-
-    // Check if match already exists (idempotency)
-    const existingMatch = demoStore.matches.find((m) => m.id === matchId);
-    if (existingMatch) {
-      if (__DEV__) console.log('[CONFESS] createRevealMatch: match already exists');
-      return;
-    }
-
-    // Seed conversation with system message about the match origin
-    dmStore.seedConversation(convoId, [{
-      _id: `sys_reveal_${confessionId}`,
-      content: `💕 You matched through Confessions! Start chatting...`,
-      type: 'system',
-      senderId: 'system',
-      createdAt: now,
-    }]);
-
-    // Set meta WITHOUT expiry (permanent match)
-    dmStore.setMeta(convoId, {
-      otherUser: {
-        id: otherUserId || '',
-        name: otherUserName,
-        lastActive: now,
-        isVerified: confession.isAnonymous ? false : true,
-      },
-      isPreMatch: false, // This is a REAL match now
-      isConfessionChat: false, // No longer a confession thread, it's a real match
-      // No expiresAt - permanent thread
-    });
-
-    // Add to matches
-    const newMatch: DemoMatch = {
-      id: matchId,
-      conversationId: convoId,
-      otherUser: {
-        id: otherUserId || '',
-        name: otherUserName,
-        photoUrl: confession.authorPhotoUrl || '',
-        lastActive: now,
-        isVerified: false,
-      },
-      lastMessage: {
-        content: `💕 Matched via Confessions`,
-        type: 'system',
-        senderId: 'system',
-        createdAt: now,
-      },
-      unreadCount: 0,
-      isPreMatch: false, // Real match
-    };
-    demoStore.addMatch(newMatch);
-
-    if (__DEV__) console.log('[CONFESS] createRevealMatch: created permanent match', { matchId, confessionId });
   },
 
   // ── Rate Limiting ──

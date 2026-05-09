@@ -351,9 +351,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
           reportedIds: [],
           blockedIds: [],
           seenTaggedConfessionIds: [],
-          connectedConfessionIds: [],
           confessionTimestamps: [],
-          revealSkippedChats: {},
         });
       }
     } catch {}
