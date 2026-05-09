@@ -1026,6 +1026,9 @@ export default defineSchema({
       v.literal('subscription'),
       v.literal('weekly_refresh'),
       v.literal('profile_nudge'),
+      // Phase-1 confession surface: tagged-confession bell item that deep-links
+      // to /(main)/confession-thread. Payload uses data.confessionId.
+      v.literal('tagged_confession'),
       // Legacy Phase-2 literals retained for backwards compatibility with
       // existing rows; new writes MUST go to `privateNotifications`.
       v.literal('phase2_match'),
@@ -1040,6 +1043,11 @@ export default defineSchema({
       userId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
+      // Tagged-confession deep-link payload. confessionId is the only field
+      // required to open the thread; fromUserId is recorded for moderation
+      // / future allowlist checks but is never rendered in notification text.
+      confessionId: v.optional(v.string()),
+      fromUserId: v.optional(v.string()),
       // Legacy fields retained for backwards compatibility
       phase: v.optional(v.string()),
       otherUserId: v.optional(v.string()),
@@ -2083,6 +2091,7 @@ export default defineSchema({
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
+    taggedUserName: v.optional(v.string()), // Denormalised display name of tagged user; backend-resolved at create time. Bounded length.
     // Soft delete support
     isDeleted: v.optional(v.boolean()),
     deletedAt: v.optional(v.number()),
@@ -2200,6 +2209,33 @@ export default defineSchema({
     .index('by_user_seen', ['userId', 'seen'])
     .index('by_user_created', ['userId', 'createdAt'])
     .index('by_confession', ['confessionId']),
+
+  // Confession-tag profile-view grants.
+  // Records that a viewer was given permission to open a tagged user's
+  // profile via the @mention chip on a specific confession. The grant is
+  // (viewer, confession, profileUser)-specific; it does NOT permit opening
+  // arbitrary profiles, and it is consumed at click time after passing all
+  // safety checks (block / report / deletion / expiry / mention-id match).
+  // Existence of a grant does NOT bypass any other safety gate; the grant
+  // only opts the viewer out of Super Like / Stand Out / skip-style action
+  // flows that other entry points (Discover, etc.) may apply, and only when
+  // the consuming surface explicitly checks `source=confess_tag` plus the
+  // grant.
+  confessionTagProfileViews: defineTable({
+    viewerId: v.id('users'),
+    profileUserId: v.id('users'),
+    confessionId: v.id('confessions'),
+    createdAt: v.number(),
+    // 24h cap so a tagged confession can't seed a permanent bypass.
+    expiresAt: v.number(),
+    // Set when the viewer actually navigates; idempotent within (viewer,
+    // confession) so the chip can be re-tapped during the grant window.
+    consumedAt: v.optional(v.number()),
+  })
+    .index('by_viewer_confession', ['viewerId', 'confessionId'])
+    .index('by_viewer', ['viewerId'])
+    .index('by_confession', ['confessionId'])
+    .index('by_expires', ['expiresAt']),
 
   // Chat Rooms table (group chat rooms in Private section)
   chatRooms: defineTable({

@@ -1,5 +1,6 @@
 import { mutation, query } from './_generated/server';
 import { v } from 'convex/values';
+import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from './helpers';
 import { moderationStatusForCount } from './lib/confessionModeration';
@@ -37,6 +38,7 @@ type SerializedConfession = {
   isDeleted?: boolean;
   deletedAt?: number;
   taggedUserId?: Id<'users'>;
+  taggedUserName?: string;
   trendingScore?: number;
   isExpired?: boolean;
   moderationStatus?: ConfessionModerationStatus;
@@ -155,6 +157,12 @@ function serializeConfession(
 
   if (options?.includeTaggedUserId && !confession.isAnonymous) {
     result.taggedUserId = confession.taggedUserId;
+    // Mention chip needs both id + name. Anonymous confessions never expose
+    // either; for non-anonymous, surface the denormalised tagged user name
+    // captured at create time.
+    if (confession.taggedUserId && confession.taggedUserName) {
+      result.taggedUserName = confession.taggedUserName;
+    }
   }
 
   if (typeof options?.trendingScore === 'number') {
@@ -235,6 +243,10 @@ export const createConfession = mutation({
     authorAge: v.optional(v.number()),
     authorGender: v.optional(v.string()),
     taggedUserId: v.optional(v.union(v.id('users'), v.string())), // User being confessed to
+    // Optional client-suggested tagged user display name. The backend prefers
+    // the canonical name fetched from the users table when available; this
+    // arg is only used as a fallback if the user lookup yields no name.
+    taggedUserName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
@@ -275,6 +287,7 @@ export const createConfession = mutation({
     }
 
     // If taggedUserId provided, verify the current user has liked them
+    let resolvedTaggedUserName: string | undefined;
     if (taggedUserId) {
       const likeRecord = await ctx.db
         .query('likes')
@@ -292,6 +305,21 @@ export const createConfession = mutation({
 
       if (!likeRecord) {
         throw new Error('You can only confess to users you have liked.');
+      }
+
+      // Prefer the canonical name from the users table over the client-supplied
+      // string. Falls back to the trimmed/sanitised client value only if the
+      // backend lookup yields no usable name (defensive — user docs always have
+      // a name in this app's schema).
+      const taggedUserDoc = await ctx.db.get(taggedUserId);
+      const canonicalName = taggedUserDoc?.name?.trim();
+      if (canonicalName && canonicalName.length > 0) {
+        resolvedTaggedUserName = canonicalName.slice(0, 64);
+      } else if (typeof args.taggedUserName === 'string') {
+        const fallback = args.taggedUserName.trim();
+        if (fallback.length > 0) {
+          resolvedTaggedUserName = fallback.slice(0, 64);
+        }
       }
     }
 
@@ -313,10 +341,15 @@ export const createConfession = mutation({
       createdAt: now,
       expiresAt: now + CONFESSION_EXPIRY_MS,
       taggedUserId: taggedUserId,
+      // Persisted only when a tagged user was successfully resolved. Anonymous
+      // confessions still record this — visibility is gated by the serializer,
+      // not by storage.
+      taggedUserName: resolvedTaggedUserName,
     });
 
     // If tagged, create notification for the tagged user
     if (taggedUserId) {
+      // 1) Confess-tab "Tagged for you" sheet feed (kept as fallback surface).
       await ctx.db.insert('confessionNotifications', {
         userId: taggedUserId,
         confessionId,
@@ -325,6 +358,59 @@ export const createConfession = mutation({
         seen: false,
         createdAt: now,
       });
+
+      // 2) Phase-1 main bell deep-link row. Generic body — never reveals
+      //    author identity, regardless of authorVisibility, so that anonymous
+      //    confessions don't leak the poster via the notification surface or
+      //    the push payload. Tap routes to /(main)/confession-thread using
+      //    data.confessionId.
+      const taggedDedupeKey = `tagged_confession:${confessionId}`;
+      const existingTaggedNotif = await ctx.db
+        .query('notifications')
+        .withIndex('by_user_dedupe', (q) =>
+          q.eq('userId', taggedUserId!).eq('dedupeKey', taggedDedupeKey)
+        )
+        .first();
+
+      const notifTitle = 'New confession';
+      const notifBody = 'Someone tagged you in a confession.';
+      const notifData = {
+        confessionId: String(confessionId),
+        fromUserId: String(userId),
+      };
+      const notifExpiresAt = now + 24 * 60 * 60 * 1000;
+
+      if (existingTaggedNotif) {
+        // Same confession id → idempotent refresh (handles retries).
+        await ctx.db.patch(existingTaggedNotif._id, {
+          title: notifTitle,
+          body: notifBody,
+          data: notifData,
+          phase: 'phase1',
+          createdAt: now,
+          expiresAt: notifExpiresAt,
+          readAt: undefined,
+        });
+      } else {
+        await ctx.db.insert('notifications', {
+          userId: taggedUserId,
+          type: 'tagged_confession',
+          title: notifTitle,
+          body: notifBody,
+          data: notifData,
+          phase: 'phase1',
+          dedupeKey: taggedDedupeKey,
+          createdAt: now,
+          expiresAt: notifExpiresAt,
+        });
+        await ctx.scheduler.runAfter(0, internal.pushNotifications.send, {
+          userId: taggedUserId,
+          title: notifTitle,
+          body: notifBody,
+          data: notifData,
+          type: 'tagged_confession',
+        });
+      }
     }
 
     return confessionId;
@@ -1289,15 +1375,33 @@ export const listTaggedConfessionsForUser = query({
     for (const notif of notifications) {
       const confession = await ctx.db.get(notif.confessionId);
       if (!confession) continue;
+      if (confession.isDeleted) continue;
       if (isHiddenByReports(confession)) continue;
       if (reportedIds.has(String(confession._id))) continue;
+
+      // Identity exposure rule for the "Tagged for you" sheet:
+      //   anonymous   → leak nothing (matches feed behaviour for anonymous mode)
+      //   blur_photo  → name + age + gender, photo is blurred client-side
+      //   open        → full identity
+      // Note: authorVisibility is the canonical source of truth here; legacy
+      // 'blur' literal maps to 'blur_photo'. Confessions with no
+      // authorVisibility but isAnonymous=false default to 'open'.
+      const effectiveVisibility: 'anonymous' | 'open' | 'blur_photo' =
+        confession.authorVisibility === 'anonymous' || confession.isAnonymous
+          ? 'anonymous'
+          : confession.authorVisibility === 'blur' ||
+            confession.authorVisibility === 'blur_photo'
+          ? 'blur_photo'
+          : 'open';
+      const allowName = effectiveVisibility !== 'anonymous';
+      const allowPhoto = effectiveVisibility === 'open';
 
       result.push({
         notificationId: notif._id,
         confessionId: notif.confessionId,
         seen: notif.seen,
         notificationCreatedAt: notif.createdAt,
-        // Confession data (do NOT include authorName or any identity info)
+        // Confession data
         confessionText: confession.text,
         confessionMood: confession.mood,
         confessionCreatedAt: confession.createdAt,
@@ -1305,6 +1409,12 @@ export const listTaggedConfessionsForUser = query({
         isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
         replyCount: confession.replyCount,
         reactionCount: confession.reactionCount,
+        // Author identity (privacy-gated — never leaked for anonymous mode)
+        authorVisibility: effectiveVisibility,
+        authorName: allowName ? confession.authorName : undefined,
+        authorPhotoUrl: allowPhoto ? confession.authorPhotoUrl : undefined,
+        authorAge: allowName ? confession.authorAge : undefined,
+        authorGender: allowName ? confession.authorGender : undefined,
       });
     }
 
@@ -1344,6 +1454,171 @@ export const markTaggedConfessionsSeen = mutation({
     }
 
     return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Consume a confession-tag profile-view grant.
+//
+// Validates that the viewer is allowed to open the tagged user's profile via
+// the @mention chip on a specific confession, and records a (viewer,
+// confession, profileUser)-scoped grant on success. Anonymous-author identity
+// is never disclosed because we only ever return / reference the *tagged*
+// user, never the confession author.
+//
+// Validation order (fails closed at every step with the same generic
+// "Profile unavailable" copy on the client side — we never disclose the
+// reason to avoid leaking block/report status):
+//   1. Viewer resolved server-side from session token (no client viewerId).
+//   2. Confession exists, not deleted, not expired (or viewer is the owner —
+//      owners can re-open their own thread's mention even after expiry).
+//   3. Confession is not hidden by reports for the viewer.
+//   4. Viewer has not reported the confession.
+//   5. confession.taggedUserId === args.profileUserId (mention-id match —
+//      prevents using a benign confession id to open an unrelated profile).
+//   6. Target user exists.
+//   7. Bidirectional block check between viewer and target.
+//   8. Viewer has not reported the target.
+//
+// Self-tap is permitted (viewer === profileUserId): no grant row is written
+// because no bypass is needed — opening your own profile is always allowed
+// and is governed by the existing self-profile flow.
+// ═══════════════════════════════════════════════════════════════════════════
+const TAG_PROFILE_VIEW_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
+
+export const consumeConfessionTagProfileViewGrant = mutation({
+  args: {
+    token: v.string(),
+    confessionId: v.id('confessions'),
+    profileUserId: v.id('users'),
+  },
+  handler: async (ctx, { token, confessionId, profileUserId }) => {
+    // 1. Server-side viewer resolution. We do NOT accept a client viewerId
+    //    here — the grant is bound to whoever the session token authorises.
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      throw new Error('Profile unavailable');
+    }
+
+    // 2. Confession existence + lifecycle.
+    const confession = await ctx.db.get(confessionId);
+    if (!confession || confession.isDeleted) {
+      throw new Error('Profile unavailable');
+    }
+    const now = Date.now();
+    const viewerIsOwner = confession.userId === viewerId;
+    if (
+      confession.expiresAt !== undefined &&
+      confession.expiresAt <= now &&
+      !viewerIsOwner
+    ) {
+      throw new Error('Profile unavailable');
+    }
+
+    // 3. Hidden-by-reports gate (consistent with getConfession).
+    if (isHiddenByReports(confession) && !viewerIsOwner) {
+      throw new Error('Profile unavailable');
+    }
+
+    // 4. Viewer-reported-confession gate.
+    if (
+      !viewerIsOwner &&
+      (await hasViewerReportedConfession(ctx, viewerId, confessionId))
+    ) {
+      throw new Error('Profile unavailable');
+    }
+
+    // 5. Mention-id match — the cornerstone of the grant. The viewer can
+    //    only open the *tagged* user, never an arbitrary user. This is what
+    //    prevents the chip endpoint from being abused as a generic profile
+    //    opener.
+    if (!confession.taggedUserId || confession.taggedUserId !== profileUserId) {
+      throw new Error('Profile unavailable');
+    }
+
+    // 6. Target existence.
+    const target = await ctx.db.get(profileUserId);
+    if (!target) {
+      throw new Error('Profile unavailable');
+    }
+
+    // Self-tap → allow without writing a grant row.
+    if (viewerId === profileUserId) {
+      return {
+        success: true as const,
+        profileUserId: String(profileUserId),
+        fromConfessionId: String(confessionId),
+        source: 'confess_tag' as const,
+      };
+    }
+
+    // 7. Bidirectional block check.
+    const blockedByViewer = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocker_blocked', (q) =>
+        q.eq('blockerId', viewerId).eq('blockedUserId', profileUserId)
+      )
+      .first();
+    if (blockedByViewer) {
+      throw new Error('Profile unavailable');
+    }
+    const blockedByTarget = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocker_blocked', (q) =>
+        q.eq('blockerId', profileUserId).eq('blockedUserId', viewerId)
+      )
+      .first();
+    if (blockedByTarget) {
+      throw new Error('Profile unavailable');
+    }
+
+    // 8. Viewer-reported-target gate. Mirror of the report check used by
+    //    other profile-opening flows (e.g. privateDiscover.getProfileByUserId).
+    const reportedByViewer = await ctx.db
+      .query('reports')
+      .withIndex('by_reporter_reported_created', (q) =>
+        q.eq('reporterId', viewerId).eq('reportedUserId', profileUserId)
+      )
+      .first();
+    if (reportedByViewer) {
+      throw new Error('Profile unavailable');
+    }
+
+    // Idempotent upsert. We key on (viewer, confession) — the same chip can
+    // be tapped multiple times during the 24h grant window without spamming
+    // grant rows. profileUserId is locked because step 5 already pinned it
+    // to the confession's taggedUserId.
+    const expiresAt = now + TAG_PROFILE_VIEW_GRANT_TTL_MS;
+    const existing = await ctx.db
+      .query('confessionTagProfileViews')
+      .withIndex('by_viewer_confession', (q) =>
+        q.eq('viewerId', viewerId).eq('confessionId', confessionId)
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        profileUserId,
+        consumedAt: now,
+        expiresAt,
+      });
+    } else {
+      await ctx.db.insert('confessionTagProfileViews', {
+        viewerId,
+        profileUserId,
+        confessionId,
+        createdAt: now,
+        consumedAt: now,
+        expiresAt,
+      });
+    }
+
+    return {
+      success: true as const,
+      profileUserId: String(profileUserId),
+      fromConfessionId: String(confessionId),
+      source: 'confess_tag' as const,
+    };
   },
 });
 

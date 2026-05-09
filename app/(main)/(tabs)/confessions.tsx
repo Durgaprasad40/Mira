@@ -36,6 +36,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
+import { DraggableFab, DRAGGABLE_FAB_STORAGE_KEYS } from '@/components/common/DraggableFab';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
 import ConfessionUnderReviewBadge, {
@@ -161,6 +162,7 @@ export default function ConfessionsScreen() {
   const insets = useSafeAreaInsets();
   const { openTagged, openComposer } = useLocalSearchParams<{ openTagged?: string; openComposer?: string }>();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
 
   const demoConfessions = useConfessionStore((s) => s.confessions);
@@ -216,6 +218,9 @@ export default function ConfessionsScreen() {
   const reportConfessionMutation = useMutation(api.confessions.reportConfession);
   const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
   const markTaggedSeenMutation = useMutation(api.confessions.markTaggedConfessionsSeen);
+  const consumeTagProfileViewGrantMutation = useMutation(
+    api.confessions.consumeConfessionTagProfileViewGrant
+  );
   const blockUserMutation = useMutation(api.users.blockUser);
 
   const [hiddenConfessionIds, setHiddenConfessionIds] = useState<string[]>([]);
@@ -323,6 +328,7 @@ export default function ConfessionsScreen() {
           authorAge: confession.authorAge,
           authorGender: confession.authorGender,
           targetUserId: confession.taggedUserId,
+          targetUserName: confession.taggedUserName,
           topEmojis: confession.topEmojis ?? [],
           replyPreviews: confession.replyPreviews ?? [],
           replyCount: confession.replyCount ?? 0,
@@ -724,6 +730,63 @@ export default function ConfessionsScreen() {
   const handleOpenMyConfessions = useCallback(() => {
     safePush(router, '/(main)/my-confessions' as any, 'confessions->myConfessions');
   }, [router]);
+
+  // Open the tagged user's profile from a confession's @username chip.
+  // Live mode: server validates the grant (expiry, mention match, blocks,
+  // reports) and only on success we navigate. Demo mode: no backend call,
+  // navigate directly so the demo UX still works.
+  // Failure path uses a generic toast — never reveals block/report state.
+  const handleTagPress = useCallback(async (
+    confessionId: string,
+    profileUserId: string | undefined
+  ) => {
+    if (!confessionId || !profileUserId) {
+      return;
+    }
+
+    if (isDemoMode) {
+      safePush(
+        router,
+        {
+          pathname: '/(main)/profile/[id]',
+          params: {
+            id: profileUserId,
+            source: 'confess_tag',
+            fromConfessionId: confessionId,
+          },
+        } as any,
+        'confessions->profile(tag)'
+      );
+      return;
+    }
+
+    if (!token) {
+      showToastMessage('Profile unavailable');
+      return;
+    }
+
+    try {
+      await consumeTagProfileViewGrantMutation({
+        token,
+        confessionId: confessionId as any,
+        profileUserId: profileUserId as any,
+      });
+      safePush(
+        router,
+        {
+          pathname: '/(main)/profile/[id]',
+          params: {
+            id: profileUserId,
+            source: 'confess_tag',
+            fromConfessionId: confessionId,
+          },
+        } as any,
+        'confessions->profile(tag)'
+      );
+    } catch {
+      showToastMessage('Profile unavailable');
+    }
+  }, [consumeTagProfileViewGrantMutation, isDemoMode, router, showToastMessage, token]);
 
   const handleSelectTaggedConfession = useCallback((item: TaggedConfessionItem) => {
     if (item.isExpired) {
@@ -1231,6 +1294,11 @@ export default function ConfessionsScreen() {
                 onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
                 onReact={() => handleOpenReactionPicker(item.id)}
                 onToggleEmoji={(emoji) => void toggleReaction(item.id, emoji)}
+                onTagPress={
+                  item.targetUserId
+                    ? () => void handleTagPress(item.id, item.targetUserId)
+                    : undefined
+                }
               />
             </View>
           );
@@ -1257,17 +1325,25 @@ export default function ConfessionsScreen() {
         </Animated.View>
       )}
 
-      <TouchableOpacity
-        style={[
-          styles.fab,
-          { bottom: Math.max(insets.bottom, 16) + 8 },
-          !canPostNow && styles.fabDisabled,
-        ]}
-        onPress={handleOpenComposer}
+      {/* Draggable composer FAB. Tap opens the composer; drag moves the
+          button and snaps to the nearest screen edge on release. Position
+          is persisted under a Confess-specific storage key so it never
+          collides with the Phase-2 Truth or Dare FAB. */}
+      <DraggableFab
+        storageKey={DRAGGABLE_FAB_STORAGE_KEYS.confessComposer}
+        buttonSize={52}
+        defaultRight={16}
+        defaultBottom={Math.max(insets.bottom, 16) + 8}
+        topInset={insets.top + 60}
+        bottomInset={Math.max(insets.bottom, 16) + 8}
+        positionStyle={[styles.fabPosition, { bottom: Math.max(insets.bottom, 16) + 8 }]}
+        touchableStyle={[styles.fab, !canPostNow && styles.fabDisabled]}
         activeOpacity={canPostNow ? 0.8 : 0.9}
+        onPress={handleOpenComposer}
+        accessibilityLabel="Post a confession"
       >
         <Ionicons name="add" size={24} color={COLORS.white} />
-      </TouchableOpacity>
+      </DraggableFab>
 
       {/* Premium menu sheet for confession actions */}
       <ConfessionMenuSheet
@@ -1744,13 +1820,15 @@ const styles = StyleSheet.create({
     flexShrink: 1,
     minWidth: 0,
   },
+  // Public (open / blur_photo) name uses the premium readable text color.
+  // Identity color (pink/blue) is reserved for the gender symbol only.
   trendingAuthorNamePublic: {
-    color: COLORS.primary,
+    color: COLORS.text,
   },
   trendingAuthorAge: {
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
-    color: COLORS.primary,
+    color: COLORS.text,
     flexShrink: 0,
   },
   trendingTime: {
@@ -1814,9 +1892,15 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.white,
   },
-  fab: {
+  // Position wrapper for the draggable composer FAB. Holds only the
+  // initial right anchor; bottom is set inline so we can pick up the
+  // current safe-area inset, and left/top are taken over once the user
+  // drags. The visual look (size, color, shadow) lives on `fab` below.
+  fabPosition: {
     position: 'absolute',
     right: 16,
+  },
+  fab: {
     width: 52,
     height: 52,
     borderRadius: 26,
@@ -1893,13 +1977,15 @@ const styles = StyleSheet.create({
     flexShrink: 1,
     minWidth: 0,
   },
+  // Public (open / blur_photo) name uses the premium readable text color.
+  // Identity color (pink/blue) is reserved for the gender symbol only.
   myConfessionAuthorNamePublic: {
-    color: COLORS.primary,
+    color: COLORS.text,
   },
   myConfessionAuthorAge: {
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
-    color: COLORS.primary,
+    color: COLORS.text,
     flexShrink: 0,
   },
   myConfessionTime: {

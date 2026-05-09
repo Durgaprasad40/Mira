@@ -5,7 +5,7 @@
 
 export const BELL_EXCLUDED_TYPES = new Set<string>(['message', 'new_message']);
 
-export const PHASE1_ONLY_TYPES = new Set<string>(['crossed_paths', 'nearby']);
+export const PHASE1_ONLY_TYPES = new Set<string>(['crossed_paths', 'nearby', 'tagged_confession']);
 
 export const PHASE2_ONLY_TYPES = new Set<string>([
   'phase2_match',

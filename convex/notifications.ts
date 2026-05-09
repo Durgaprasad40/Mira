@@ -290,7 +290,9 @@ export const createNotification = mutation({
       v.literal('crossed_paths'),
       v.literal('subscription'),
       v.literal('weekly_refresh'),
-      v.literal('profile_nudge')
+      v.literal('profile_nudge'),
+      // Phase-1 confession surface — tagged-confession bell item.
+      v.literal('tagged_confession')
     ),
     title: v.string(),
     body: v.string(),
@@ -298,6 +300,10 @@ export const createNotification = mutation({
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
+      // Tagged-confession deep-link payload. Body text never references this
+      // id; opening the notification routes to /(main)/confession-thread.
+      confessionId: v.optional(v.string()),
+      fromUserId: v.optional(v.string()),
     })),
     // 4-1: Optional dedupeKey for upsert behavior
     dedupeKey: v.optional(v.string()),

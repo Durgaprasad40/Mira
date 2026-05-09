@@ -633,12 +633,15 @@ const styles = StyleSheet.create({
     flexShrink: 1,
     minWidth: 0,
   },
+  // Public (open / blur_photo) name uses the premium readable text color.
+  // Identity color (pink/blue) is reserved for the gender symbol only.
   authorNamePublic: {
-    color: COLORS.primary,
+    color: COLORS.text,
   },
   authorAge: {
     fontSize: FONT_SIZE.body2,
     fontWeight: '600',
+    color: COLORS.text,
     flexShrink: 0,
   },
   authorGenderSymbol: {

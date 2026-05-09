@@ -217,6 +217,7 @@ export default function NotificationsScreen() {
         break;
       case 'confession_reaction':
       case 'confession_reply':
+      case 'tagged_confession':
         if (notification.data?.confessionId) {
           try {
             const confession = await convex.query(api.confessions.getConfession, {
@@ -291,6 +292,8 @@ export default function NotificationsScreen() {
         return 'heart';
       case 'confession_reply':
         return 'chatbubble-ellipses';
+      case 'tagged_confession':
+        return 'at';
       default:
         return 'notifications';
     }
@@ -322,6 +325,7 @@ export default function NotificationsScreen() {
         return COLORS.primary;
       case 'confession_reaction':
       case 'confession_reply':
+      case 'tagged_confession':
         return '#9C27B0';
       default:
         return COLORS.textLight;

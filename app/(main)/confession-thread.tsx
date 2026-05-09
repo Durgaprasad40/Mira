@@ -41,6 +41,7 @@ import { asUserId } from '@/convex/id';
 import { COLORS, FONT_SIZE, SPACING, lineHeight, moderateScale } from '@/lib/constants';
 import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
+import { safePush } from '@/lib/safeRouter';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import {
@@ -100,6 +101,8 @@ type Confession = {
   expiresAt?: number;
   isExpired?: boolean;
   isDeleted?: boolean;
+  taggedUserId?: string;
+  taggedUserName?: string;
 };
 
 // Match homepage avatar size
@@ -238,6 +241,9 @@ export default function ConfessionThreadScreen() {
   const updateReplyMutation = useMutation(api.confessions.updateReply);
   const deleteReplyMutation = useMutation(api.confessions.deleteReply);
   const reportReplyMutation = useMutation(api.confessions.reportReply);
+  const consumeTagProfileViewGrantMutation = useMutation(
+    api.confessions.consumeConfessionTagProfileViewGrant
+  );
 
   // Composer state
   const [replyText, setReplyText] = useState('');
@@ -831,6 +837,62 @@ export default function ConfessionThreadScreen() {
     ]
   );
 
+  // Open the tagged user's profile from the hero @username chip.
+  // Live mode: server validates the grant (expiry, mention match, blocks,
+  // reports) before navigating. Demo mode: navigate directly.
+  // Failure path uses generic copy — never reveals block/report state.
+  const handleTagPress = useCallback(async (
+    sourceConfessionId: string,
+    profileUserId: string | undefined
+  ) => {
+    if (!sourceConfessionId || !profileUserId) {
+      return;
+    }
+
+    if (isDemoMode) {
+      safePush(
+        router,
+        {
+          pathname: '/(main)/profile/[id]',
+          params: {
+            id: profileUserId,
+            source: 'confess_tag',
+            fromConfessionId: sourceConfessionId,
+          },
+        } as any,
+        'thread->profile(tag)'
+      );
+      return;
+    }
+
+    if (!token) {
+      Alert.alert('Profile unavailable');
+      return;
+    }
+
+    try {
+      await consumeTagProfileViewGrantMutation({
+        token,
+        confessionId: sourceConfessionId as any,
+        profileUserId: profileUserId as any,
+      });
+      safePush(
+        router,
+        {
+          pathname: '/(main)/profile/[id]',
+          params: {
+            id: profileUserId,
+            source: 'confess_tag',
+            fromConfessionId: sourceConfessionId,
+          },
+        } as any,
+        'thread->profile(tag)'
+      );
+    } catch {
+      Alert.alert('Profile unavailable');
+    }
+  }, [consumeTagProfileViewGrantMutation, router, token]);
+
   // ────────────────────────────────────────────────────────────
   // Header (hero confession)
   // ────────────────────────────────────────────────────────────
@@ -894,6 +956,27 @@ export default function ConfessionThreadScreen() {
 
           <Text maxFontSizeMultiplier={1.2} style={styles.confessionText}>{confession.text}</Text>
 
+          {/* Tagged user chip — opens the tagged user's profile via a
+              server-validated one-tap grant. Hidden when the confession is
+              fully anonymous (serializer never exposes the tag in that case). */}
+          {confession.taggedUserId && confession.taggedUserName ? (
+            <TouchableOpacity
+              style={styles.taggedRow}
+              onPress={() => void handleTagPress(confession._id, confession.taggedUserId)}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="heart" size={14} color={COLORS.primary} />
+              <Text maxFontSizeMultiplier={1.2} style={styles.taggedLabel}>Confess-to:</Text>
+              <Text
+                maxFontSizeMultiplier={1.2}
+                style={styles.taggedName}
+                numberOfLines={1}
+              >
+                @{confession.taggedUserName}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
           <View style={styles.statsRow}>
             <View style={styles.statItem}>
               <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
@@ -931,7 +1014,7 @@ export default function ConfessionThreadScreen() {
         ) : null}
       </View>
     );
-  }, [closedThreadMessage, confession, isThreadClosed, topLevelReplies.length]);
+  }, [closedThreadMessage, confession, handleTagPress, isThreadClosed, topLevelReplies.length]);
 
   const renderEmpty = useCallback(() => {
     if (isLoading) return null;
@@ -1448,8 +1531,11 @@ const styles = StyleSheet.create({
     flexShrink: 1,
     minWidth: 0,
   },
+  // Public (open / blur_photo) name uses the premium readable text color.
+  // Identity color (pink/blue) is reserved for the gender symbol only.
+  // The hero name string is `name, age` so this color rules both name + age.
   authorNamePublic: {
-    color: COLORS.primary,
+    color: COLORS.text,
   },
   timeAgo: {
     fontSize: FONT_SIZE.caption,
@@ -1463,6 +1549,24 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginBottom: SPACING.md,
     letterSpacing: 0.1,
+  },
+  taggedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    paddingVertical: SPACING.xs,
+    marginBottom: SPACING.sm,
+  },
+  taggedLabel: {
+    fontSize: FONT_SIZE.body2,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  taggedName: {
+    fontSize: FONT_SIZE.body2,
+    color: COLORS.primary,
+    fontWeight: '600',
+    flexShrink: 1,
   },
   statsRow: {
     flexDirection: 'row',

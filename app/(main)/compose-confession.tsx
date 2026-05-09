@@ -395,6 +395,9 @@ export default function ComposeConfessionScreen() {
           visibility: 'global',
           authorVisibility,
           taggedUserId: taggedUser?.id as any,
+          // Client-suggested mention name. Backend prefers the canonical name
+          // resolved from the users table; this is only a fallback.
+          ...(taggedUser?.name ? { taggedUserName: taggedUser.name } : {}),
           ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
           ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
           ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
