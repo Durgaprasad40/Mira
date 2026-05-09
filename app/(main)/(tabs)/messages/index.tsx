@@ -1,8 +1,3 @@
-/*
- * LOCKED (PHASE-1 TAB)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
- */
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View,
@@ -52,6 +47,8 @@ import { log } from '@/utils/logger';
 import { useScreenTrace } from '@/lib/devTrace';
 import { useBatchPresence, type PresenceStatus } from '@/hooks/usePresence';
 import type { Id } from '@/convex/_generated/dataModel';
+
+type RouterHref = Parameters<ReturnType<typeof useRouter>['push']>[0];
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - UI_SPACING.base * 3) / 2;
@@ -195,6 +192,56 @@ type OutgoingStandOutRow = {
   receiver?: Phase1StandOutUser | null;
 };
 
+type LikeCardItem = {
+  likeId?: string;
+  userId: string;
+  action?: string;
+  name?: string | null;
+  photoUrl?: string | null;
+  age?: number | null;
+  createdAt?: number;
+  message?: string | null;
+};
+
+type ConvexMatchRow = {
+  matchId?: string | null;
+  conversationId?: string | null;
+  matchSource?: string | null;
+  lastMessage?: unknown;
+  user?: {
+    id?: string | null;
+    name?: string | null;
+    photoUrl?: string | null;
+    lastActive?: number;
+    isVerified?: boolean;
+  } | null;
+};
+
+type NewMatchRow = {
+  id?: string | null;
+  matchId?: string | null;
+  conversationId?: string | null;
+  matchSource?: string | null;
+  otherUser?: {
+    id?: string | null;
+    name?: string | null;
+    photoUrl?: string | null;
+    lastActive?: number;
+    isVerified?: boolean;
+  } | null;
+};
+
+type NewMatchDisplayItem = ProcessedThread | NewMatchRow;
+
+const getInboxTerminalState = (row: InboxConversationRow) =>
+  'terminalState' in row ? row.terminalState : undefined;
+
+const getNewMatchDisplayKey = (item: NewMatchDisplayItem | undefined, index: number) => {
+  if (!item) return `newmatch-${index}`;
+  const matchId = 'matchId' in item ? item.matchId : undefined;
+  return item.id || matchId || `newmatch-${item.otherUser?.id ?? index}`;
+};
+
 const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
 
 function getConversationSearchPreview(
@@ -229,7 +276,25 @@ function getConversationSearchPreview(
 }
 
 function getNonEmptyString(value: string | null | undefined): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function getSafeIdTail(value: string | null | undefined): string | undefined {
+  const normalized = getNonEmptyString(value);
+  return normalized ? normalized.slice(-6) : undefined;
+}
+
+const asLikeId = (value: string): Id<'likes'> => value as Id<'likes'>;
+const asMatchId = (value: string): Id<'matches'> => value as Id<'matches'>;
+const asHref = (value: string): RouterHref => value as RouterHref;
+
+function getResultConversationId(result: unknown): string | null {
+  if (!result || typeof result !== 'object' || !('conversationId' in result)) {
+    return null;
+  }
+  const value = (result as { conversationId?: unknown }).conversationId;
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
 function getConversationRouteId(item: InboxConversationRow): string | undefined {
@@ -264,7 +329,7 @@ function getNormalizedInboxOtherUser(
   };
 }
 
-function getInboxConversationKey(item: InboxConversationRow, index: number): string {
+function getInboxConversationKey(item: InboxConversationRow): string | undefined {
   const directId = getConversationRouteId(item);
   if (directId) return directId;
 
@@ -283,7 +348,11 @@ function getInboxConversationKey(item: InboxConversationRow, index: number): str
     return `conversation-${otherUserId}`;
   }
 
-  return `conversation-fallback-${index}`;
+  return undefined;
+}
+
+function hasStableInboxConversationKey(item: InboxConversationRow): boolean {
+  return !!getInboxConversationKey(item);
 }
 
 function getStandOutDisplayName(user?: Phase1StandOutUser | null): string {
@@ -330,6 +399,7 @@ export default function MessagesScreen() {
   const [standOutReplyMode, setStandOutReplyMode] = useState(false);
   const [standOutReplyText, setStandOutReplyText] = useState('');
   const [activeStandOutAction, setActiveStandOutAction] = useState<string | null>(null);
+  const [openingMatchKey, setOpeningMatchKey] = useState<string | null>(null);
 
   // P1-RESTORE: Search bar state for filtering conversations by name / preview text.
   // P1-POLISH: Debounce filter (120ms) so large inboxes don't lag per-keystroke,
@@ -439,30 +509,11 @@ export default function MessagesScreen() {
       const profileParam = typeof profileId === 'string' ? profileId : null;
       const currentKey = focusParam === 'likes' ? `likes:${profileParam ?? ''}` : '';
 
-      if (__DEV__) {
-        console.log('[MESSAGES_ENTRY][focus]', {
-          focus: focusParam,
-          profileId: profileParam,
-          currentKey,
-          consumedKey: consumedFocusKeyRef.current,
-          activeView: activeViewRef.current,
-        });
-      }
-
       const shouldApplyLikesFocus =
         currentKey !== '' && consumedFocusKeyRef.current !== currentKey;
 
       if (shouldApplyLikesFocus) {
         consumedFocusKeyRef.current = currentKey;
-        if (__DEV__) {
-          console.log('[MESSAGES_ENTRY][auto_redirect]', {
-            target: 'likes',
-            reason: 'notification_deeplink_focus_likes',
-            triggeredByUserAction: false,
-            focus: focusParam,
-            profileId: profileParam,
-          });
-        }
         setActiveView('likes');
 
         // LIFECYCLE: Mark likes as opened when arriving via deep link
@@ -519,21 +570,6 @@ export default function MessagesScreen() {
             likesListRef.current?.scrollToIndex({ index: rowIndex, animated: true });
           }, 150); // Slightly longer delay to allow layout
         }
-      } else if (currentKey !== '' && __DEV__) {
-        // Stale URL param from a prior deep link — deliberately ignored.
-        console.log('[MESSAGES_ENTRY][route_restore]', {
-          reason: 'stale_focus_param_ignored',
-          currentKey,
-          consumedKey: consumedFocusKeyRef.current,
-          activeView: activeViewRef.current,
-        });
-      }
-
-      if (__DEV__) {
-        console.log('[MESSAGES_ENTRY][final_screen]', {
-          activeView: shouldApplyLikesFocus ? 'likes' : activeViewRef.current,
-          appliedDeepLink: shouldApplyLikesFocus,
-        });
       }
 
       // Cleanup: clear pending scroll timeout on blur/unmount.
@@ -556,13 +592,6 @@ export default function MessagesScreen() {
   useFocusEffect(
     useCallback(() => {
       return () => {
-        if (__DEV__) {
-          console.log('[MESSAGES_ENTRY][tab_press]', {
-            event: 'blur_or_unmount',
-            priorActiveView: activeViewRef.current,
-            resetTo: 'messages',
-          });
-        }
         setActiveView('messages');
       };
     }, [])
@@ -682,8 +711,12 @@ export default function MessagesScreen() {
   useEffect(() => {
     // Only run when we have conversation data (meaning messages have arrived)
     if (!isDemoMode && userId && convexConversations && convexConversations.length > 0) {
-      markAllAsDelivered({ authUserId: userId }).catch(() => {
-        // Silent fail - delivery marking is best-effort
+      markAllAsDelivered({ authUserId: userId }).catch((error) => {
+        if (__DEV__) {
+          log.warn('[MESSAGES]', 'markAllAsDelivered failed', {
+            reason: error instanceof Error ? error.message : 'unknown',
+          });
+        }
       });
     }
   }, [isDemoMode, userId, convexConversations, markAllAsDelivered]);
@@ -698,7 +731,7 @@ export default function MessagesScreen() {
 
   const incomingStandOuts = useMemo<IncomingStandOutRow[]>(() => {
     if (isDemoMode || !Array.isArray(incomingStandOutsResult)) return [];
-    return (incomingStandOutsResult as any[]).map((row) => ({
+    return (incomingStandOutsResult as Array<IncomingStandOutRow & Record<string, unknown>>).map((row) => ({
       ...row,
       likeId: String(row.likeId),
       fromUserId: row.fromUserId ? String(row.fromUserId) : undefined,
@@ -707,7 +740,7 @@ export default function MessagesScreen() {
 
   const outgoingStandOuts = useMemo<OutgoingStandOutRow[]>(() => {
     if (isDemoMode || !Array.isArray(outgoingStandOutsResult)) return [];
-    return (outgoingStandOutsResult as any[]).map((row) => ({
+    return (outgoingStandOutsResult as Array<OutgoingStandOutRow & Record<string, unknown>>).map((row) => ({
       ...row,
       likeId: String(row.likeId),
       toUserId: row.toUserId ? String(row.toUserId) : undefined,
@@ -736,10 +769,10 @@ export default function MessagesScreen() {
   const conversations = useMemo(() => {
     if (isDemoMode) return demoThreads;
     if (!convexConversations) return [];
-    return convexConversations.filter((c: any) => {
+    return (convexConversations as InboxConversationRow[]).filter((c) => {
       const otherUserId = c?.otherUser?.id ? String(c.otherUser.id) : '';
       if (otherUserId && pendingStandOutUserIds.has(otherUserId)) return false;
-      return c.lastMessage !== null || c.terminalState != null;
+      return c.lastMessage !== null || getInboxTerminalState(c) != null;
     });
   }, [isDemoMode, demoThreads, convexConversations, pendingStandOutUserIds]);
 
@@ -748,7 +781,7 @@ export default function MessagesScreen() {
   // keyed by userId -> PresenceInfo.
   const conversationOtherUserIds = useMemo(() => {
     const ids: Id<'users'>[] = [];
-    for (const c of conversations as any[]) {
+    for (const c of conversations as InboxConversationRow[]) {
       const id = c?.otherUser?.id;
       if (typeof id === 'string' && id.length > 0) {
         ids.push(id as Id<'users'>);
@@ -758,26 +791,22 @@ export default function MessagesScreen() {
   }, [conversations]);
   const conversationPresenceByUserId = useBatchPresence(conversationOtherUserIds) ?? null;
   const unreadCount = isDemoMode ? demoUnreadCount : convexUnreadCount;
-  const currentUser = isDemoMode
-    ? { gender: 'male', subscriptionTier: 'premium' as const }
-    : convexCurrentUser;
-
   // Build matched user IDs set for likes filtering
   const matchedUserIds = useMemo(() => {
     if (isDemoMode) {
       return new Set(demoMatches.map((m) => m.otherUser?.id).filter(Boolean) as string[]);
     }
     // Convex mode: use real matches
-    const matches = (convexMatches || []) as any[];
+    const matches = (convexMatches || []) as ConvexMatchRow[];
     return new Set(matches.map((m) => m.user?.id).filter(Boolean) as string[]);
   }, [isDemoMode, demoMatches, convexMatches]);
 
   // Process likes — filter out blocked and already-matched users
   // IMPORTANT: Use demoLikesRaw directly, only filter blocked/matched
-  const allLikes = useMemo(() => {
+  const allLikes = useMemo<LikeCardItem[]>(() => {
     if (!isDemoMode) {
       // Convex mode
-      const likes = (convexLikesReceived || []) as any[];
+      const likes = (convexLikesReceived || []) as LikeCardItem[];
       return likes.filter((l) => {
         if (l.action === 'super_like') return false;
         if (blockedUserIds.includes(l.userId)) return false;
@@ -788,7 +817,7 @@ export default function MessagesScreen() {
 
     // Demo mode — use raw likes from store, filter blocked/matched
     const filtered = demoLikesRaw.filter((l) => {
-      if ((l as any).action === 'super_like') return false;
+      if ((l as { action?: string }).action === 'super_like') return false;
       if (blockedUserIds.includes(l.userId)) return false;
       if (matchedUserIds.has(l.userId)) return false;
       return true;
@@ -799,13 +828,13 @@ export default function MessagesScreen() {
       log.warn('[LIKES]', 'all filtered', { raw: demoLikesRaw.length, matched: matchedUserIds.size });
     }
 
-    return filtered;
+    return filtered as LikeCardItem[];
   }, [isDemoMode, demoLikesRaw, convexLikesReceived, blockedUserIds, matchedUserIds, hasHydrated]);
 
   // Separate super likes and regular likes (super likes first)
   const { superLikes, regularLikes } = useMemo(() => {
-    const supers = allLikes.filter((l: any) => l.action === 'super_like');
-    const regular = allLikes.filter((l: any) => l.action !== 'super_like');
+    const supers = allLikes.filter((l) => l.action === 'super_like');
+    const regular = allLikes.filter((l) => l.action !== 'super_like');
     return { superLikes: supers, regularLikes: regular };
   }, [allLikes]);
 
@@ -816,16 +845,25 @@ export default function MessagesScreen() {
 
   const handleConversationPress = useCallback((item: InboxConversationRow) => {
     const routeId = getConversationRouteId(item);
-    if (!routeId) return;
+    if (!routeId) {
+      if (__DEV__) {
+        log.warn('[MESSAGES]', 'conversation row cannot be opened', {
+          reason: getInboxMatchId(item) ? 'missing_conversation_for_match' : 'missing_conversation_id',
+          hasOtherUser: !!getNonEmptyString(item.otherUser?.id),
+        });
+      }
+      Toast.show('Unable to open this chat. Please try again.');
+      return;
+    }
 
-    safePush(router, `/(main)/(tabs)/messages/chat/${routeId}` as any, 'messages->chat');
+    safePush(router, asHref(`/(main)/(tabs)/messages/chat/${routeId}`), 'messages->chat');
   }, [router]);
 
   const handleConversationAvatarPress = useCallback((item: InboxConversationRow) => {
     const otherUserId = getNonEmptyString(item.otherUser?.id);
     if (!otherUserId) return;
 
-    safePush(router, `/(main)/profile/${otherUserId}` as any, 'messages->avatarProfile');
+    safePush(router, asHref(`/(main)/profile/${otherUserId}`), 'messages->avatarProfile');
   }, [router]);
 
   // Pending likes count (for header badge)
@@ -835,10 +873,11 @@ export default function MessagesScreen() {
   const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
   const dismissNudge = useDemoStore((s) => s.dismissNudge);
   const nudgeUser = isDemoMode ? getDemoCurrentUser() : convexCurrentUser;
+  const nudgeBio = (nudgeUser as { bio?: unknown } | null | undefined)?.bio;
   const messagesNudgeStatus = nudgeUser
     ? getProfileCompleteness({
         photoCount: Array.isArray(nudgeUser.photos) ? nudgeUser.photos.length : 0,
-        bioLength: (nudgeUser as any).bio?.length ?? 0,
+        bioLength: typeof nudgeBio === 'string' ? nudgeBio.length : 0,
       })
     : 'complete';
   const showMessagesNudge =
@@ -899,16 +938,19 @@ export default function MessagesScreen() {
 
   // Process matches: separate Super Likes (above) from New Matches
   // A match is "new" if it has no messages yet (lastMessage is null)
-  const { superLikeMatches, newMatches } = useMemo(() => {
+  const { superLikeMatches, newMatches } = useMemo<{
+    superLikeMatches: NewMatchRow[];
+    newMatches: NewMatchDisplayItem[];
+  }>(() => {
     if (isDemoMode) {
       // Demo mode: all new matches are regular (no super_like tracking in demo)
       return { superLikeMatches: [], newMatches: demoNewMatches };
     }
 
     // Convex mode: process real matches
-    const matches = (convexMatches || []) as any[];
-    const superLikes: any[] = [];
-    const regular: any[] = [];
+    const matches = (convexMatches || []) as ConvexMatchRow[];
+    const superLikes: NewMatchRow[] = [];
+    const regular: NewMatchRow[] = [];
 
     for (const match of matches) {
       const otherUserId = match.user?.id ? String(match.user.id) : '';
@@ -919,7 +961,12 @@ export default function MessagesScreen() {
 
       // FIX: Defensive check — skip matches without valid matchId (prevents keyExtractor crash)
       if (!match.matchId) {
-        log.warn('[MESSAGES]', 'Skipping match without matchId', { match });
+        if (__DEV__) {
+          log.warn('[MESSAGES]', 'Skipping match without matchId', {
+            hasUser: !!match.user?.id,
+            source: match.matchSource || 'unknown',
+          });
+        }
         continue;
       }
 
@@ -949,7 +996,7 @@ export default function MessagesScreen() {
 
   // ── Like actions ──
 
-  const handlePass = useCallback(async (like: any) => {
+  const handlePass = useCallback(async (like: LikeCardItem) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (isDemoMode) {
       removeLike(like.userId);
@@ -960,19 +1007,25 @@ export default function MessagesScreen() {
         Toast.show('Unable to pass. Please try again.');
         return;
       }
+      const targetUserId = asUserId(like.userId);
+      if (!targetUserId) {
+        Toast.show('Unable to pass. Please try again.');
+        return;
+      }
       try {
         await swipe({
           token,
-          toUserId: like.userId,
+          toUserId: targetUserId,
           action: 'pass',
         });
       } catch (error) {
         log.error('[MESSAGES]', 'handlePass failed', { error });
+        Toast.show('Unable to pass. Please try again.');
       }
     }
-  }, [removeLike, token, swipe]);
+  }, [isDemoMode, removeLike, token, swipe]);
 
-  const handleLikeBack = useCallback(async (like: any) => {
+  const handleLikeBack = useCallback(async (like: LikeCardItem) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     if (isDemoMode) {
@@ -1025,24 +1078,33 @@ export default function MessagesScreen() {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } else {
       // Convex mode: call swipe mutation with 'like' action
-      if (!token || !like.userId) return;
+      if (!token || !like.userId) {
+        Toast.show('Unable to like back. Please try again.');
+        return;
+      }
+      const targetUserId = asUserId(like.userId);
+      if (!targetUserId) {
+        Toast.show('Unable to like back. Please try again.');
+        return;
+      }
       try {
         const result = await swipe({
           token,
-          toUserId: like.userId,
+          toUserId: targetUserId,
           action: 'like',
         });
 
         // If mutual like, it's a match - navigate to match celebration
         if (result.isMatch && result.matchId) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${like.userId}` as any, 'messages->matchCelebration');
+          safePush(router, asHref(`/(main)/match-celebration?matchId=${result.matchId}&userId=${like.userId}`), 'messages->matchCelebration');
         }
       } catch (error) {
         log.error('[MESSAGES]', 'handleLikeBack failed', { error });
+        Toast.show('Unable to like back. Please try again.');
       }
     }
-  }, [removeLike, simulateMatch, modalScale, heartScale, token, swipe, router]);
+  }, [heartScale, isDemoMode, modalScale, removeLike, router, simulateMatch, swipe, token]);
 
   const handleSayHi = useCallback(() => {
     if (!matchedProfile) return;
@@ -1059,7 +1121,7 @@ export default function MessagesScreen() {
     setMatchedProfile(null);
 
     // Navigate to chat
-    safePush(router, `/(main)/(tabs)/messages/chat/${convoId}?source=match` as any, 'messages->matchChat');
+    safePush(router, asHref(`/(main)/(tabs)/messages/chat/${convoId}?source=match`), 'messages->matchChat');
   }, [matchedProfile, router, modalScale, heartScale]);
 
   const handleKeepDiscovering = useCallback(() => {
@@ -1072,8 +1134,8 @@ export default function MessagesScreen() {
     setActiveView('messages');
   }, [modalScale, heartScale]);
 
-  const handleProfileTap = useCallback((like: any) => {
-    safePush(router, `/(main)/profile/${like.userId}` as any, 'messages->likeProfile');
+  const handleProfileTap = useCallback((like: LikeCardItem) => {
+    safePush(router, asHref(`/(main)/profile/${like.userId}`), 'messages->likeProfile');
   }, [router]);
 
   const openStandOutDetail = useCallback((request: IncomingStandOutRow) => {
@@ -1098,7 +1160,7 @@ export default function MessagesScreen() {
     }
     setStandOutDetailTarget(null);
     setStandOutReplyMode(false);
-    safePush(router, `/(main)/profile/${targetUserId}` as any, 'messages->standOutProfile');
+    safePush(router, asHref(`/(main)/profile/${targetUserId}`), 'messages->standOutProfile');
   }, [router]);
 
   const handleOutgoingStandOutPress = useCallback(() => {
@@ -1111,7 +1173,7 @@ export default function MessagesScreen() {
     setStandOutReplyText('');
     setRetryKey((k) => k + 1);
     if (conversationId) {
-      safePush(router, `/(main)/(tabs)/messages/chat/${conversationId}` as any, 'messages->standOutChat');
+      safePush(router, asHref(`/(main)/(tabs)/messages/chat/${conversationId}`), 'messages->standOutChat');
     }
   }, [router]);
 
@@ -1122,10 +1184,10 @@ export default function MessagesScreen() {
     try {
       const result = await acceptStandOutMutation({
         authUserId: userId,
-        likeId: request.likeId as any,
+        likeId: asLikeId(request.likeId),
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      finishStandOutAction((result as any)?.conversationId ? String((result as any).conversationId) : null);
+      finishStandOutAction(getResultConversationId(result));
     } catch (error) {
       log.warn('[MESSAGES]', 'acceptStandOut failed', { error });
       Toast.show('Couldn’t accept this Stand Out. Please try again.');
@@ -1141,7 +1203,7 @@ export default function MessagesScreen() {
     try {
       await ignoreStandOutMutation({
         authUserId: userId,
-        likeId: request.likeId as any,
+        likeId: asLikeId(request.likeId),
       });
       setStandOutDetailTarget(null);
       setStandOutReplyMode(false);
@@ -1169,11 +1231,11 @@ export default function MessagesScreen() {
     try {
       const result = await replyToStandOutMutation({
         authUserId: userId,
-        likeId: standOutDetailTarget.likeId as any,
+        likeId: asLikeId(standOutDetailTarget.likeId),
         replyText,
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      finishStandOutAction((result as any)?.conversationId ? String((result as any).conversationId) : null);
+      finishStandOutAction(getResultConversationId(result));
     } catch (error) {
       log.warn('[MESSAGES]', 'replyToStandOut failed', { error });
       Toast.show('Couldn’t send your reply. Please try again.');
@@ -1195,6 +1257,70 @@ export default function MessagesScreen() {
     likesListLayoutReady.current = false;
     setActiveView('messages');
   }, []);
+
+  const handleOpenMatchConversation = useCallback(async (
+    item: NewMatchRow,
+    source: 'new_match' | 'super_like',
+  ) => {
+    const existingConversationId = getNonEmptyString(item?.conversationId);
+    if (existingConversationId) {
+      safePush(
+        router,
+        asHref(`/(main)/(tabs)/messages/chat/${existingConversationId}`),
+        source === 'super_like' ? 'messages->superLikeChat' : 'messages->newMatchChat',
+      );
+      return;
+    }
+
+    const matchId = getNonEmptyString(item?.id) ?? getNonEmptyString(item?.matchId);
+    const actionKey = `${source}:${matchId ?? getNonEmptyString(item?.otherUser?.id) ?? 'missing'}`;
+    if (openingMatchKey) return;
+
+    if (!matchId || !userId) {
+      if (__DEV__) {
+        log.warn('[MESSAGES]', 'match conversation cannot be opened', {
+          source,
+          reason: !matchId ? 'missing_match_id' : 'missing_user',
+          hasOtherUser: !!getNonEmptyString(item?.otherUser?.id),
+        });
+      }
+      Toast.show('Unable to open chat. Please try again.');
+      return;
+    }
+
+    setOpeningMatchKey(actionKey);
+    try {
+      const result = await ensureConversation({ matchId: asMatchId(matchId), authUserId: userId });
+      const conversationId = getResultConversationId(result);
+      if (!conversationId) {
+        if (__DEV__) {
+          log.warn('[MESSAGES]', 'match conversation creation returned no id', {
+            source,
+            matchRef: getSafeIdTail(matchId),
+          });
+        }
+        Toast.show('Unable to open chat. Please try again.');
+        return;
+      }
+
+      safePush(
+        router,
+        asHref(`/(main)/(tabs)/messages/chat/${conversationId}`),
+        source === 'super_like' ? 'messages->superLikeChat' : 'messages->newMatchChat',
+      );
+    } catch (error) {
+      if (__DEV__) {
+        log.warn('[MESSAGES]', 'match conversation creation failed', {
+          source,
+          matchRef: getSafeIdTail(matchId),
+          reason: error instanceof Error ? error.message : 'unknown',
+        });
+      }
+      Toast.show('Unable to open chat. Please try again.');
+    } finally {
+      setOpeningMatchKey((current) => (current === actionKey ? null : current));
+    }
+  }, [ensureConversation, openingMatchKey, router, userId]);
 
   // ── Render functions ──
 
@@ -1331,7 +1457,7 @@ export default function MessagesScreen() {
     );
   };
 
-  const renderLikeCard = ({ item: like }: { item: any }) => {
+  const renderLikeCard = ({ item: like }: { item: LikeCardItem }) => {
     const isRecent = isRecentLike(like.createdAt || Date.now());
     const isSuperLike = like.action === 'super_like';
 
@@ -1379,9 +1505,9 @@ export default function MessagesScreen() {
           {/* Standout message (if present) */}
           {like.message && (
             <View style={styles.standoutMessageContainer}>
-              <Text {...TEXT_PROPS} style={styles.standoutMessageText} numberOfLines={2}>
+          <Text {...TEXT_PROPS} style={styles.standoutMessageText} numberOfLines={2}>
                 "{like.message}"
-              </Text>
+          </Text>
             </View>
           )}
         </TouchableOpacity>
@@ -1428,18 +1554,13 @@ export default function MessagesScreen() {
         <FlatList
           horizontal
           data={superLikeMatches}
-          keyExtractor={(item: any) => item.id || item.matchId || `superlike-${item.otherUser?.id}`}
-          renderItem={({ item }: { item: any }) => (
+          keyExtractor={(item) => item.id || `superlike-${item.otherUser?.id}`}
+          renderItem={({ item }: { item: NewMatchRow }) => (
             <TouchableOpacity
               style={styles.compactMatchItem}
               activeOpacity={0.7}
-              onPress={() => {
-                if (item.conversationId) {
-                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->superLikeChat');
-                } else {
-                  log.warn('[MESSAGES]', 'Super Like card missing conversationId', { matchId: item.id });
-                }
-              }}
+              disabled={!!openingMatchKey}
+              onPress={() => handleOpenMatchConversation(item, 'super_like')}
             >
               <View style={styles.compactAvatarContainer}>
                 <View style={[styles.compactMatchRing, { borderColor: COLORS.superLike }]}>
@@ -1498,45 +1619,13 @@ export default function MessagesScreen() {
     </View>
   );
 
-  const renderRealMatchSlot = (item: any, key: string) => (
+  const renderRealMatchSlot = (item: NewMatchDisplayItem, key: string) => (
     <TouchableOpacity
       key={key}
       style={{ alignItems: 'center' }}
       activeOpacity={0.7}
-      onPress={async () => {
-        if (item.conversationId) {
-          safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
-          return;
-        }
-        // P0-RESTORE: Match cards may not have a conversationId yet.
-        // Lazily create the conversation via ensureConversation, then
-        // navigate. Without this fallback the tap silently fails.
-        const matchId = item.id || item.matchId;
-        if (!matchId || !userId) {
-          log.warn('[MESSAGES]', 'New Match card cannot create conversation', {
-            matchId,
-            hasUserId: !!userId,
-          });
-          Toast.show('Unable to open chat. Please try again.');
-          return;
-        }
-        try {
-          const result = await ensureConversation({ matchId: matchId as any, authUserId: userId });
-          if (result?.conversationId) {
-            safePush(
-              router,
-              `/(main)/(tabs)/messages/chat/${result.conversationId}` as any,
-              'messages->newMatchChat',
-            );
-          } else {
-            log.error('[MESSAGES]', 'ensureConversation returned no conversationId', { result });
-            Toast.show('Unable to open chat. Please try again.');
-          }
-        } catch (error) {
-          log.error('[MESSAGES]', 'ensureConversation failed', { error, matchId });
-          Toast.show('Unable to open chat. Please try again.');
-        }
-      }}
+      disabled={!!openingMatchKey}
+      onPress={() => handleOpenMatchConversation(item, 'new_match')}
     >
       <View style={styles.compactAvatarContainer}>
         <View style={[styles.compactMatchRing, { borderColor: COLORS.primary }]}>
@@ -1581,10 +1670,7 @@ export default function MessagesScreen() {
           <View style={styles.newMatchesEvenRow}>
             {Array.from({ length: NEW_MATCHES_TARGET_SLOTS }).map((_, idx) => {
               const realItem = realMatches[idx];
-              const realKey =
-                realItem?.id ||
-                realItem?.matchId ||
-                `newmatch-${realItem?.otherUser?.id ?? idx}`;
+              const realKey = getNewMatchDisplayKey(realItem, idx);
               return (
                 <View key={`nm-slot-${idx}`} style={styles.newMatchesEvenSlot}>
                   {realItem
@@ -1598,12 +1684,10 @@ export default function MessagesScreen() {
           <FlatList
             horizontal
             data={realMatches}
-            keyExtractor={(item: any, idx: number) =>
-              item?.id || item?.matchId || `newmatch-${item?.otherUser?.id ?? idx}`
-            }
-            renderItem={({ item }) => (
+            keyExtractor={(item: NewMatchDisplayItem, idx: number) => getNewMatchDisplayKey(item, idx)}
+            renderItem={({ item, index }) => (
               <View style={styles.matchScrollItem}>
-                {renderRealMatchSlot(item, `real-${item?.id || item?.matchId}`)}
+                {renderRealMatchSlot(item, `real-${getNewMatchDisplayKey(item, index)}`)}
               </View>
             )}
             showsHorizontalScrollIndicator={false}
@@ -1615,7 +1699,10 @@ export default function MessagesScreen() {
   };
 
   // Loading state
-  const isLoading = !isDemoMode && convexConversations === undefined;
+  const isLoading = !isDemoMode && (
+    convexConversations === undefined ||
+    convexCurrentUser === undefined
+  );
 
   if (isLoading) {
     return (
@@ -1644,6 +1731,26 @@ export default function MessagesScreen() {
           </View>
         </SafeAreaView>
       </LoadingGuard>
+    );
+  }
+
+  if (!isDemoMode && convexCurrentUser === null) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <Text {...TEXT_PROPS} style={styles.title}>Messages</Text>
+        </View>
+        <View style={styles.emptyContainer}>
+          <Ionicons name="alert-circle-outline" size={EMPTY_STATE_ICON_SIZE} color={COLORS.textLight} />
+          <Text {...TEXT_PROPS} style={styles.emptyTitle}>Messages unavailable</Text>
+          <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
+            We couldn’t load your account yet. Please try again.
+          </Text>
+          <TouchableOpacity style={styles.searchClearAction} onPress={handleRetry}>
+            <Text {...TEXT_PROPS} style={styles.searchClearActionText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -1731,7 +1838,7 @@ export default function MessagesScreen() {
           ref={likesListRef}
           data={displayLikes}
           numColumns={2}
-          keyExtractor={(item: any) => `like-${item.likeId || item.userId}`}
+          keyExtractor={(item) => `like-${item.likeId || item.userId}`}
           renderItem={renderLikeCard}
           contentContainerStyle={displayLikes.length === 0 ? styles.emptyListContainer : styles.likesListContent}
           columnWrapperStyle={displayLikes.length > 0 ? styles.likesColumnWrapper : undefined}
@@ -1793,7 +1900,9 @@ export default function MessagesScreen() {
           // (ghost slots fill in when there are zero real matches), so the
           // Recent Chats label simply tracks whether the search is active.
           const showRecentChatsLabel = !isSearchActive;
-          const baseConversations = (conversations || []) as InboxConversationRow[];
+          const baseConversations = ((conversations || []) as InboxConversationRow[]).filter(
+            hasStableInboxConversationKey
+          );
           const filteredConversations = isSearching
             ? baseConversations.filter((conversation) => {
                 const haystack = [
@@ -1861,7 +1970,7 @@ export default function MessagesScreen() {
                 key="messages-list"
                 style={styles.conversationList}
                 data={filteredConversations}
-                keyExtractor={(item, index) => getInboxConversationKey(item as InboxConversationRow, index)}
+                keyExtractor={(item) => getInboxConversationKey(item as InboxConversationRow) ?? 'invalid-conversation'}
                 keyboardShouldPersistTaps="handled"
                 renderItem={({ item }: { item: InboxConversationRow }) => (
                   <ConversationItem

@@ -22,7 +22,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
 import { ProtectedMediaBubble } from './ProtectedMediaBubble';
-import { SystemMessage } from './SystemMessage';
+import { SystemMessage, type SystemSubtype } from './SystemMessage';
 import { VoiceMessageBubble } from './VoiceMessageBubble';
 import UploadProgressRing from '@/components/chatroom/UploadProgressRing';
 import { formatTime } from '@/utils/chatTime';
@@ -89,6 +89,7 @@ interface MessageBubbleProps {
       screenshotAllowed: boolean;
       viewOnce: boolean;
       watermark: boolean;
+      isMirrored?: boolean;
     };
     isExpired?: boolean;
     timerEndsAt?: number;   // Wall-clock time when timer expires
@@ -174,6 +175,17 @@ const EMOJI_ONLY_RE = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\u
 // System message marker for Convex mode (hidden from UI, used to detect system messages)
 // Format: [SYSTEM:subtype]actual message content
 const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+const SYSTEM_SUBTYPES = new Set<SystemSubtype>([
+  'screenshot_taken',
+  'screenshot_attempted',
+  'access_requested',
+  'permission_granted',
+  'permission_revoked',
+  'expired',
+  'tod_perm',
+  'tod_temp',
+  'truthdare',
+]);
 
 // MESSAGE-TICKS-FIX: Helper to determine message status and tick appearance
 type TickStatus = 'sent' | 'delivered' | 'read';
@@ -196,12 +208,15 @@ function getTickColor(status: TickStatus, isOwn: boolean): string {
   return isOwn ? 'rgba(255,255,255,0.8)' : COLORS.textLight;
 }
 
+function isSystemSubtype(value: unknown): value is SystemSubtype {
+  return typeof value === 'string' && SYSTEM_SUBTYPES.has(value as SystemSubtype);
+}
+
 function MessageBubbleComponent({
   message,
   isOwn,
   otherUserName,
   currentUserId,
-  currentUserToken,
   onMediaPress,
   onProtectedMediaPress,
   onProtectedMediaHoldStart,
@@ -333,7 +348,12 @@ function MessageBubbleComponent({
         return null;
       }
     }
-    return <SystemMessage text={message.content} subtype={message.systemSubtype as any} />;
+    return (
+      <SystemMessage
+        text={message.content}
+        subtype={isSystemSubtype(message.systemSubtype) ? message.systemSubtype : undefined}
+      />
+    );
   }
 
   // Detect system messages via hidden marker (Convex fallback)
@@ -361,7 +381,12 @@ function MessageBubbleComponent({
         }
       }
 
-      return <SystemMessage text={displayText} subtype={subtype as any} />;
+      return (
+        <SystemMessage
+          text={displayText}
+          subtype={isSystemSubtype(subtype) ? subtype : undefined}
+        />
+      );
     }
   }
 
@@ -470,6 +495,12 @@ function MessageBubbleComponent({
     // PHASE-2 EXTENSION: when `renderProtectedMedia` is provided we render the
     // caller's slot (e.g. Phase2ProtectedMediaBubble) inside the same bubble
     // frame so layout (avatar gutter, grouping, footer) stays identical.
+    const protectedMedia = message.protectedMedia
+      ? {
+          ...message.protectedMedia,
+          viewingMode: message.protectedMedia.viewingMode ?? ('tap' as const),
+        }
+      : undefined;
     const protectedMediaContent = (
       <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, isOwn ? ownBubbleOverlay : otherBubbleOverlay, styles.protectedBubble]}>
         {renderProtectedMedia ? (
@@ -478,8 +509,7 @@ function MessageBubbleComponent({
           <ProtectedMediaBubble
             messageId={message.id}
             mediaId={message.mediaId}
-            authToken={currentUserToken}
-            protectedMedia={message.protectedMedia as any}
+            protectedMedia={protectedMedia}
             timerEndsAt={message.timerEndsAt}
             isExpired={!!message.isExpired}
             expiredAt={message.expiredAt}

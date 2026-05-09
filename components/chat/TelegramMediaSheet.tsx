@@ -72,6 +72,26 @@ const SHOW_ALL_PHOTOS_THRESHOLD = 80;
 // Detect Expo Go vs Dev Build
 const isExpoGo = Constants.appOwnership === 'expo';
 
+type AccessPrivilegeCarrier = { accessPrivileges?: unknown };
+
+const devLog = (...args: unknown[]) => {
+  if (__DEV__) console.log(...args);
+};
+
+const devWarn = (...args: unknown[]) => {
+  if (__DEV__) console.warn(...args);
+};
+
+const readAccessPrivilege = (permission: AccessPrivilegeCarrier): AccessPrivilege | undefined => {
+  const privilege = permission.accessPrivileges;
+  return privilege === 'all' || privilege === 'limited' || privilege === 'none'
+    ? privilege
+    : undefined;
+};
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 interface TelegramMediaSheetProps {
   visible: boolean;
   onSelectMedia: (uri: string, type: 'photo' | 'video') => void;
@@ -237,7 +257,7 @@ export function TelegramMediaSheet({
         // video recording attempt re-checks via checkMicPermission()
         if (micPermissionChecked.current && !hasMicPermission.current) {
           micPermissionChecked.current = false;
-          console.log('[TelegramMediaSheet] Mic permission cache invalidated for re-check');
+          devLog('[TelegramMediaSheet] Mic permission cache invalidated for re-check');
         }
       }
     };
@@ -288,7 +308,7 @@ export function TelegramMediaSheet({
         setPreviewType(asset.type === 'video' ? 'video' : 'photo');
       }
     } catch (error) {
-      console.warn('[TelegramMediaSheet] launchExpoGoCamera failed:', error);
+      devWarn('[TelegramMediaSheet] launchExpoGoCamera failed:', error);
       closeExpoGoSheet();
     }
   };
@@ -333,7 +353,7 @@ export function TelegramMediaSheet({
         setPreviewType(asset.type === 'video' ? 'video' : 'photo');
       }
     } catch (error) {
-      console.warn('[TelegramMediaSheet] launchExpoGoGallery failed:', error);
+      devWarn('[TelegramMediaSheet] launchExpoGoGallery failed:', error);
       closeExpoGoSheet();
     }
   };
@@ -366,13 +386,13 @@ export function TelegramMediaSheet({
       try {
         const cameraStatus = await Camera.getCameraPermissionsAsync();
         cameraGranted = cameraStatus.granted;
-        console.warn('[TelegramMediaSheet][Assets] Camera permission:', {
+        devWarn('[TelegramMediaSheet][Assets] Camera permission:', {
           granted: cameraStatus.granted,
           status: cameraStatus.status,
           canAskAgain: cameraStatus.canAskAgain,
         });
       } catch (err) {
-        console.warn('[TelegramMediaSheet][Assets] getCameraPermissionsAsync failed:', err);
+        devWarn('[TelegramMediaSheet][Assets] getCameraPermissionsAsync failed:', err);
       }
 
       if (!mountedRef.current) return;
@@ -384,21 +404,21 @@ export function TelegramMediaSheet({
         const mediaStatus = await MediaLibrary.getPermissionsAsync();
         mediaGranted = mediaStatus.granted;
         // Android 13+ returns accessPrivileges: 'all' | 'limited' | 'none'
-        const rawPrivileges = (mediaStatus as any).accessPrivileges;
-        if (rawPrivileges === 'all' || rawPrivileges === 'limited' || rawPrivileges === 'none') {
+        const rawPrivileges = readAccessPrivilege(mediaStatus);
+        if (rawPrivileges) {
           mediaAccessPrivileges = rawPrivileges;
         } else if (mediaGranted) {
           // Fallback for older Android or iOS
           mediaAccessPrivileges = 'all';
         }
-        console.warn('[TelegramMediaSheet][Assets] MediaLibrary permission:', {
+        devWarn('[TelegramMediaSheet][Assets] MediaLibrary permission:', {
           granted: mediaStatus.granted,
           status: mediaStatus.status,
           accessPrivileges: mediaAccessPrivileges,
           canAskAgain: mediaStatus.canAskAgain,
         });
       } catch (err) {
-        console.warn('[TelegramMediaSheet][Assets] MediaLibrary.getPermissionsAsync failed:', err);
+        devWarn('[TelegramMediaSheet][Assets] MediaLibrary.getPermissionsAsync failed:', err);
       }
 
       if (!mountedRef.current) return;
@@ -416,7 +436,7 @@ export function TelegramMediaSheet({
         setPermissionState('denied');
       }
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Assets] checkExistingPermissions error:', error);
+      devWarn('[TelegramMediaSheet][Assets] checkExistingPermissions error:', error);
       if (mountedRef.current) {
         setPermissionState('denied');
       }
@@ -435,22 +455,22 @@ export function TelegramMediaSheet({
       const albums = await MediaLibrary.getAlbumsAsync({ includeSmartAlbums: true });
 
       // Log album count
-      console.warn('[TelegramMediaSheet][Albums] Total albums:', albums.length);
+      devWarn('[TelegramMediaSheet][Albums] Total albums:', albums.length);
 
       // Log top 5 albums by asset count
       const sortedAlbums = [...albums].sort((a, b) => (b.assetCount || 0) - (a.assetCount || 0));
       const top5 = sortedAlbums.slice(0, 5);
-      console.warn('[TelegramMediaSheet][Albums] Top 5 albums:',
+      devWarn('[TelegramMediaSheet][Albums] Top 5 albums:',
         top5.map(a => ({ title: a.title, assetCount: a.assetCount }))
       );
 
       // Calculate total assets across all albums
       const totalAlbumAssets = albums.reduce((sum, a) => sum + (a.assetCount || 0), 0);
-      console.warn('[TelegramMediaSheet][Albums] Total assets across all albums:', totalAlbumAssets);
+      devWarn('[TelegramMediaSheet][Albums] Total assets across all albums:', totalAlbumAssets);
 
       return albums;
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Albums] getAlbumsAsync failed:', error);
+      devWarn('[TelegramMediaSheet][Albums] getAlbumsAsync failed:', error);
       return [];
     }
   };
@@ -469,7 +489,7 @@ export function TelegramMediaSheet({
       // First, diagnose album visibility
       await diagnoseAlbums();
 
-      console.warn('[TelegramMediaSheet][Assets] Loading assets (photos + videos, no album restriction)...');
+      devWarn('[TelegramMediaSheet][Assets] Loading assets (photos + videos, no album restriction)...');
 
       // Query all assets without album restriction
       const assets = await MediaLibrary.getAssetsAsync({
@@ -479,10 +499,10 @@ export function TelegramMediaSheet({
         // No album specified = query all accessible assets
       });
 
-      console.warn('[TelegramMediaSheet][Assets] Initial load result:', {
+      devWarn('[TelegramMediaSheet][Assets] Initial load result:', {
         totalCount: assets.totalCount,
         assetsLength: assets.assets.length,
-        firstAssetUri: assets.assets[0]?.uri ?? 'none',
+        hasFirstAsset: assets.assets.length > 0,
         hasNextPage: assets.hasNextPage,
         endCursor: assets.endCursor,
       });
@@ -505,9 +525,9 @@ export function TelegramMediaSheet({
         }))
       );
 
-      console.warn('[TelegramMediaSheet][Assets] Gallery assets set:', uniqueAssets.length);
+      devWarn('[TelegramMediaSheet][Assets] Gallery assets set:', uniqueAssets.length);
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Assets] getAssetsAsync failed:', error);
+      devWarn('[TelegramMediaSheet][Assets] getAssetsAsync failed:', error);
       if (mountedRef.current) {
         setGalleryAssets([]);
       }
@@ -528,7 +548,7 @@ export function TelegramMediaSheet({
     setIsLoadingMore(true);
 
     try {
-      console.warn('[TelegramMediaSheet][Assets] Loading more assets after cursor:', endCursor);
+      devWarn('[TelegramMediaSheet][Assets] Loading more assets after cursor:', endCursor);
       const assets = await MediaLibrary.getAssetsAsync({
         first: LOAD_MORE_COUNT,
         after: endCursor,
@@ -536,7 +556,7 @@ export function TelegramMediaSheet({
         mediaType: [MediaLibrary.MediaType.photo, MediaLibrary.MediaType.video],
       });
 
-      console.warn('[TelegramMediaSheet][Assets] Load more result:', {
+      devWarn('[TelegramMediaSheet][Assets] Load more result:', {
         assetsLength: assets.assets.length,
         hasNextPage: assets.hasNextPage,
         endCursor: assets.endCursor,
@@ -562,7 +582,7 @@ export function TelegramMediaSheet({
         return [...prev, ...uniqueNew];
       });
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Assets] loadMoreAssets failed:', error);
+      devWarn('[TelegramMediaSheet][Assets] loadMoreAssets failed:', error);
     } finally {
       loadingMoreRef.current = false;
       if (mountedRef.current) {
@@ -588,7 +608,7 @@ export function TelegramMediaSheet({
     setBusy(true);
 
     try {
-      console.warn('[TelegramMediaSheet][Assets] Opening system picker...');
+      devWarn('[TelegramMediaSheet][Assets] Opening system picker...');
 
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'],
@@ -600,16 +620,16 @@ export function TelegramMediaSheet({
 
       if (result.canceled || !result.assets || result.assets.length === 0) {
         // User cancelled - stay on sheet, don't close
-        console.warn('[TelegramMediaSheet][Assets] System picker cancelled');
+        devWarn('[TelegramMediaSheet][Assets] System picker cancelled');
       } else {
         // Media selected - show preview
         const asset = result.assets[0];
-        console.warn('[TelegramMediaSheet][Assets] System picker selected:', asset.type);
+        devWarn('[TelegramMediaSheet][Assets] System picker selected:', asset.type);
         setPreviewUri(asset.uri);
         setPreviewType(asset.type === 'video' ? 'video' : 'photo');
       }
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Assets] System picker failed:', error);
+      devWarn('[TelegramMediaSheet][Assets] System picker failed:', error);
     } finally {
       systemPickerRef.current = false;
       if (mountedRef.current) {
@@ -629,18 +649,18 @@ export function TelegramMediaSheet({
       let mediaAccessPrivileges: AccessPrivilege = 'none';
       try {
         const mediaStatus = await MediaLibrary.getPermissionsAsync();
-        const rawPrivileges = (mediaStatus as any).accessPrivileges;
-        if (rawPrivileges === 'all' || rawPrivileges === 'limited' || rawPrivileges === 'none') {
+        const rawPrivileges = readAccessPrivilege(mediaStatus);
+        if (rawPrivileges) {
           mediaAccessPrivileges = rawPrivileges;
         } else if (mediaStatus.granted) {
           mediaAccessPrivileges = 'all';
         }
-        console.warn('[TelegramMediaSheet][Assets] Refresh - MediaLibrary permission:', {
+        devWarn('[TelegramMediaSheet][Assets] Refresh - MediaLibrary permission:', {
           granted: mediaStatus.granted,
           accessPrivileges: mediaAccessPrivileges,
         });
       } catch (err) {
-        console.warn('[TelegramMediaSheet][Assets] Refresh - getPermissionsAsync failed:', err);
+        devWarn('[TelegramMediaSheet][Assets] Refresh - getPermissionsAsync failed:', err);
       }
 
       if (!mountedRef.current) return;
@@ -651,7 +671,7 @@ export function TelegramMediaSheet({
       // Reload assets
       await loadGalleryAssets();
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Assets] handleRefreshGallery error:', error);
+      devWarn('[TelegramMediaSheet][Assets] handleRefreshGallery error:', error);
     } finally {
       if (mountedRef.current) {
         setBusy(false);
@@ -685,9 +705,9 @@ export function TelegramMediaSheet({
           const result = await Camera.requestCameraPermissionsAsync();
           cameraGranted = result.granted;
         }
-        console.warn('[TelegramMediaSheet][Assets] Camera permission after request:', cameraGranted);
+        devWarn('[TelegramMediaSheet][Assets] Camera permission after request:', cameraGranted);
       } catch (err) {
-        console.warn('[TelegramMediaSheet][Assets] Camera permission request failed:', err);
+        devWarn('[TelegramMediaSheet][Assets] Camera permission request failed:', err);
       }
 
       if (!mountedRef.current) return;
@@ -699,25 +719,25 @@ export function TelegramMediaSheet({
         const mediaStatus = await MediaLibrary.getPermissionsAsync();
         if (mediaStatus.granted) {
           mediaGranted = true;
-          const rawPrivileges = (mediaStatus as any).accessPrivileges;
+          const rawPrivileges = readAccessPrivilege(mediaStatus);
           mediaAccessPrivileges = rawPrivileges === 'all' || rawPrivileges === 'limited' ? rawPrivileges : 'all';
         } else {
           // Request full access (false = don't request write-only)
           const result = await MediaLibrary.requestPermissionsAsync(false);
           mediaGranted = result.granted;
-          const rawPrivileges = (result as any).accessPrivileges;
-          if (rawPrivileges === 'all' || rawPrivileges === 'limited' || rawPrivileges === 'none') {
+          const rawPrivileges = readAccessPrivilege(result);
+          if (rawPrivileges) {
             mediaAccessPrivileges = rawPrivileges;
           } else if (mediaGranted) {
             mediaAccessPrivileges = 'all';
           }
         }
-        console.warn('[TelegramMediaSheet][Assets] MediaLibrary permission after request:', {
+        devWarn('[TelegramMediaSheet][Assets] MediaLibrary permission after request:', {
           granted: mediaGranted,
           accessPrivileges: mediaAccessPrivileges,
         });
       } catch (err) {
-        console.warn('[TelegramMediaSheet][Assets] MediaLibrary permission request failed:', err);
+        devWarn('[TelegramMediaSheet][Assets] MediaLibrary permission request failed:', err);
       }
 
       if (!mountedRef.current) return;
@@ -745,7 +765,7 @@ export function TelegramMediaSheet({
         }
       }
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Assets] handleGrantPermissions error:', error);
+      devWarn('[TelegramMediaSheet][Assets] handleGrantPermissions error:', error);
       if (mountedRef.current) {
         setPermissionState('denied');
       }
@@ -767,7 +787,7 @@ export function TelegramMediaSheet({
     try {
       // First check current status without prompting (use Camera API for video recording)
       let micStatus = await Camera.getMicrophonePermissionsAsync();
-      console.log('[TelegramMediaSheet][Video] Mic permission status:', micStatus.status);
+      devLog('[TelegramMediaSheet][Video] Mic permission status:', micStatus.status);
 
       if (micStatus.granted) {
         micPermissionChecked.current = true;
@@ -777,21 +797,21 @@ export function TelegramMediaSheet({
 
       // Only request if can ask again (avoid re-prompting if denied)
       if (micStatus.canAskAgain) {
-        console.log('[TelegramMediaSheet][Video] Requesting mic permission...');
+        devLog('[TelegramMediaSheet][Video] Requesting mic permission...');
         micStatus = await Camera.requestMicrophonePermissionsAsync();
         micPermissionChecked.current = true;
         hasMicPermission.current = micStatus.granted;
-        console.log('[TelegramMediaSheet][Video] Mic permission result:', micStatus.granted);
+        devLog('[TelegramMediaSheet][Video] Mic permission result:', micStatus.granted);
         return hasMicPermission.current;
       }
 
       // Permission was denied previously and can't ask again
-      console.log('[TelegramMediaSheet][Video] Mic permission denied, cannot ask again');
+      devLog('[TelegramMediaSheet][Video] Mic permission denied, cannot ask again');
       micPermissionChecked.current = true;
       hasMicPermission.current = false;
       return false;
     } catch (error) {
-      console.warn('[TelegramMediaSheet][Video] Mic permission check failed:', error);
+      devWarn('[TelegramMediaSheet][Video] Mic permission check failed:', error);
       micPermissionChecked.current = true;
       hasMicPermission.current = false;
       return false;
@@ -817,7 +837,7 @@ export function TelegramMediaSheet({
         setPreviewType('photo');
       }
     } catch (error) {
-      console.warn('[TelegramMediaSheet] Photo capture failed:', error);
+      devWarn('[TelegramMediaSheet] Photo capture failed:', error);
       if (mountedRef.current) {
         Alert.alert('Error', 'Failed to capture photo. Please try again.');
       }
@@ -829,22 +849,22 @@ export function TelegramMediaSheet({
 
   // Start video recording (tap in Video mode)
   const handleStartRecording = async () => {
-    console.log('[TelegramMediaSheet][Video] Start pressed, current state:', recordingState);
+    devLog('[TelegramMediaSheet][Video] Start pressed, current state:', recordingState);
 
     // Guard: only start from idle state
     if (recordingState !== 'idle') {
-      console.log('[TelegramMediaSheet][Video] Not in idle state, ignoring start');
+      devLog('[TelegramMediaSheet][Video] Not in idle state, ignoring start');
       return;
     }
 
     // Guard: already recording (ref-based check for race conditions)
     if (recordingActiveRef.current) {
-      console.log('[TelegramMediaSheet][Video] Already recording (ref), ignoring');
+      devLog('[TelegramMediaSheet][Video] Already recording (ref), ignoring');
       return;
     }
 
     if (!cameraRef.current) {
-      console.log('[TelegramMediaSheet][Video] No camera ref');
+      devLog('[TelegramMediaSheet][Video] No camera ref');
       return;
     }
 
@@ -865,12 +885,12 @@ export function TelegramMediaSheet({
         return;
       }
 
-      console.log('[TelegramMediaSheet][Video] Mic permission:', hasMic ? 'granted' : 'denied');
+      devLog('[TelegramMediaSheet][Video] Mic permission:', hasMic ? 'granted' : 'denied');
 
       // Update UI state
       setRecordingDuration(0);
 
-      console.log('[TelegramMediaSheet][Video] Recording started at:', recordStartAtRef.current);
+      devLog('[TelegramMediaSheet][Video] Recording started at:', recordStartAtRef.current);
 
       // Transition to 'recording' state
       setRecordingState('recording');
@@ -906,7 +926,11 @@ export function TelegramMediaSheet({
       const duration = recordStartAtRef.current ? Date.now() - recordStartAtRef.current : 0;
       const wasStoppedByUser = recordStoppedRef.current;
 
-      console.log('[TelegramMediaSheet][Video] recordAsync resolved, uri:', video?.uri, 'duration:', duration, 'stoppedByUser:', wasStoppedByUser);
+      devLog('[TelegramMediaSheet][Video] recordAsync resolved', {
+        hasVideoUri: !!video?.uri,
+        duration,
+        stoppedByUser: wasStoppedByUser,
+      });
 
       // Clean up refs
       recordingActiveRef.current = false;
@@ -918,13 +942,13 @@ export function TelegramMediaSheet({
 
       // Show preview if we have a valid video URI
       if (video?.uri) {
-        console.log('[TelegramMediaSheet][Video] Preview opened, uri:', video.uri);
+        devLog('[TelegramMediaSheet][Video] Preview opened', { hasVideoUri: true });
         setPreviewUri(video.uri);
         setPreviewType('video');
       } else {
-        console.log('[TelegramMediaSheet][Video] No video URI returned');
+        devLog('[TelegramMediaSheet][Video] No video URI returned');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Clean up refs on error
       const duration = recordStartAtRef.current ? Date.now() - recordStartAtRef.current : 0;
       const wasStoppedByUser = recordStoppedRef.current;
@@ -935,16 +959,16 @@ export function TelegramMediaSheet({
       recordStartAtRef.current = null;
       recordPromiseRef.current = null;
 
-      const errorMsg = error?.message || String(error);
+      const errorMsg = getErrorMessage(error);
       const isStoppedBeforeData = errorMsg.includes('stopped before any data') || errorMsg.includes('Recording was stopped');
 
       // Determine cause and show appropriate message
       if (duration < MIN_RECORDING_DURATION_MS) {
         // Too short - treat as cancel (no error message)
-        console.log('[TelegramMediaSheet][Video] Recording too short, cancelled (duration:', duration, ')');
+        devLog('[TelegramMediaSheet][Video] Recording too short, cancelled (duration:', duration, ')');
       } else if (isStoppedBeforeData && !hadMicPermission) {
         // Likely mic permission issue - show helpful message
-        console.warn('[TelegramMediaSheet][Video] Failed likely due to mic permission, duration:', duration);
+        devWarn('[TelegramMediaSheet][Video] Failed likely due to mic permission, duration:', duration);
         if (mountedRef.current) {
           Alert.alert(
             'Microphone Required',
@@ -954,7 +978,7 @@ export function TelegramMediaSheet({
         }
       } else if (isStoppedBeforeData && duration >= MIN_RECORDING_DURATION_MS) {
         // Stopped before data but duration was valid - likely recorder didn't start properly
-        console.warn('[TelegramMediaSheet][Video] Failed - recorder may not have started, duration:', duration, 'hasMic:', hadMicPermission);
+        devWarn('[TelegramMediaSheet][Video] Failed - recorder may not have started, duration:', duration, 'hasMic:', hadMicPermission);
         if (mountedRef.current) {
           Alert.alert(
             'Recording Failed',
@@ -964,7 +988,7 @@ export function TelegramMediaSheet({
         }
       } else {
         // Other unexpected error
-        console.warn('[TelegramMediaSheet][Video] Recording error:', errorMsg, 'duration:', duration, 'stoppedByUser:', wasStoppedByUser);
+        devWarn('[TelegramMediaSheet][Video] Recording error:', errorMsg, 'duration:', duration, 'stoppedByUser:', wasStoppedByUser);
         if (mountedRef.current && !wasStoppedByUser) {
           Alert.alert('Recording Error', 'Failed to record video. Please try again.');
         }
@@ -982,22 +1006,22 @@ export function TelegramMediaSheet({
 
   // Stop video recording (tap in Video mode when recording)
   const handleStopRecording = useCallback(() => {
-    console.log('[TelegramMediaSheet][Video] Stop requested, current state:', recordingState);
+    devLog('[TelegramMediaSheet][Video] Stop requested, current state:', recordingState);
 
     // Only allow stop when in 'recording' state (not 'starting' or 'stopping')
     if (recordingState !== 'recording') {
-      console.log('[TelegramMediaSheet][Video] Not in recording state, ignoring stop');
+      devLog('[TelegramMediaSheet][Video] Not in recording state, ignoring stop');
       return;
     }
 
     // Double-check with ref (race condition guard)
     if (!recordingActiveRef.current) {
-      console.log('[TelegramMediaSheet][Video] Not recording (ref), ignoring stop');
+      devLog('[TelegramMediaSheet][Video] Not recording (ref), ignoring stop');
       return;
     }
 
     const duration = recordStartAtRef.current ? Date.now() - recordStartAtRef.current : 0;
-    console.log('[TelegramMediaSheet][Video] Stop confirmed, duration:', duration);
+    devLog('[TelegramMediaSheet][Video] Stop confirmed, duration:', duration);
 
     // Transition to 'stopping' state
     setRecordingState('stopping');
@@ -1007,7 +1031,7 @@ export function TelegramMediaSheet({
 
     // If too short, log it (but still stop - the error will be handled gracefully)
     if (duration < MIN_RECORDING_DURATION_MS) {
-      console.log('[TelegramMediaSheet][Video] Quick stop (<600ms), will cancel');
+      devLog('[TelegramMediaSheet][Video] Quick stop (<600ms), will cancel');
     }
 
     // Stop the camera recording - this will cause recordAsync to resolve
@@ -1015,7 +1039,7 @@ export function TelegramMediaSheet({
       try {
         cameraRef.current.stopRecording();
       } catch (e) {
-        console.log('[TelegramMediaSheet][Video] stopRecording error (ignored):', e);
+        devLog('[TelegramMediaSheet][Video] stopRecording error (ignored):', e);
       }
     }
 

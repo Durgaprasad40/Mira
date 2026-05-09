@@ -27,9 +27,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
-import { deriveMyRole, normalizeId } from '@/lib/bottleSpin';
+import { deriveMyRole } from '@/lib/bottleSpin';
 
 const MAX_SKIPS = 3;
+
+const getSafeIdTail = (value?: string | null): string | undefined =>
+  typeof value === 'string' && value.length > 0 ? value.slice(-6) : undefined;
 
 // PHASE-2 PREMIUM (T/D): dark-glass / midnight-plum palette consumed only when
 // the parent passes theme="phase2". Phase-1 callers (ChatScreenInner.tsx) leave
@@ -274,14 +277,9 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   const gameSession = useQuery(
     api.games.getBottleSpinSession,
-    visible && conversationId ? { conversationId } : 'skip'
+    visible && conversationId && userId ? { conversationId, authUserId: userId } : 'skip'
   );
   const setTurnMutation = useMutation(api.games.setBottleSpinTurn);
-
-  // ROLE-FIX: Log raw gameSession for debugging
-  if (__DEV__ && visible && gameSession) {
-    console.log('[BOTTLE_SPIN_SESSION_DEBUG] Raw gameSession:', JSON.stringify(gameSession, null, 2));
-  }
 
   // Extract backend values (only when session is active)
   const isSessionActive = gameSession?.state === 'active';
@@ -308,25 +306,6 @@ export function BottleSpinGame({
   // inviterId is the auth ID stored when invite was sent
   // userId is my auth ID passed from parent
   const myRole = deriveMyRole(gameSession, userId);
-  const normalizedUserId = normalizeId(userId);
-  const normalizedInviterId = normalizeId(inviterId);
-  const normalizedInviteeId = normalizeId(inviteeId);
-
-  // ROLE-FIX: Log exact comparison values to debug ID mismatch
-  if (__DEV__ && visible && isSessionActive) {
-    console.log('[BOTTLE_SPIN_ROLE_DEBUG] ID comparison:', {
-      userId_raw: userId,
-      userId_normalized: normalizedUserId,
-      inviterId_raw: inviterId,
-      inviterId_normalized: normalizedInviterId,
-      inviteeId_raw: inviteeId,
-      inviteeId_normalized: normalizedInviteeId,
-      inviterMatch_raw: userId === inviterId,
-      inviterMatch_normalized: normalizedUserId === normalizedInviterId,
-      inviteeMatch_raw: userId === inviteeId,
-      inviteeMatch_normalized: normalizedUserId === normalizedInviteeId,
-    });
-  }
   const amIInviter = myRole === 'inviter';
   const amIInvitee = myRole === 'invitee';
 
@@ -456,10 +435,10 @@ export function BottleSpinGame({
         // Session info (primitives only)
         gameSessionState,
         isSessionActive,
-        // IDs
-        myUserId: userId,
-        inviterId: inviterId ?? 'none',
-        inviteeId: inviteeId ?? 'none',
+        // Sanitized IDs
+        userRef: getSafeIdTail(userId),
+        inviterRef: getSafeIdTail(inviterId),
+        inviteeRef: getSafeIdTail(inviteeId),
         // Role determination
         myRole: myRole ?? 'none',
         // Backend turn state
@@ -505,7 +484,7 @@ export function BottleSpinGame({
         console.log('[TD_LIVE] show_spinning', { asSpinner: isSpinningLocally });
       } else if (uiMode === 'observer_spinning_text') {
         console.log('[TD_LIVE] show_observer_spinning_text', {
-          other: otherUserName,
+          hasOtherName: otherUserName.length > 0,
         });
       } else if (uiMode === 'choosing_for_me') {
         console.log('[TD_LIVE] show_choose_buttons', {
@@ -514,7 +493,7 @@ export function BottleSpinGame({
         });
       } else if (uiMode === 'choosing_for_other') {
         console.log('[TD_LIVE] show_waiting_for_choice', {
-          other: otherUserName,
+          hasOtherName: otherUserName.length > 0,
           backendTurnRole,
           myRole,
         });
@@ -605,10 +584,12 @@ export function BottleSpinGame({
     if (spinCompleteCloseFiredForActionRef.current === backendLastActionAt) return;
 
     spinCompleteCloseFiredForActionRef.current = backendLastActionAt;
-    console.log('[TD_LIVE] auto_close_after_spin_complete', {
-      lastActionAt: backendLastActionAt,
-      turnRole: backendTurnRole,
-    });
+    if (__DEV__) {
+      console.log('[TD_LIVE] auto_close_after_spin_complete', {
+        lastActionAt: backendLastActionAt,
+        turnRole: backendTurnRole,
+      });
+    }
 
     const timeout = setTimeout(() => {
       onCloseRef.current();
@@ -648,9 +629,9 @@ export function BottleSpinGame({
           ? `${otherUserName} chose TRUTH 🔥`
           : `${otherUserName} chose DARE 😈`;
     if (__DEV__) {
-      console.log('[TD_FLOW] result_toast_show', { text, byChooser: false });
+      console.log('[TD_FLOW] result_toast_show', { result, byChooser: false });
       console.log('[TD_LIVE] complete_toast', {
-        text,
+        result,
         byChooser: false,
         lastActionAt: backendLastActionAt,
       });
@@ -688,7 +669,7 @@ export function BottleSpinGame({
   useEffect(() => {
     return () => {
       if (autoAdvanceTimerRef.current) {
-        console.log('[TD_LIVE] auto_advance_cleanup_on_unmount');
+        if (__DEV__) console.log('[TD_LIVE] auto_advance_cleanup_on_unmount');
         clearTimeout(autoAdvanceTimerRef.current);
         autoAdvanceTimerRef.current = null;
       }
@@ -714,7 +695,7 @@ export function BottleSpinGame({
     try {
       await incrementSkipMutation({ authUserId: userId, windowKey, delta: 1 });
     } catch (error) {
-      console.error('[BOTTLE_SPIN] Failed to increment skip count:', error);
+      if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to increment skip count:', error);
     }
   }, [userId, windowKey, incrementSkipMutation]);
 
@@ -839,18 +820,22 @@ export function BottleSpinGame({
 
     // Guard: Only spin if session is active
     if (!isSessionActive) {
-      console.warn('[BOTTLE_SPIN] Cannot spin - no active session');
+      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - no active session');
       return;
     }
 
     // Guard: Must have a role
     if (!myRole) {
-      console.warn('[BOTTLE_SPIN] Cannot spin - role not determined', { userId, inviterId, inviteeId });
+      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - role not determined', {
+        userRef: getSafeIdTail(userId),
+        inviterRef: getSafeIdTail(inviterId),
+        inviteeRef: getSafeIdTail(inviteeId),
+      });
       return;
     }
 
     if (!userId || !conversationId) {
-      console.warn('[BOTTLE_SPIN] Cannot spin - missing userId or conversationId');
+      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - missing userId or conversationId');
       return;
     }
 
@@ -876,9 +861,8 @@ export function BottleSpinGame({
         throw new Error('Backend did not return a selected target');
       }
       selectedRole = result.selectedTargetRole;
-      console.log('[BOTTLE_SPIN] Backend selected target:', { selectedRole });
     } catch (error) {
-      console.error('[BOTTLE_SPIN] Failed to get spin result from backend:', error);
+      if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to get spin result from backend:', error);
       setIsSpinningLocally(false);
       return;
     }
@@ -894,7 +878,6 @@ export function BottleSpinGame({
     const totalRotation = fullRotations * 360 + finalAngle;
     const animDuration = 3000 + Math.random() * 1000;
 
-    console.log('[BOTTLE_SPIN] Animation direction:', { landsOnMe, myRole, selectedRole });
     if (__DEV__) {
       console.log('[TD_SPIN] start_spin', {
         side: 'chooser',
@@ -940,9 +923,8 @@ export function BottleSpinGame({
           currentTurnRole: selectedRole, // Use the backend-selected role
           turnPhase: 'choosing',
         });
-        console.log('[BOTTLE_SPIN] Set choosing phase:', { selectedRole });
       } catch (error) {
-        console.error('[BOTTLE_SPIN] Failed to set choosing state:', error);
+        if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to set choosing state:', error);
       }
 
       // Haptic feedback
@@ -964,7 +946,7 @@ export function BottleSpinGame({
   const handleChoice = useCallback(async (choice: 'truth' | 'dare' | 'skip') => {
     // Guard: Only allow choice if it's my turn
     if (uiMode !== 'choosing_for_me') {
-      console.warn('[BOTTLE_SPIN] Cannot choose - not my turn', { uiMode });
+      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot choose - not my turn', { uiMode });
       return;
     }
 
@@ -985,7 +967,7 @@ export function BottleSpinGame({
           lastSpinResult: choice,
         });
       } catch (error) {
-        console.error('[BOTTLE_SPIN] Failed to set complete state:', error);
+        if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to set complete state:', error);
       }
     }
 
@@ -1030,8 +1012,8 @@ export function BottleSpinGame({
             ? 'You chose TRUTH 🔥'
             : 'You chose DARE 😈';
       if (__DEV__) {
-        console.log('[TD_FLOW] result_toast_show', { text, byChooser: true });
-        console.log('[TD_LIVE] complete_toast', { text, byChooser: true });
+        console.log('[TD_FLOW] result_toast_show', { choice, byChooser: true });
+        console.log('[TD_LIVE] complete_toast', { choice, byChooser: true });
       }
       setToastInfo({ text, key: Date.now() });
 
@@ -1063,7 +1045,11 @@ export function BottleSpinGame({
           if (__DEV__) {
             console.log('[TD_FLOW] auto_advance_payload', {
               mutation: 'setBottleSpinTurn',
-              payload,
+              payload: {
+                hasAuthUser: !!payload.authUserId,
+                conversationRef: getSafeIdTail(payload.conversationId),
+                turnPhase: payload.turnPhase,
+              },
             });
             console.log('[TD_FLOW] auto_advance_to_idle');
             console.log('[TD_LIVE] auto_advance_once', {
@@ -1074,7 +1060,7 @@ export function BottleSpinGame({
           try {
             await setTurnMutation(payload);
           } catch (err) {
-            console.warn('[TD_FLOW] auto_advance_to_idle failed', err);
+            if (__DEV__) console.warn('[TD_FLOW] auto_advance_to_idle failed', err);
           }
         }
       }, 2000);

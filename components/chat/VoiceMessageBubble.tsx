@@ -39,6 +39,7 @@ import { COLORS } from '@/lib/constants';
 // Global reference to currently playing sound (ensures only one plays at a time)
 let currentPlayingSound: Audio.Sound | null = null;
 let currentPlayingId: string | null = null;
+let playbackTransitionInFlight = false;
 
 // VOICE-PRELOAD-DEDUPE: Module-level set of audio URIs currently being preloaded.
 // Prevents duplicate Audio.Sound.createAsync() calls when a VoiceMessageBubble briefly
@@ -47,6 +48,29 @@ let currentPlayingId: string | null = null;
 // row is destroyed and recreated). The "second" instance simply skips its preload and
 // will load on first user tap via the existing handlePlayPause fallback.
 const inFlightPreloads = new Set<string>();
+const AUDIO_CREATE_TIMEOUT_MS = 8000;
+
+async function createAudioSoundWithTimeout(
+  source: Parameters<typeof Audio.Sound.createAsync>[0],
+  initialStatus?: Parameters<typeof Audio.Sound.createAsync>[1],
+  onPlaybackStatusUpdate?: Parameters<typeof Audio.Sound.createAsync>[2]
+) {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error('Audio load timed out'));
+    }, AUDIO_CREATE_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([
+      Audio.Sound.createAsync(source, initialStatus, onPlaybackStatusUpdate),
+      timeoutPromise,
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 // VOICE-TICKS: Tick status helper types (same as MessageBubble)
 type TickStatus = 'sent' | 'delivered' | 'read';
@@ -100,8 +124,6 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
   const [playbackPosition, setPlaybackPosition] = useState(0);
   // VOICE-FIX: Check for missing/empty URI upfront
   const [isUnavailable, setIsUnavailable] = useState(!audioUri || audioUri.trim() === '');
-  // VOICE-PRELOAD: Track preload state for subtle UX indicator
-  const [isPreloaded, setIsPreloaded] = useState(false);
   const soundRef = useRef<Audio.Sound | null>(null);
   const isMountedRef = useRef(true);
   // VOICE-PLAYBACK-FIX: Guard against concurrent play/load operations
@@ -163,32 +185,25 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
     const preloadAudio = async () => {
       preloadStarted = true;
       try {
-        if (__DEV__) console.log('[VOICE-PRELOAD] Preloading:', messageId.slice(-6));
-
         // Configure audio mode
         await Audio.setAudioModeAsync({
           allowsRecordingIOS: false,
           playsInSilentModeIOS: true,
         });
 
-        const { sound } = await Audio.Sound.createAsync(
+        const { sound } = await createAudioSoundWithTimeout(
           { uri: audioUri },
           { shouldPlay: false } // DO NOT auto-play on preload
         );
 
         // Check if still mounted before storing
         if (!isMounted || !isMountedRef.current) {
-          if (__DEV__) console.log('[VOICE-PRELOAD] Unmounted during preload, cleaning up:', messageId.slice(-6));
           await sound.unloadAsync();
           return;
         }
 
         soundRef.current = sound;
-        setIsPreloaded(true);
-
-        if (__DEV__) console.log('[VOICE-PRELOAD] Ready:', messageId.slice(-6));
-      } catch (e) {
-        if (__DEV__) console.log('[VOICE-PRELOAD] Error:', messageId.slice(-6), e);
+      } catch {
         // Don't mark as unavailable - will fallback to load on play
       } finally {
         isPreloadingRef.current = false;
@@ -257,8 +272,6 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
 
         // VOICE-LOOP-FIX: Handle playback completion
         if (status.didJustFinish) {
-          if (__DEV__) console.log('[VOICE-LOOP-FIX] Playback finished - stopping cleanly:', messageId.slice(-6));
-
           // Mark as finished FIRST to prevent any auto-resume
           hasFinishedRef.current = true;
           isPlayingRef.current = false;
@@ -287,28 +300,17 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
 
     // VOICE-PLAYBACK-FIX: Prevent concurrent play attempts (race condition guard)
     if (isLoadingRef.current) {
-      if (__DEV__) console.log('[VOICE-LOOP-FIX] Blocked: isLoading=true', messageId.slice(-6));
+      return;
+    }
+    if (playbackTransitionInFlight) {
       return;
     }
 
-    // VOICE-LOOP-FIX: Use ref for accurate playing state check
-    if (__DEV__) {
-      console.log('[VOICE-FIX-STATE]', {
-        messageId: messageId.slice(-6),
-        isPlaying,
-        isPlayingRef: isPlayingRef.current,
-        isLoading: isLoadingRef.current,
-        hasFinished: hasFinishedRef.current,
-        hasSoundRef: !!soundRef.current,
-        isPreloaded, // VOICE-PRELOAD: Include preload state
-      });
-    }
-
     try {
+      playbackTransitionInFlight = true;
       // VOICE-LOOP-FIX: Check ref state, not React state (can be stale)
       if (isPlayingRef.current && soundRef.current) {
         // Pause - user explicitly requested pause
-        if (__DEV__) console.log('[VOICE-LOOP-FIX] User pause:', messageId.slice(-6));
         await soundRef.current.pauseAsync();
         isPlayingRef.current = false;
         setIsPlaying(false);
@@ -329,15 +331,12 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
 
       // VOICE-LOOP-FIX: If sound exists but playback finished, reset position first
       if (soundRef.current && hasFinishedRef.current) {
-        if (__DEV__) console.log('[VOICE-LOOP-FIX] Resetting finished sound to start:', messageId.slice(-6));
         await soundRef.current.setPositionAsync(0);
         hasFinishedRef.current = false;
       }
 
       if (soundRef.current) {
         // VOICE-PRELOAD: Use preloaded sound - instant play!
-        if (__DEV__) console.log('[VOICE-PRELOAD] Instant play (preloaded):', messageId.slice(-6));
-
         // Attach status callback for progress and finish handling
         soundRef.current.setOnPlaybackStatusUpdate(createStatusCallback());
 
@@ -348,10 +347,9 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
         currentPlayingId = messageId;
       } else {
         // VOICE-PRELOAD: Fallback - load and play if not preloaded
-        if (__DEV__) console.log('[VOICE-PRELOAD] Fallback load (not preloaded):', messageId.slice(-6));
         hasFinishedRef.current = false;
 
-        const { sound } = await Audio.Sound.createAsync(
+        const { sound } = await createAudioSoundWithTimeout(
           { uri: audioUri },
           { shouldPlay: true },
           createStatusCallback()
@@ -362,8 +360,6 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
         currentPlayingId = messageId;
         isPlayingRef.current = true;
         setIsPlaying(true);
-        setIsPreloaded(true); // Now loaded
-        if (__DEV__) console.log('[VOICE-LOOP-FIX] Now playing:', messageId.slice(-6));
       }
     } catch (error) {
       if (__DEV__) console.error('[VOICE-LOOP-FIX] Play error:', messageId.slice(-6), error);
@@ -384,6 +380,7 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
     } finally {
       // VOICE-PLAYBACK-FIX: Always reset loading guard
       isLoadingRef.current = false;
+      playbackTransitionInFlight = false;
     }
   }, [audioUri, messageId, createStatusCallback]); // VOICE-PRELOAD: Added createStatusCallback
 

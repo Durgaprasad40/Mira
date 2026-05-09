@@ -1,4 +1,4 @@
-import { mutation, query, type MutationCtx } from './_generated/server';
+import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { type Doc, Id } from './_generated/dataModel';
 import { asUserId } from './id';
@@ -47,19 +47,11 @@ async function insertTodSystemMessage(
     // Bottle-spin sessions can technically reference a non-Phase-2 chat (legacy
     // demo path). Skip silently — never throw, since this is a side-effect of
     // a game mutation that has already succeeded.
-    console.log(
-      '[P2_TOD_CHAT_EVENT_SKIP] non-Phase-2 conversationId:',
-      args.conversationId.slice(-8)
-    );
     return;
   }
 
   const senderId = await resolveUserIdByAuthId(ctx, args.authUserId);
   if (!senderId) {
-    console.log(
-      '[P2_TOD_CHAT_EVENT_SKIP] could not resolve senderId for authUserId:',
-      args.authUserId.slice(-8)
-    );
     return;
   }
 
@@ -103,6 +95,78 @@ async function todDisplayName(
   return (await getPhase2DisplayName(ctx, userId)) ?? 'Someone';
 }
 
+async function hasBlockBetween(
+  ctx: MutationCtx,
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): Promise<boolean> {
+  const direct = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userA).eq('blockedUserId', userB)
+    )
+    .first();
+  if (direct) return true;
+
+  const reverse = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userB).eq('blockedUserId', userA)
+    )
+    .first();
+  return !!reverse;
+}
+
+async function getBottleSpinConversationAccess(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: string,
+  viewerUserId: Id<'users'>
+): Promise<{ ok: true; participants: Id<'users'>[] } | { ok: false; reason: 'missing' | 'expired' | 'not_participant' }> {
+  const now = Date.now();
+
+  const phase1ConversationId = ctx.db.normalizeId('conversations', conversationId);
+  if (phase1ConversationId) {
+    const conversation = await ctx.db.get(phase1ConversationId);
+    if (conversation) {
+      if (conversation.expiresAt !== undefined && conversation.expiresAt <= now) {
+        return { ok: false, reason: 'expired' };
+      }
+      if (!conversation.participants.includes(viewerUserId)) {
+        return { ok: false, reason: 'not_participant' };
+      }
+      return { ok: true, participants: conversation.participants };
+    }
+  }
+
+  const privateConversationId = ctx.db.normalizeId('privateConversations', conversationId);
+  if (privateConversationId) {
+    const conversation = await ctx.db.get(privateConversationId);
+    if (conversation) {
+      if (!conversation.participants.includes(viewerUserId)) {
+        return { ok: false, reason: 'not_participant' };
+      }
+      return { ok: true, participants: conversation.participants };
+    }
+  }
+
+  return { ok: false, reason: 'missing' };
+}
+
+async function assertBottleSpinConversationUsable(
+  ctx: MutationCtx,
+  conversationId: string,
+  actorUserId: Id<'users'>,
+  otherUserId?: Id<'users'>
+): Promise<void> {
+  const access = await getBottleSpinConversationAccess(ctx, conversationId, actorUserId);
+  if (!access.ok) {
+    throw new Error(access.reason === 'expired' ? 'Conversation expired' : 'Conversation unavailable');
+  }
+  if (otherUserId && !access.participants.includes(otherUserId)) {
+    throw new Error('Conversation unavailable');
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // GAME LIMITS: Bottle Spin Skip Tracking (Convex-backed persistence)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -141,18 +205,15 @@ export const incrementBottleSpinSkip = mutation({
   args: {
     convoId: v.string(),
     windowKey: v.string(),
+    authUserId: v.string(),
     delta: v.optional(v.number()),
   },
-  handler: async (ctx, { convoId, windowKey, delta = 1 }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
-    }
-    const userId = asUserId(identity.subject);
+  handler: async (ctx, { convoId, windowKey, authUserId, delta = 1 }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
+    await assertBottleSpinConversationUsable(ctx, convoId, userId);
 
     const now = Date.now();
 
@@ -309,9 +370,21 @@ export const incrementGlobalBottleSpinSkip = mutation({
 // ═══════════════════════════════════════════════════════════════════════════
 
 type BottleSpinSessionDoc = Doc<'bottleSpinSessions'>;
+const BOTTLE_SPIN_SESSION_SCAN_LIMIT = 50;
 
 const isPendingInviteExpired = (session: BottleSpinSessionDoc, now: number) =>
   session.status === 'pending' && now - session.createdAt >= BOTTLE_SPIN_PENDING_INVITE_TIMEOUT_MS;
+
+async function listRecentBottleSpinSessions(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: string
+): Promise<BottleSpinSessionDoc[]> {
+  return await ctx.db
+    .query('bottleSpinSessions')
+    .withIndex('by_conversation_createdAt', (q) => q.eq('conversationId', conversationId))
+    .order('desc')
+    .take(BOTTLE_SPIN_SESSION_SCAN_LIMIT);
+}
 
 async function expireStalePendingSessions(
   ctx: MutationCtx,
@@ -335,13 +408,20 @@ async function expireStalePendingSessions(
 export const getBottleSpinSession = query({
   args: {
     conversationId: v.string(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { conversationId }) => {
+  handler: async (ctx, { conversationId, authUserId }) => {
+    const viewerUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!viewerUserId) {
+      return { state: 'none' as const };
+    }
+    const conversationAccess = await getBottleSpinConversationAccess(ctx, conversationId, viewerUserId);
+    if (!conversationAccess.ok) {
+      return { state: 'none' as const };
+    }
+
     // FIX: Collect ALL sessions for this conversation to find the right one
-    const allSessions = await ctx.db
-      .query('bottleSpinSessions')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .collect();
+    const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     if (allSessions.length === 0) {
       return { state: 'none' as const };
@@ -469,21 +549,25 @@ export const sendBottleSpinInvite = mutation({
       throw new Error('You cannot invite yourself');
     }
 
-    if (!await resolveUserIdByAuthId(ctx, authUserId)) {
+    const inviterUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!inviterUserId) {
       throw new Error('Unauthorized: user not found');
     }
 
-    if (!await resolveUserIdByAuthId(ctx, otherUserId)) {
+    const inviteeUserId = await resolveUserIdByAuthId(ctx, otherUserId);
+    if (!inviteeUserId) {
       throw new Error('Invited user not found');
+    }
+    await assertBottleSpinConversationUsable(ctx, conversationId, inviterUserId, inviteeUserId);
+
+    if (await hasBlockBetween(ctx, inviterUserId, inviteeUserId)) {
+      throw new Error('You can’t invite this user');
     }
 
     const now = Date.now();
 
     // FIX: Check ALL sessions for this conversation
-    const allSessions = await ctx.db
-      .query('bottleSpinSessions')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .collect();
+    const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     await expireStalePendingSessions(ctx, allSessions, now);
 
@@ -540,17 +624,15 @@ export const respondToBottleSpinInvite = mutation({
     accept: v.boolean(),
   },
   handler: async (ctx, { authUserId, conversationId, accept }) => {
-    if (!await resolveUserIdByAuthId(ctx, authUserId)) {
+    const responderUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!responderUserId) {
       throw new Error('Unauthorized: user not found');
     }
 
     const now = Date.now();
 
     // FIX: Find the PENDING session specifically
-    const allSessions = await ctx.db
-      .query('bottleSpinSessions')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .collect();
+    const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     const hadAnyPendingSession = allSessions.some((session) => session.status === 'pending');
     await expireStalePendingSessions(ctx, allSessions, now);
@@ -569,6 +651,14 @@ export const respondToBottleSpinInvite = mutation({
     // Only the invitee can respond
     if (session.inviteeId !== authUserId) {
       throw new Error('Only the invited user can respond');
+    }
+
+    const inviterUserId = await resolveUserIdByAuthId(ctx, session.inviterId);
+    if (inviterUserId) {
+      await assertBottleSpinConversationUsable(ctx, conversationId, responderUserId, inviterUserId);
+    }
+    if (!inviterUserId || (await hasBlockBetween(ctx, inviterUserId, responderUserId))) {
+      throw new Error('This invite is no longer available');
     }
 
     if (accept) {
@@ -636,10 +726,7 @@ export const endBottleSpinGame = mutation({
     const now = Date.now();
 
     // FIX: Find the ACTIVE session specifically
-    const allSessions = await ctx.db
-      .query('bottleSpinSessions')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .collect();
+    const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     const activeSessions = allSessions.filter((s) => s.status === 'active');
     if (activeSessions.length === 0) {
@@ -693,10 +780,7 @@ export const startBottleSpinGame = mutation({
     const now = Date.now();
 
     // Find the ACTIVE session
-    const allSessions = await ctx.db
-      .query('bottleSpinSessions')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .collect();
+    const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     const activeSessions = allSessions.filter((s) => s.status === 'active');
     if (activeSessions.length === 0) {
@@ -756,10 +840,7 @@ export const cleanupExpiredSession = mutation({
     const now = Date.now();
 
     // Find sessions that need cleanup
-    const allSessions = await ctx.db
-      .query('bottleSpinSessions')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .collect();
+    const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     let cleanedCount = 0;
     const cleanedSessionIds: string[] = [];
@@ -857,10 +938,7 @@ export const setBottleSpinTurn = mutation({
     }
 
     // FIX: Find the ACTIVE session specifically, not just the latest one
-    const allSessions = await ctx.db
-      .query('bottleSpinSessions')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .collect();
+    const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     // Filter for active sessions only
     const activeSessions = allSessions.filter((s) => s.status === 'active');
@@ -880,6 +958,16 @@ export const setBottleSpinTurn = mutation({
 
     // SPIN-TURN-FIX: Determine caller's role for ownership enforcement.
     const callerRole: 'inviter' | 'invitee' = session.inviterId === authUserId ? 'inviter' : 'invitee';
+    const otherParticipantUserId = await resolveUserIdByAuthId(
+      ctx,
+      callerRole === 'inviter' ? session.inviteeId : session.inviterId
+    );
+    await assertBottleSpinConversationUsable(
+      ctx,
+      conversationId,
+      userId,
+      otherParticipantUserId ?? undefined
+    );
 
     const turnPhaseOrder = {
       idle: 0,
@@ -908,6 +996,9 @@ export const setBottleSpinTurn = mutation({
 
     // SPIN-TURN-FIX: Only the current spin-turn owner can initiate a spin.
     if (turnPhase === 'spinning') {
+      if (!session.gameStartedAt && sessionTurnPhase === 'idle' && callerRole !== 'inviter') {
+        throw new Error('Only the inviter can start the first spin');
+      }
       const currentSpinTurnRole = session.spinTurnRole || 'inviter';
       if (callerRole !== currentSpinTurnRole) {
         throw new Error('Not your turn to spin');

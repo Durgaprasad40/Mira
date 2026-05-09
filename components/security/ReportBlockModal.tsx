@@ -16,6 +16,7 @@ import { useDemoStore } from "@/stores/demoStore";
 import { Toast } from "@/components/ui/Toast";
 import { trackEvent } from "@/lib/analytics";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import type { Id } from "@/convex/_generated/dataModel";
 
 interface Props {
   visible: boolean;
@@ -53,6 +54,13 @@ const REPORT_REASONS: ReadonlyArray<{
 
 type ViewState = 'main' | 'report';
 
+const asUserId = (value: string): Id<'users'> => value as Id<'users'>;
+const asMatchId = (value: string): Id<'matches'> => value as Id<'matches'>;
+const getSafeIdTail = (value?: string | null): string | undefined =>
+  typeof value === 'string' && value.length > 0 ? value.slice(-6) : undefined;
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error && error.message ? error.message : fallback;
+
 export function ReportBlockModal({
   visible,
   onClose,
@@ -84,8 +92,8 @@ export function ReportBlockModal({
     });
     if (__DEV__) {
       console.log(`[ChatAction] ${action}`, {
-        userId: reportedUserId,
-        conversationId,
+        userRef: getSafeIdTail(reportedUserId),
+        conversationRef: getSafeIdTail(conversationId),
         timestamp: new Date().toISOString(),
         ...(reason ? { reason } : {}),
       });
@@ -127,14 +135,14 @@ export function ReportBlockModal({
             try {
               // AUTH FIX: Pass authUserId for server-side resolution
               await unmatchMutation({
-                matchId: matchId as any,
+                matchId: asMatchId(matchId),
                 authUserId: currentUserId,
               });
               Toast.show(`Unmatched with ${reportedUserName}`);
               resetAndClose();
               onUnmatchSuccess?.();
-            } catch (error: any) {
-              Alert.alert("Error", error.message || "Failed to unmatch.");
+            } catch (error: unknown) {
+              Alert.alert("Error", getErrorMessage(error, "Failed to unmatch."));
             }
           },
         },
@@ -156,13 +164,13 @@ export function ReportBlockModal({
     try {
       await blockMutation({
         authUserId: currentUserId,
-        blockedUserId: reportedUserId as any,
+        blockedUserId: asUserId(reportedUserId),
       });
       resetAndClose();
       Toast.show(`${reportedUserName} blocked`);
       onBlockSuccess?.();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to block user.");
+    } catch (error: unknown) {
+      Alert.alert("Error", getErrorMessage(error, "Failed to block user."));
     }
   };
 
@@ -178,13 +186,13 @@ export function ReportBlockModal({
     try {
       await reportMutation({
         authUserId: currentUserId,
-        reportedUserId: reportedUserId as any,
+        reportedUserId: asUserId(reportedUserId),
         reason,
       });
       Toast.show("Report submitted");
       resetAndClose();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to submit report.");
+    } catch (error: unknown) {
+      Alert.alert("Error", getErrorMessage(error, "Failed to submit report."));
     }
   };
 
@@ -202,14 +210,14 @@ export function ReportBlockModal({
     try {
       await reportMutation({
         authUserId: currentUserId,
-        reportedUserId: reportedUserId as any,
+        reportedUserId: asUserId(reportedUserId),
         reason: 'other',
         description: 'Scam/fraudulent behavior',
       });
       Toast.show("Reported as scam");
       resetAndClose();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to submit report.");
+    } catch (error: unknown) {
+      Alert.alert("Error", getErrorMessage(error, "Failed to submit report."));
     }
   };
 

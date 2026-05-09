@@ -12,6 +12,7 @@ import {
   NativeScrollEvent,
   Keyboard,
   LayoutChangeEvent,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -24,6 +25,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { MutualRevealStatus } from '@/types';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
+import { Toast } from '@/components/ui/Toast';
 
 function formatTimeLeft(expiresAt: number): string {
   const diff = expiresAt - Date.now();
@@ -68,8 +70,11 @@ export default function ConfessionChatScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
+  const authReady = useAuthStore((s) => s.authReady);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId ?? null);
+  const liveUserLoading = !isDemoMode && !authReady;
+  const liveUserUnavailable = !isDemoMode && authReady && !currentUserId;
 
   const chats = useConfessionStore((s) => s.chats);
   const confessions = useConfessionStore((s) => s.confessions);
@@ -152,6 +157,10 @@ export default function ConfessionChatScreen() {
     });
   }, []);
 
+  const showUnavailableToast = useCallback(() => {
+    Toast.show(liveUserLoading ? 'Chat is still loading. Please try again.' : 'Chat unavailable. Please try again.');
+  }, [liveUserLoading]);
+
   // Track scroll position to determine if user is near bottom
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -187,7 +196,11 @@ export default function ConfessionChatScreen() {
   }, [keyboardVisible, chat?.messages.length, scrollToBottom]);
 
   const handleSend = useCallback(() => {
-    if (!text.trim() || !chat || !currentUserId) return;
+    if (!currentUserId) {
+      showUnavailableToast();
+      return;
+    }
+    if (!text.trim() || !chat) return;
     const message = {
       id: `ccm_new_${Date.now()}`,
       chatId: chat.id,
@@ -200,20 +213,32 @@ export default function ConfessionChatScreen() {
     // Always scroll to bottom on send (user's own message)
     isNearBottomRef.current = true;
     scrollToBottom(true);
-  }, [text, chat, currentUserId, addChatMessage, scrollToBottom]);
+  }, [text, chat, currentUserId, addChatMessage, scrollToBottom, showUnavailableToast]);
 
   const handleAgreeReveal = useCallback(() => {
-    if (!chat || !currentUserId) return;
+    if (!currentUserId) {
+      showUnavailableToast();
+      return;
+    }
+    if (!chat) return;
     agreeMutualReveal(chat.id, currentUserId);
-  }, [chat, currentUserId, agreeMutualReveal]);
+  }, [chat, currentUserId, agreeMutualReveal, showUnavailableToast]);
 
   const handleDeclineReveal = useCallback(() => {
-    if (!chat || !currentUserId) return;
+    if (!currentUserId) {
+      showUnavailableToast();
+      return;
+    }
+    if (!chat) return;
     declineMutualReveal(chat.id, currentUserId);
-  }, [chat, currentUserId, declineMutualReveal]);
+  }, [chat, currentUserId, declineMutualReveal, showUnavailableToast]);
 
   // Navigate to other person's profile during active reveal
   const handleViewRevealProfile = useCallback(() => {
+    if (!currentUserId) {
+      showUnavailableToast();
+      return;
+    }
     if (!chat || !confession) return;
     // Determine who the other person is
     const taggedUserId = getTaggedUserId(confession);
@@ -222,7 +247,7 @@ export default function ConfessionChatScreen() {
     if (!otherUserId) return;
 
     // Navigate to profile with confess_reveal mode
-    safePush(router, {
+    const revealProfileHref = {
       pathname: '/(main)/profile/[id]',
       params: {
         id: otherUserId,
@@ -230,8 +255,25 @@ export default function ConfessionChatScreen() {
         chatId: chat.id,
         confessionId: confession.id,
       },
-    } as any, 'confessionChat->revealProfile');
-  }, [chat, confession, currentUserId, router]);
+    } as Parameters<typeof router.push>[0];
+    safePush(router, revealProfileHref, 'confessionChat->revealProfile');
+  }, [chat, confession, currentUserId, router, showUnavailableToast]);
+
+  if (liveUserLoading || liveUserUnavailable) {
+    return (
+      <View style={styles.center}>
+        {liveUserLoading ? <ActivityIndicator size="small" color={COLORS.primary} /> : null}
+        <Text style={styles.errorText}>
+          {liveUserLoading ? 'Loading chat...' : 'Chat unavailable'}
+        </Text>
+        {liveUserUnavailable ? (
+          <TouchableOpacity onPress={() => router.back()}>
+            <Text style={styles.backLink}>Go back</Text>
+          </TouchableOpacity>
+        ) : null}
+      </View>
+    );
+  }
 
   if (!chat) {
     return (
@@ -424,16 +466,17 @@ export default function ConfessionChatScreen() {
             onChangeText={setText}
             maxLength={500}
             multiline
+            editable={!!currentUserId}
           />
           <TouchableOpacity
-            style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
+            style={[styles.sendButton, (!text.trim() || !currentUserId) && styles.sendButtonDisabled]}
             onPress={handleSend}
-            disabled={!text.trim()}
+            disabled={!text.trim() || !currentUserId}
           >
             <Ionicons
               name="send"
               size={18}
-              color={text.trim() ? COLORS.white : COLORS.textMuted}
+              color={text.trim() && currentUserId ? COLORS.white : COLORS.textMuted}
             />
           </TouchableOpacity>
         </View>

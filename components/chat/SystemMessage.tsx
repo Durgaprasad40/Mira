@@ -3,7 +3,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 
-type SystemSubtype =
+export type SystemSubtype =
   | 'screenshot_taken'
   | 'screenshot_attempted'
   | 'access_requested'
@@ -23,7 +23,9 @@ interface SystemMessageProps {
   subtype?: SystemSubtype;
 }
 
-const SUBTYPE_ICONS: Record<string, { name: string; color: string }> = {
+type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+
+const SUBTYPE_ICONS: Record<SystemSubtype, { name: IoniconName; color: string }> = {
   screenshot_taken: { name: 'camera', color: '#FF9800' },
   screenshot_attempted: { name: 'camera-outline', color: '#FF9800' },
   access_requested: { name: 'key-outline', color: COLORS.primary },
@@ -44,7 +46,7 @@ export function SystemMessage({ text, subtype }: SystemMessageProps) {
     <View style={styles.container}>
       {iconInfo && (
         <Ionicons
-          name={iconInfo.name as any}
+          name={iconInfo.name}
           size={13}
           color={iconInfo.color}
           style={styles.icon}

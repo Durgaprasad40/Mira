@@ -19,6 +19,7 @@ import { useDemoStore } from '@/stores/demoStore';
 import { Toast } from '@/components/ui/Toast';
 import { trackEvent } from '@/lib/analytics';
 import { useAuthStore } from '@/stores/authStore';
+import type { Id } from '@/convex/_generated/dataModel';
 
 type ReportReason =
   | 'inappropriate_content'
@@ -27,7 +28,9 @@ type ReportReason =
   | 'harassment'
   | 'other';
 
-const REPORT_REASONS: { key: ReportReason; label: string; icon: string }[] = [
+type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+
+const REPORT_REASONS: { key: ReportReason; label: string; icon: IoniconName }[] = [
   { key: 'inappropriate_content', label: 'Inappropriate content', icon: 'alert-circle-outline' },
   { key: 'non_consensual', label: 'Non-consensual sharing', icon: 'hand-left-outline' },
   { key: 'screenshot_abuse', label: 'Screenshot abuse', icon: 'camera-outline' },
@@ -43,6 +46,12 @@ interface ReportModalProps {
   mediaId?: string;
   onClose: () => void;
 }
+
+const asUserId = (value: string): Id<'users'> => value as Id<'users'>;
+const asConversationId = (value: string): Id<'conversations'> => value as Id<'conversations'>;
+const asMediaId = (value: string): Id<'media'> => value as Id<'media'>;
+const getErrorMessage = (error: unknown, fallback: string) =>
+  error instanceof Error && error.message ? error.message : fallback;
 
 export function ReportModal({
   visible,
@@ -78,10 +87,10 @@ export function ReportModal({
     setSubmitting(true);
     try {
       await reportMedia({
-        reporterId: reporterId as any,
-        reportedUserId: reportedUserId as any,
-        chatId: chatId as any,
-        mediaId: mediaId ? (mediaId as any) : undefined,
+        reporterId: asUserId(reporterId),
+        reportedUserId: asUserId(reportedUserId),
+        chatId: asConversationId(chatId),
+        mediaId: mediaId ? asMediaId(mediaId) : undefined,
         reason: selectedReason,
         description: description.trim() || undefined,
       });
@@ -89,8 +98,8 @@ export function ReportModal({
       trackEvent({ name: 'report_user', reportedUserId, reason: selectedReason });
       handleClose();
       Toast.show('Reported — thanks for keeping Mira safe');
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to submit report');
+    } catch (error: unknown) {
+      Alert.alert('Error', getErrorMessage(error, 'Failed to submit report'));
     } finally {
       setSubmitting(false);
     }
@@ -123,7 +132,7 @@ export function ReportModal({
               onPress={() => setSelectedReason(reason.key)}
             >
               <Ionicons
-                name={reason.icon as any}
+                name={reason.icon}
                 size={20}
                 color={selectedReason === reason.key ? COLORS.primary : COLORS.textLight}
               />

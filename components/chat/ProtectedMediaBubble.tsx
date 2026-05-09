@@ -9,6 +9,7 @@ import { COLORS } from '@/lib/constants';
 import { log } from '@/utils/logger';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 import { useAuthStore } from '@/stores/authStore';
+import type { Id } from '@/convex/_generated/dataModel';
 
 // Phase-1 tile sizing (matches MediaMessage.tsx)
 const THUMB_WIDTH = 100;
@@ -17,6 +18,14 @@ const AUTO_REMOVE_DELAY = 60_000; // 60 seconds after expiry
 
 // Check if URI is a local content:// URI (Android gallery) which doesn't work well with blur
 const isContentUri = (uri: string) => uri?.startsWith('content://');
+
+function getSafeIdTail(value?: string | null): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value.slice(-6) : undefined;
+}
+
+const asMediaId = (value: string): Id<'media'> => value as Id<'media'>;
+const asMessageId = (value: string): Id<'messages'> => value as Id<'messages'>;
+const asUserId = (value: string): Id<'users'> => value as Id<'users'>;
 
 interface ProtectedMediaBubbleProps {
   messageId: string;
@@ -69,6 +78,7 @@ export function ProtectedMediaBubble({
   // the chat. Read the authenticated user ID from the auth store and use
   // the prop form only if nothing is available from the store.
   const authUserId = useAuthStore((s) => s.userId) ?? userId ?? null;
+  const messageRef = getSafeIdTail(messageId);
 
   // ============================================================================
   // HOOKS-FIX: ALL hooks must be declared at the top, BEFORE any early returns
@@ -78,7 +88,7 @@ export function ProtectedMediaBubble({
   // Fetch media info from Convex if mediaId is provided
   const mediaInfo = useQuery(
     api.media.getMediaInfo,
-    mediaId && authUserId ? { mediaId: mediaId as any, userId: authUserId as any } : 'skip'
+    mediaId && authUserId ? { mediaId: asMediaId(mediaId), userId: asUserId(authUserId) } : 'skip'
   );
 
   // LOAD-FIRST: Receivers must explicitly tap to load before any URL fetch or
@@ -95,17 +105,16 @@ export function ProtectedMediaBubble({
   const mediaUrlData = useQuery(
     api.protectedMedia.getMediaUrl,
     mediaId && authUserId && !isExpiredProp && gateOpen
-      ? { messageId: messageId as any, authUserId }
+      ? { messageId: asMessageId(messageId), authUserId }
       : 'skip'
   );
 
   // PREFETCH-FIX-V2: Refs for prefetching
   const hasPrefetchedRef = useRef(false);
-  const videoPrefetchRef = useRef<Video | null>(null);
   const prefetchStartTimeRef = useRef<number>(0);
 
   // P1-FIX: Lock the first valid timer value to prevent jump when query hydrates
-  const lockedTimerSecondsRef = useRef<number | null>(null);
+  const [lockedTimerSeconds, setLockedTimerSeconds] = useState<number | null>(null);
 
   // Live countdown state
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
@@ -124,10 +133,12 @@ export function ProtectedMediaBubble({
   // Use fetched data or fall back to props (derived values, not hooks)
   // P1-FIX: Lock first valid timer value to prevent visual jump when query hydrates
   const rawTimerSeconds = mediaInfo?.timerSeconds ?? protectedMedia?.timer ?? 0;
-  if (lockedTimerSecondsRef.current === null && rawTimerSeconds > 0) {
-    lockedTimerSecondsRef.current = rawTimerSeconds;
-  }
-  const timerSeconds = lockedTimerSecondsRef.current ?? rawTimerSeconds;
+  useEffect(() => {
+    if (lockedTimerSeconds === null && rawTimerSeconds > 0) {
+      setLockedTimerSeconds(rawTimerSeconds);
+    }
+  }, [lockedTimerSeconds, rawTimerSeconds]);
+  const timerSeconds = lockedTimerSeconds ?? rawTimerSeconds;
   const viewingMode = protectedMedia?.viewingMode ?? mediaInfo?.viewMode ?? 'tap';
   const isHoldMode = viewingMode === 'hold';
   const viewOnce = mediaInfo?.viewOnce ?? protectedMedia?.viewOnce ?? false;
@@ -145,7 +156,7 @@ export function ProtectedMediaBubble({
       touchStartTimeRef.current = Date.now();
       if (isHoldMode && onHoldStart) {
         holdActiveRef.current = true;
-        log.info('[SECURE_HOLD]', 'grant (hold start)', { messageId });
+        if (__DEV__) log.info('[SECURE_HOLD]', 'grant (hold start)', { messageRef });
         onHoldStart();
       }
     },
@@ -159,10 +170,10 @@ export function ProtectedMediaBubble({
 
       if (isHoldMode && holdActiveRef.current && onHoldEnd) {
         holdActiveRef.current = false;
-        log.info('[SECURE_HOLD]', 'release (hold end)', { messageId, touchDuration });
+        if (__DEV__) log.info('[SECURE_HOLD]', 'release (hold end)', { messageRef, touchDuration });
         onHoldEnd();
       } else if (!isHoldMode && onPress && touchDuration < 300) {
-        log.info('[SECURE_TAP]', 'tap', { messageId, touchDuration });
+        if (__DEV__) log.info('[SECURE_TAP]', 'tap', { messageRef, touchDuration });
         onPress();
       }
     },
@@ -170,19 +181,19 @@ export function ProtectedMediaBubble({
     onPanResponderTerminate: () => {
       if (isHoldMode && holdActiveRef.current && onHoldEnd) {
         holdActiveRef.current = false;
-        log.info('[SECURE_HOLD]', 'terminated', { messageId });
+        if (__DEV__) log.info('[SECURE_HOLD]', 'terminated', { messageRef });
         onHoldEnd();
       }
     },
-  }), [isHoldMode, onHoldStart, onHoldEnd, onPress, messageId]);
+  }), [isHoldMode, onHoldStart, onHoldEnd, onPress, messageRef]);
 
   // VIDEO-PREFETCH: Callback when video is preloaded
   const handleVideoPrefetchLoad = useCallback((status: AVPlaybackStatus) => {
     if (status.isLoaded) {
       const prefetchTime = Date.now() - prefetchStartTimeRef.current;
-      log.info('[SECURE_BUBBLE]', 'video prefetch complete', { messageId, prefetchTime });
+      if (__DEV__) log.info('[SECURE_BUBBLE]', 'video prefetch complete', { messageRef, prefetchTime });
     }
-  }, [messageId]);
+  }, [messageRef]);
 
   // Prefetch effect
   useEffect(() => {
@@ -193,13 +204,13 @@ export function ProtectedMediaBubble({
       const isVideoMedia = mediaUrlData?.mediaType === 'video';
 
       if (isVideoMedia) {
-        log.info('[SECURE_BUBBLE]', 'video prefetch started', { messageId, url: mediaUrlData.url.substring(0, 50) });
+        if (__DEV__) log.info('[SECURE_BUBBLE]', 'video prefetch started', { messageRef });
       } else {
         Image.prefetch(mediaUrlData.url).catch(() => {});
-        log.info('[SECURE_BUBBLE]', 'image prefetch started', { messageId });
+        if (__DEV__) log.info('[SECURE_BUBBLE]', 'image prefetch started', { messageRef });
       }
     }
-  }, [mediaUrlData?.url, mediaUrlData?.mediaType, isExpired, messageId]);
+  }, [mediaUrlData?.url, mediaUrlData?.mediaType, isExpired, messageRef]);
 
   // Calculate remaining time from wall-clock using shared countdown helper
   useEffect(() => {
@@ -220,7 +231,7 @@ export function ProtectedMediaBubble({
       }
 
       if (countdown.expired && onExpire) {
-        log.info('[SECURE_BUBBLE]', 'timer expired', { messageId });
+        if (__DEV__) log.info('[SECURE_BUBBLE]', 'timer expired', { messageRef });
         onExpire();
       }
     };
@@ -234,19 +245,20 @@ export function ProtectedMediaBubble({
         intervalRef.current = null;
       }
     };
-  }, [timerEndsAt, isExpired, messageId, onExpire]);
+  }, [timerEndsAt, isExpired, messageRef, onExpire]);
 
   // Log render for debugging
   useEffect(() => {
+    if (!__DEV__) return;
     log.info('[SECURE_BUBBLE]', 'render', {
-      messageId,
+      messageRef,
       mode: viewingMode,
       remainingSec,
       isExpired,
-      expiredAt,
+      hasExpiredAt: typeof expiredAt === 'number',
       isOwn,
     });
-  }, [messageId, viewingMode, remainingSec, isExpired, expiredAt, isOwn]);
+  }, [messageRef, viewingMode, remainingSec, isExpired, expiredAt, isOwn]);
 
   // AUTO-HIDE: Start 60-second timer when message expires to auto-remove from UI
   useEffect(() => {
@@ -264,22 +276,22 @@ export function ProtectedMediaBubble({
 
     // If already past 60s, hide immediately
     if (remainingDelay === 0) {
-      log.info('[SECURE_BUBBLE]', 'auto-hide immediate', { messageId, alreadyExpiredFor });
+      if (__DEV__) log.info('[SECURE_BUBBLE]', 'auto-hide immediate', { messageRef, alreadyExpiredFor });
       setIsAutoHidden(true);
       return;
     }
 
-    log.info('[SECURE_BUBBLE]', 'auto-hide timer started', { messageId, remainingDelay });
+    if (__DEV__) log.info('[SECURE_BUBBLE]', 'auto-hide timer started', { messageRef, remainingDelay });
 
     const timer = setTimeout(() => {
-      log.info('[SECURE_BUBBLE]', 'auto-hide triggered', { messageId });
+      if (__DEV__) log.info('[SECURE_BUBBLE]', 'auto-hide triggered', { messageRef });
       setIsAutoHidden(true);
     }, remainingDelay);
 
     return () => {
       clearTimeout(timer);
     };
-  }, [isExpired, expiredAt, messageId]);
+  }, [isExpired, expiredAt, messageRef]);
 
   // ============================================================================
   // END OF HOOKS - Early returns are safe below this point
@@ -399,7 +411,6 @@ export function ProtectedMediaBubble({
       {/* VIDEO-PREFETCH: Hidden video for preloading */}
       {shouldPrefetchVideo && (
         <Video
-          ref={videoPrefetchRef}
           source={{ uri: mediaUrlData!.url }}
           style={styles.hiddenPrefetch}
           shouldPlay={false}

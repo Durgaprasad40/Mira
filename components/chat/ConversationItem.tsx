@@ -6,6 +6,9 @@ import { COLORS, FONT_SIZE, FONT_WEIGHT, moderateScale } from '@/lib/constants';
 import { DEMO_PROFILES } from '@/lib/demoData';
 import type { PresenceStatus } from '@/hooks/usePresence';
 
+// System message marker regex (matches [SYSTEM:subtype] prefix)
+const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+
 interface ConversationItemProps {
   id: string;
   otherUser: {
@@ -66,7 +69,7 @@ function ConversationItemComponent({
   useEffect(() => {
     if (hasUnread) {
       // Brief pulse: 0 → 1 → 0 to highlight the row
-      Animated.sequence([
+      const animation = Animated.sequence([
         Animated.timing(highlightAnim, {
           toValue: 1,
           duration: 150,
@@ -77,9 +80,13 @@ function ConversationItemComponent({
           duration: 400,
           useNativeDriver: false,
         }),
-      ]).start();
+      ]);
+      animation.start();
+      return () => animation.stop();
     }
-  }, []);
+    highlightAnim.setValue(0);
+    return undefined;
+  }, [hasUnread, highlightAnim]);
 
   // Press feedback animation (subtle, no bounce)
   const handlePressIn = useCallback(() => {
@@ -135,9 +142,6 @@ function ConversationItemComponent({
     }
     return otherUserName.slice(0, 2).toUpperCase() || '??';
   }, [otherUserName]);
-
-  // System message marker regex (matches [SYSTEM:subtype] prefix)
-  const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
 
   // P0 UNIFIED PRESENCE: Use presenceStatus directly from unified system
   const isActiveNow = otherUserPresenceStatus === 'online';

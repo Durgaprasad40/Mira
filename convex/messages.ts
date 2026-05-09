@@ -77,8 +77,14 @@ async function getPhase1PrimaryPhoto(
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice', 'template', 'dare'];
 const TYPING_STATUS_TIMEOUT_MS = 5_000;
 const TYPING_STATUS_CLEANUP_MS = 60_000;
+const TYPING_STATUS_CLEANUP_BATCH = 500;
+const CONVERSATION_PARTICIPANT_SCAN_LIMIT = 1000;
+const MESSAGE_DELIVERY_SCAN_LIMIT = 200;
+const MESSAGE_READ_SCAN_LIMIT = 200;
+const UNREAD_RECOMPUTE_SCAN_LIMIT = 1000;
 const CHAT_ROOM_PRIVATE_DM_CLEANUP_CONVERSATION_BATCH = 25;
 const CHAT_ROOM_PRIVATE_DM_CLEANUP_MESSAGE_BATCH = 100;
+const DELIVERY_ACK_LIMIT = 200;
 
 // C1/C2/C3-REPAIR: Helper to compute unread count from source of truth (messages table)
 // Used for: race-safe updates, fallback when participant rows are missing, backfill
@@ -89,14 +95,13 @@ async function computeUnreadCountFromMessages(
 ): Promise<number> {
   const unreadMessages = await ctx.db
     .query('messages')
-    .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-    .filter((q) =>
-      q.and(
-        q.neq(q.field('senderId'), userId),
-        q.eq(q.field('readAt'), undefined)
-      )
+    .withIndex('by_conversation_readAt', (q) =>
+      q.eq('conversationId', conversationId).eq('readAt', undefined)
     )
-    .collect();
+    .filter((q) =>
+      q.neq(q.field('senderId'), userId)
+    )
+    .take(UNREAD_RECOMPUTE_SCAN_LIMIT);
 
   // UNREAD-RULE: Only count messages with countable types
   // System messages (screenshot_taken, permission_granted, T&D state, etc.) are excluded
@@ -672,7 +677,7 @@ export const sendPreMatchMessage = mutation({
     const senderParticipantRows = await ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', fromUserId))
-      .collect();
+      .take(CONVERSATION_PARTICIPANT_SCAN_LIMIT);
 
     for (const participantRow of senderParticipantRows) {
       const candidateConversation = await ctx.db.get(participantRow.conversationId);
@@ -1004,14 +1009,13 @@ export const markAsRead = mutation({
     // Get all unread messages not sent by this user
     const unreadMessages = await ctx.db
       .query('messages')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .filter((q) =>
-        q.and(
-          q.neq(q.field('senderId'), userId),
-          q.eq(q.field('readAt'), undefined)
-        )
+      .withIndex('by_conversation_readAt', (q) =>
+        q.eq('conversationId', conversationId).eq('readAt', undefined)
       )
-      .collect();
+      .filter((q) =>
+        q.neq(q.field('senderId'), userId)
+      )
+      .take(MESSAGE_READ_SCAN_LIMIT);
 
     for (const message of unreadMessages) {
       await ctx.db.patch(message._id, { readAt: now });
@@ -1224,14 +1228,13 @@ export const markAsDelivered = mutation({
     // Get all messages from OTHER user that are not yet delivered
     const undeliveredMessages = await ctx.db
       .query('messages')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .filter((q) =>
-        q.and(
-          q.neq(q.field('senderId'), userId),
-          q.eq(q.field('deliveredAt'), undefined)
-        )
+      .withIndex('by_conversation_deliveredAt', (q) =>
+        q.eq('conversationId', conversationId).eq('deliveredAt', undefined)
       )
-      .collect();
+      .filter((q) =>
+        q.neq(q.field('senderId'), userId)
+      )
+      .take(MESSAGE_DELIVERY_SCAN_LIMIT);
 
     for (const message of undeliveredMessages) {
       await ctx.db.patch(message._id, { deliveredAt: now });
@@ -1265,11 +1268,12 @@ export const markAllAsDelivered = mutation({
     const participations = await ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(CONVERSATION_PARTICIPANT_SCAN_LIMIT);
 
     let totalMarked = 0;
 
     for (const participation of participations) {
+      if (totalMarked >= MESSAGE_DELIVERY_SCAN_LIMIT) break;
       const conversation = await ctx.db.get(participation.conversationId);
       if (isChatRoomPrivateDmExpired(conversation, now)) {
         continue;
@@ -1277,14 +1281,13 @@ export const markAllAsDelivered = mutation({
 
       const undeliveredMessages = await ctx.db
         .query('messages')
-        .withIndex('by_conversation', (q) => q.eq('conversationId', participation.conversationId))
-        .filter((q) =>
-          q.and(
-            q.neq(q.field('senderId'), userId),
-            q.eq(q.field('deliveredAt'), undefined)
-          )
+        .withIndex('by_conversation_deliveredAt', (q) =>
+          q.eq('conversationId', participation.conversationId).eq('deliveredAt', undefined)
         )
-        .collect();
+        .filter((q) =>
+          q.neq(q.field('senderId'), userId)
+        )
+        .take(MESSAGE_DELIVERY_SCAN_LIMIT - totalMarked);
 
       for (const message of undeliveredMessages) {
         await ctx.db.patch(message._id, { deliveredAt: now });
@@ -1315,11 +1318,6 @@ export const markAllAsDelivered = mutation({
 //    secure-media countdowns or expires view-once media.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Cap per-call workload to protect the server when a user returns after a
-// long absence with a huge backlog. Subsequent subscription ticks will
-// drain the rest.
-const DELIVERY_ACK_LIMIT = 200;
-
 export const listUndeliveredIncomingMessages = query({
   args: {
     authUserId: v.string(),
@@ -1337,7 +1335,7 @@ export const listUndeliveredIncomingMessages = query({
     const participations = await ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(CONVERSATION_PARTICIPANT_SCAN_LIMIT);
 
     const results: Array<{ _id: Id<'messages'>; conversationId: Id<'conversations'> }> = [];
 
@@ -1351,14 +1349,13 @@ export const listUndeliveredIncomingMessages = query({
 
       const undelivered = await ctx.db
         .query('messages')
-        .withIndex('by_conversation', (q) => q.eq('conversationId', participation.conversationId))
-        .filter((q) =>
-          q.and(
-            q.neq(q.field('senderId'), userId),
-            q.eq(q.field('deliveredAt'), undefined)
-          )
+        .withIndex('by_conversation_deliveredAt', (q) =>
+          q.eq('conversationId', participation.conversationId).eq('deliveredAt', undefined)
         )
-        .collect();
+        .filter((q) =>
+          q.neq(q.field('senderId'), userId)
+        )
+        .take(DELIVERY_ACK_LIMIT - results.length);
 
       for (const msg of undelivered) {
         if (results.length >= DELIVERY_ACK_LIMIT) break;
@@ -1488,12 +1485,12 @@ export const getConversation = query({
     // Check unmatched (only relevant if conversation has a matchId)
     if (conversation.matchId) {
       const match = await ctx.db.get(conversation.matchId);
-      if (!match || (match as any).isActive === false) {
+      if (!match || match.isActive === false) {
         terminalState = 'unmatched';
       }
     }
     // user_removed takes precedence (user gone or deactivated)
-    if (!otherUser || (otherUser as any).isActive === false) {
+    if (!otherUser || otherUser.isActive === false) {
       terminalState = 'user_removed';
     }
 
@@ -1818,11 +1815,11 @@ export const getConversations = query({
       // P1-RESTORE: terminal state — degrade UI gracefully instead of dropping rows.
       let terminalState: 'unmatched' | 'user_removed' | null = null;
       if (conversation.matchId) {
-        if (!match || (match as any).isActive === false) {
+        if (!match || match.isActive === false) {
           terminalState = 'unmatched';
         }
       }
-      if (!otherUser || (otherUser as any).isActive === false) {
+      if (!otherUser || otherUser.isActive === false) {
         terminalState = 'user_removed';
       }
 
@@ -1897,10 +1894,13 @@ export const getConversations = query({
 // Check if user can send messages
 export const canSendMessage = query({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) return { canSend: false, remaining: 0, total: 0 };
+
+    const user = await ctx.db.get(userId);
     if (!user) return { canSend: false, remaining: 0, total: 0 };
 
     // Women can always send
@@ -1939,7 +1939,6 @@ export const getUnreadCount = query({
     // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
     const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!userId) {
-      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
       return 0;
     }
 
@@ -1951,7 +1950,7 @@ export const getUnreadCount = query({
     const participantRows = await ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(CONVERSATION_PARTICIPANT_SCAN_LIMIT);
 
     // Build set of conversation IDs that have participant rows (O(1) lookup)
     const coveredConversationIds = new Set<string>(
@@ -2021,9 +2020,17 @@ export const getUnreadCount = query({
  */
 export const getUnreadDmCountsByRoom = query({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { userId }) => {
+  handler: async (ctx, { authUserId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return {
+        byRoomId: {},
+        roomsWithUnread: 0,
+      };
+    }
+
     const now = Date.now();
     // C3-REPAIR: Hybrid approach - use denormalized counts where available,
     // fall back to source-of-truth computation for conversations without participant rows.
@@ -2139,16 +2146,13 @@ export const markDmConversationRead = mutation({
     // Get all unread messages RECEIVED by this user (not sent by them)
     const unreadMessages = await ctx.db
       .query('messages')
-      .withIndex('by_conversation', (q) =>
-        q.eq('conversationId', conversationId)
+      .withIndex('by_conversation_readAt', (q) =>
+        q.eq('conversationId', conversationId).eq('readAt', undefined)
       )
       .filter((q) =>
-        q.and(
-          q.neq(q.field('senderId'), userId),
-          q.eq(q.field('readAt'), undefined)
-        )
+        q.neq(q.field('senderId'), userId)
       )
-      .collect();
+      .take(MESSAGE_READ_SCAN_LIMIT);
 
     // Mark each as read
     for (const message of unreadMessages) {
@@ -2375,11 +2379,15 @@ export const setTypingStatus = mutation({
 export const getTypingStatus = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.id('users'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, userId } = args;
+    const { conversationId, authUserId } = args;
     const now = Date.now();
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { isTyping: false };
+    }
 
     // Get conversation to find the other participant
     const conversation = await ctx.db.get(conversationId);
@@ -2415,15 +2423,21 @@ export const cleanupStaleTypingStatus = internalMutation({
   args: {},
   handler: async (ctx) => {
     const cutoff = Date.now() - TYPING_STATUS_CLEANUP_MS;
-    const typingRows = await ctx.db.query('typingStatus').collect();
+    const typingRows = await ctx.db
+      .query('typingStatus')
+      .withIndex('by_updatedAt', (q) => q.lt('updatedAt', cutoff))
+      .take(TYPING_STATUS_CLEANUP_BATCH);
 
     let deleted = 0;
     for (const row of typingRows) {
-      if (row.updatedAt > cutoff) continue;
       await ctx.db.delete(row._id);
       deleted += 1;
     }
 
-    return { success: true, deleted };
+    return {
+      success: true,
+      deleted,
+      hasMore: typingRows.length === TYPING_STATUS_CLEANUP_BATCH,
+    };
   },
 });

@@ -280,7 +280,7 @@ export const markAllAsRead = mutation({
 // 4-1: Create or update notification with deduplication
 // If a notification with the same dedupeKey exists, it is updated (refreshed).
 // Otherwise a new notification is created.
-export const createNotification = mutation({
+export const createNotification = internalMutation({
   args: {
     userId: v.id('users'),
     type: v.union(

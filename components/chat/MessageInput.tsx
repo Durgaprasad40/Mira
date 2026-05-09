@@ -13,6 +13,7 @@ import { isDemoMode } from '@/config/demo';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 
 const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
+const FREE_USER_TEXT_LIMIT = 150;
 
 interface MessageInputProps {
   onSend: (text: string, type?: 'text' | 'template') => void | Promise<void>;
@@ -304,6 +305,11 @@ export function MessageInput({
     ? (isRecording ? COLORS.error : p2.textLight)
     : (isRecording ? COLORS.error : COLORS.textLight);
   const plusIconColor = isPhase2 ? p2.primary : COLORS.primary;
+  const textLimit = !isDemoMode && !canSendCustom ? FREE_USER_TEXT_LIMIT : undefined;
+  const remainingChars = textLimit ? textLimit - text.length : null;
+  const shouldShowLimitCounter =
+    remainingChars !== null && (isFocused || text.length >= FREE_USER_TEXT_LIMIT - 20);
+  const isAtTextLimit = remainingChars !== null && remainingChars <= 0;
 
   return (
     <View style={containerStyle}>
@@ -444,12 +450,17 @@ export function MessageInput({
             scrollEnabled
             textAlignVertical="top"
             blurOnSubmit={false}
-            maxLength={isDemoMode || canSendCustom ? undefined : 150}
+            maxLength={textLimit}
             editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
             autoComplete="off"
             textContentType="none"
             importantForAutofill="noExcludeDescendants"
           />
+          {shouldShowLimitCounter && (
+            <Text style={[styles.limitCounter, isAtTextLimit && styles.limitCounterReached]}>
+              {isAtTextLimit ? 'Limit reached' : `${remainingChars} left`}
+            </Text>
+          )}
         </Animated.View>
 
         {!isRecording && (
@@ -614,6 +625,17 @@ const styles = StyleSheet.create({
   inputRecording: {
     borderWidth: 1,
     borderColor: COLORS.error + '40',
+  },
+  limitCounter: {
+    position: 'absolute',
+    right: 12,
+    bottom: 4,
+    fontSize: 10,
+    color: COLORS.textMuted,
+    fontWeight: '600',
+  },
+  limitCounterReached: {
+    color: COLORS.error,
   },
   sendButton: {
     width: 40,

@@ -186,9 +186,24 @@ type OptimisticTextMessage = RenderMessage & {
   optimisticStatus: 'sending' | 'failed';
 };
 type CurrentUserSummary = Pick<Doc<'users'>, '_id' | 'name' | 'gender' | 'subscriptionTier'>;
+type BottleSpinSessionView = {
+  state: 'none' | 'pending' | 'active' | 'cooldown' | 'expired';
+  inviterId?: string;
+  inviteeId?: string;
+  currentTurnRole?: 'inviter' | 'invitee';
+  spinTurnRole?: 'inviter' | 'invitee';
+  turnPhase?: 'idle' | 'spinning' | 'choosing' | 'complete';
+  gameStartedAt?: number;
+  acceptedAt?: number;
+  lastActionAt?: number;
+  cooldownUntil?: number;
+  remainingMs?: number;
+  endedReason?: 'invite_expired' | 'not_started' | 'timeout';
+};
 
 const PHOTO_UPLOAD_COMPRESSION_THRESHOLD_BYTES = 4 * 1024 * 1024;
 const PHOTO_UPLOAD_MAX_WIDTH = 1600;
+const MAX_MESSAGE_CONTENT_LENGTH = 5000;
 
 const asConversationId = (value: string): ConversationId => value as ConversationId;
 const asMessageId = (value: string): MessageId => value as MessageId;
@@ -199,6 +214,24 @@ const getErrorMessage = (error: unknown, fallback: string) =>
 
 const isAbortError = (error: unknown) =>
   error instanceof Error && error.name === 'AbortError';
+
+const getSafeLogId = (value?: string | null): string | undefined =>
+  typeof value === 'string' && value.length > 0 ? value.slice(-6) : undefined;
+
+const sanitizeChatDebugPayload = (data: Record<string, unknown>) => {
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    const lowerKey = key.toLowerCase();
+    if (typeof value === 'string' && lowerKey.includes('id')) {
+      safe[key] = getSafeLogId(value);
+    } else if (typeof value === 'string' && (lowerKey.includes('url') || lowerKey.includes('token'))) {
+      safe[key] = true;
+    } else {
+      safe[key] = value;
+    }
+  }
+  return safe;
+};
 
 const TEXT_MAX_SCALE = 1.2;
 const TEXT_PROPS = { maxFontSizeMultiplier: TEXT_MAX_SCALE } as const;
@@ -250,7 +283,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         params: { id: otherUserId, fromChat: '1' },
       });
     } else if (__DEV__) {
-      console.warn('[P1ChatHeader] missing otherUserId', { convoId: conversationId });
+      console.warn('[P1ChatHeader] missing otherUserId', { convoRef: getSafeLogId(conversationId) });
     }
   }, [router, conversationId]);
 
@@ -375,8 +408,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const syncTimerEndsAt = useDemoDmStore((s) => s.syncTimerEndsAt);
 
   // ── Log module for secure photo debugging ──
-  const logSecure = (action: string, data: Record<string, any>) => {
-    if (__DEV__) console.log(`[SECURE_SYNC] ${action}`, data);
+  const logSecure = (action: string, data: Record<string, unknown>) => {
+    if (__DEV__) console.log(`[SECURE_SYNC] ${action}`, sanitizeChatDebugPayload(data));
   };
 
   // ── Safety / integrity guards ──
@@ -469,8 +502,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Live typing presence — backend returns `{ isTyping }` for the OTHER participant
   const otherUserTyping = useQuery(
     api.messages.getTypingStatus,
-    !isDemo && liveConversationId && currentUser?._id
-      ? { conversationId: liveConversationId, userId: currentUser._id }
+    !isDemo && liveConversationId && userId
+      ? { conversationId: liveConversationId, authUserId: userId }
       : 'skip'
   ) as { isTyping?: boolean } | undefined;
 
@@ -510,6 +543,19 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       )
     : false;
 
+  const showExpiredChatAlert = useCallback(() => {
+    Alert.alert('Chat Expired', 'This chat has expired and can no longer receive messages.');
+  }, []);
+
+  const ensureChatActionAllowed = useCallback(() => {
+    if (!isExpiredChat) return true;
+    showExpiredChatAlert();
+    return false;
+  }, [isExpiredChat, showExpiredChatAlert]);
+
+  const showUploadValidationAlert = useCallback((error: unknown, fallback: string) => {
+    Alert.alert('Media Unavailable', error instanceof UploadError ? error.message : fallback);
+  }, []);
 
   // Log when chat is detected as expired
   const hasLoggedExpired = useRef(false);
@@ -732,17 +778,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       `${m._id}:${m.deliveredAt ?? 0}:${m.readAt ?? 0}`
     ).join('|');
 
-    // LIVE-TICK-DEBUG: Log when hash changes (tracks sender seeing tick updates)
-    if (__DEV__) {
-      const lastMsg = recentMessages[recentMessages.length - 1];
-      console.log('[LIVE-TICK-HASH] Hash computed:', {
-        msgCount: recentMessages.length,
-        lastMsgId: lastMsg?._id?.slice(-6),
-        lastDelivered: !!lastMsg?.deliveredAt,
-        lastRead: !!lastMsg?.readAt,
-      });
-    }
-
     return hash;
   }, [displayMessages]);
 
@@ -799,10 +834,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Query game session status from backend
   const gameSession = useQuery(
     api.games.getBottleSpinSession,
-    !isDemo && conversationId ? { conversationId } : 'skip'
+    !isDemo && conversationId && userId ? { conversationId, authUserId: userId } : 'skip'
   );
-  const truthDareLastActionAt = gameSession ? (gameSession as any).lastActionAt : undefined;
-  const truthDareSpinTurnRole = gameSession ? (gameSession as any).spinTurnRole : undefined;
+  const gameSessionView = gameSession as BottleSpinSessionView | undefined;
+  const truthDareLastActionAt = gameSessionView?.lastActionAt;
+  const truthDareSpinTurnRole = gameSessionView?.spinTurnRole;
   const truthDareRole = deriveMyRole(gameSession, userId);
   const isTruthDareInviter = truthDareRole === 'inviter';
   const isTruthDareInvitee = truthDareRole === 'invitee';
@@ -886,11 +922,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (__DEV__) {
         console.log('[TD_END_TRACE] cleanup_expired_session', {
           endedReason: gameSession.endedReason,
-          conversationId,
+          conversationRef: getSafeLogId(conversationId),
           note: 'backend will set cooldownUntil on this path',
         });
       }
-      const cooldownUntil = (gameSession as any).cooldownUntil;
+      const cooldownUntil = gameSessionView?.cooldownUntil;
       if (typeof cooldownUntil === 'number' && cooldownUntil <= Date.now()) {
         return;
       }
@@ -908,7 +944,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             });
           }
         })
-        .catch((err) => console.warn('[TD_END_TRACE] cleanup_expired_failed', err));
+        .catch((err) => {
+          if (__DEV__) console.warn('[TD_END_TRACE] cleanup_expired_failed', err);
+        });
 
       // Show appropriate system message
       const messages: Record<string, string> = {
@@ -923,7 +961,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           authUserId: userId,
           content: `[SYSTEM:truthdare]${msg}`,
           type: 'text',
-        }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+        }).catch((err) => {
+          if (__DEV__) console.warn('[TD_SYSTEM_MSG] Failed:', err);
+        });
       }
     }
 
@@ -983,7 +1023,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     setShowSpinHint(true);
     if (__DEV__) {
       console.log('[TD_HINT] my_spin_turn_show', {
-        conversationId,
+        conversationRef: getSafeLogId(conversationId),
         spinTurnRole,
         lastActionAt: truthDareLastActionAt,
       });
@@ -1021,7 +1061,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       setIsTruthDarePaused(false);
       if (__DEV__) {
         console.log('[TD_PAUSE] pause_cleared_new_action', {
-          conversationId,
+          conversationRef: getSafeLogId(conversationId),
           pausedAt,
           lastActionAt,
         });
@@ -1057,7 +1097,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (pausedAt && pausedAt > lastActionAt) {
         if (__DEV__) {
           console.log('[TD_PAUSE] pause_persisted_until_new_action', {
-            conversationId,
+            conversationRef: getSafeLogId(conversationId),
             pausedAt,
             lastActionAt,
           });
@@ -1120,6 +1160,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       setIsTruthDarePaused(false);
     }
 
+    if (!ensureChatActionAllowed()) {
+      return;
+    }
+
     if (isDemo) {
       // Demo mode: skip invite flow, go directly to game
       setShowTruthDareGame(true);
@@ -1154,12 +1198,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // Priority 1: Cooldown active - show inline message instead of Alert
     if (gameSession.state === 'cooldown') {
-      const remainingMs = (gameSession as any).remainingMs || 0;
+      const remainingMs = gameSessionView?.remainingMs || 0;
       if (remainingMs <= 0) {
         cooldownAnchorRef.current = null;
         setShowCooldownMessage(false);
       } else {
-        const cooldownUntil = (gameSession as any).cooldownUntil;
+        const cooldownUntil = gameSessionView?.cooldownUntil;
         // COOLDOWN-ANCHOR-FIX: capture absolute expiry at press time so the
         // floating toast can countdown even when only `remainingMs` is present.
         const anchor = typeof cooldownUntil === 'number' && cooldownUntil > 0
@@ -1212,11 +1256,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 authUserId: userId,
                 content: '[SYSTEM:truthdare]Game started!',
                 type: 'text',
-              }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+              }).catch((err) => {
+                if (__DEV__) console.warn('[TD_SYSTEM_MSG] Failed:', err);
+              });
               setShowTruthDareGame(true);
             }
           } catch (err) {
-            console.error('[TD_MANUAL_START] Error starting game:', err);
+            if (__DEV__) console.warn('[TD_MANUAL_START] Error starting game:', err);
           }
         } else {
           // Invitee: game accepted but inviter hasn't started yet - no-op,
@@ -1242,10 +1288,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       console.log('[TD_MESSAGES][open_modal] state_none_open_invite');
     }
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId, conversationId, startGameMutation, isTruthDarePaused, showSpinHint]);
+  }, [isDemo, gameSession, userId, conversationId, startGameMutation, isTruthDarePaused, showSpinHint, ensureChatActionAllowed]);
 
   // Send game invite
   const handleSendInvite = useCallback(async () => {
+    if (!ensureChatActionAllowed()) return;
     if (!userId || !conversationId || !truthDareOtherUserId) {
       if (__DEV__) {
         console.log('[TD_MESSAGES][guard_blocked] handleSendInvite', {
@@ -1284,11 +1331,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (__DEV__) console.warn('[TD_MESSAGES][mutation_error] sendBottleSpinInvite', error);
       Alert.alert('Error', getErrorMessage(error, 'Failed to send invite'));
     }
-  }, [userId, conversationId, truthDareOtherUserId, sendInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, truthDareOtherUserId, sendInviteMutation, currentUser, sendMessage, ensureChatActionAllowed]);
 
   // Respond to game invite
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
     if (!userId || !conversationId) return;
+    if (!ensureChatActionAllowed()) return;
 
     try {
       await respondToInviteMutation({
@@ -1317,7 +1365,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } catch (error) {
       Alert.alert('Error', getErrorMessage(error, 'Failed to respond to invite'));
     }
-  }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage, ensureChatActionAllowed]);
 
   // End game (called from BottleSpinGame)
   // TD_END_TRACE: centralised instrumentation so any future accidental
@@ -1343,7 +1391,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (__DEV__) {
         console.log('[TD_END_TRACE] cooldown_set', {
           via: 'endBottleSpinGame',
-          conversationId,
+          conversationRef: getSafeLogId(conversationId),
         });
       }
     } catch (error) {
@@ -1358,6 +1406,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Uses system message style: demo mode uses type:'system', Convex uses [SYSTEM:truthdare] marker
   const handleSendTruthDareResult = useCallback(async (message: string) => {
     if (!conversationId) return;
+    if (!ensureChatActionAllowed()) return;
 
     // TD_END_TRACE: tighten "ended the game" detection. The previous
     // `message.includes('ended the game')` was a substring match and would
@@ -1368,7 +1417,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     const isEndGameSystemMessage = /^[^\s].* ended the game$/.test(message);
     if (isEndGameSystemMessage) {
       if (__DEV__) {
-        console.log('[TD_END_TRACE] end_game_message_detected', { message });
+        console.log('[TD_END_TRACE] end_game_message_detected', { messageKind: 'end_game' });
       }
       handleEndGame();
     }
@@ -1399,7 +1448,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } catch {
       // Silent fail - game continues even if message fails
     }
-  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage, handleEndGame]);
+  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage, handleEndGame, ensureChatActionAllowed]);
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
@@ -1635,10 +1684,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // updates in real-time. Stops when not in cooldown to save renders.
   useEffect(() => {
     if (isDemo) return;
-    if ((gameSession as any)?.state !== 'cooldown') return;
+    if (gameSessionView?.state !== 'cooldown') return;
     const id = setInterval(() => setCooldownTick((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, [isDemo, (gameSession as any)?.state]);
+  }, [isDemo, gameSessionView?.state]);
 
   // COOLDOWN-TOAST-AUTOHIDE: Each tap bumps `cooldownToastNonce`, which
   // re-runs this effect and resets the 3.5s auto-hide timer. This guarantees
@@ -1706,16 +1755,43 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }>(handoffKey);
 
     if (capturedMedia) {
-      // Set pending media to trigger secure photo sheet
-      setPendingImageUri(capturedMedia.uri);
-      setPendingMediaType(capturedMedia.type);
-      setPendingIsMirrored(capturedMedia.isMirrored === true); // Track front-camera video mirroring
+      if (!ensureChatActionAllowed()) return;
+      const validateCapturedMedia = async () => {
+        try {
+          await validateFileSize(capturedMedia.uri, capturedMedia.type);
+          if (!mountedRef.current) return;
+          // Set pending media to trigger secure photo sheet
+          setPendingImageUri(capturedMedia.uri);
+          setPendingMediaType(capturedMedia.type);
+          setPendingIsMirrored(capturedMedia.isMirrored === true); // Track front-camera video mirroring
+        } catch (error) {
+          showUploadValidationAlert(error, 'This media cannot be sent. Please choose a smaller file.');
+        }
+      };
+      void validateCapturedMedia();
     }
-  }, [isFocused, conversationId]);
+  }, [isFocused, conversationId, ensureChatActionAllowed, showUploadValidationAlert]);
 
   const submitOptimisticTextMessage = useCallback(async (message: OptimisticTextMessage) => {
     if (!activeConversation || !userId) return false;
     if (isSendingRef.current) return false;
+    if (!ensureChatActionAllowed()) {
+      updateOptimisticTextMessage(message.clientMessageId, (current) => ({
+        ...current,
+        optimisticStatus: 'failed',
+        errorMessage: 'This chat has expired.',
+      }));
+      return false;
+    }
+    if (message.content.trim().length > MAX_MESSAGE_CONTENT_LENGTH) {
+      updateOptimisticTextMessage(message.clientMessageId, (current) => ({
+        ...current,
+        optimisticStatus: 'failed',
+        errorMessage: `Messages can be up to ${MAX_MESSAGE_CONTENT_LENGTH.toLocaleString()} characters.`,
+      }));
+      Alert.alert('Message Too Long', `Messages can be up to ${MAX_MESSAGE_CONTENT_LENGTH.toLocaleString()} characters.`);
+      return false;
+    }
 
     isSendingRef.current = true;
     if (mountedRef.current) setIsSending(true);
@@ -1779,6 +1855,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     activeConversation,
     clearDemoDraft,
     conversationId,
+    ensureChatActionAllowed,
     handleTypingChange,
     liveConversationId,
     sendMessage,
@@ -1802,10 +1879,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!activeConversation) return;
     if (isSendingRef.current) return;
+    const normalizedText = text.trim();
 
-    // Block sending if chat is expired
-    if (isExpiredChat) {
-      Alert.alert('Chat Expired', 'This confession chat has expired and can no longer receive messages.');
+    if (!ensureChatActionAllowed()) {
+      return;
+    }
+    if (normalizedText.length > MAX_MESSAGE_CONTENT_LENGTH) {
+      Alert.alert('Message Too Long', `Messages can be up to ${MAX_MESSAGE_CONTENT_LENGTH.toLocaleString()} characters.`);
       return;
     }
 
@@ -1814,7 +1894,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       const uniqueId = `dm_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
       addDemoMessage(conversationId, {
         _id: uniqueId,
-        content: text,
+        content: normalizedText,
         type: 'text',
         senderId: getDemoUserId(),
         createdAt: Date.now(),
@@ -1833,7 +1913,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       clientMessageId,
       senderId: userId,
       type,
-      content: text,
+      content: normalizedText,
       createdAt: now,
       optimisticStatus: 'sending',
     };
@@ -1845,6 +1925,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Voice message sending - supports both demo and production
   const handleSendVoice = useCallback(async (audioUri: string, durationMs: number) => {
     if (!activeConversation || !conversationId) return;
+    if (!ensureChatActionAllowed()) return;
+
+    try {
+      await validateFileSize(audioUri, 'audio');
+    } catch (error) {
+      showUploadValidationAlert(error, 'Voice message is too large to send.');
+      return;
+    }
 
     if (isDemo) {
       const uniqueId = `dm_voice_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
@@ -1915,9 +2003,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     liveConversationId,
     addDemoMessage,
     createAbortController,
+    ensureChatActionAllowed,
     generateUploadUrl,
     releaseAbortController,
     sendMessage,
+    showUploadValidationAlert,
   ]);
 
   // Delete voice message
@@ -1948,6 +2038,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // This enables: photo/video toggle, 30s video limit, proper front camera handling
   const handleSendCamera = useCallback(async () => {
     if (!activeConversation || !conversationId) return;
+    if (!ensureChatActionAllowed()) return;
 
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (permission.status !== 'granted') {
@@ -1966,11 +2057,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         conversationId: conversationId,
       },
     });
-  }, [activeConversation, conversationId, router, showPermissionSettingsAlert]);
+  }, [activeConversation, conversationId, ensureChatActionAllowed, router, showPermissionSettingsAlert]);
 
   // Gallery handler: launch system gallery picker for photos and videos
   const handleSendGallery = useCallback(async () => {
     if (!activeConversation) return;
+    if (!ensureChatActionAllowed()) return;
 
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (permission.status !== 'granted') {
@@ -1998,17 +2090,31 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         return;
       }
 
+      try {
+        await validateFileSize(asset.uri, isVideo ? 'video' : 'photo');
+      } catch (error) {
+        showUploadValidationAlert(error, 'This media cannot be sent. Please choose a smaller file.');
+        return;
+      }
+
       setPendingIsMirrored(false);
       setPendingImageUri(asset.uri);
       setPendingMediaType(isVideo ? 'video' : 'photo');
     }
-  }, [activeConversation, showPermissionSettingsAlert]);
+  }, [activeConversation, ensureChatActionAllowed, showPermissionSettingsAlert, showUploadValidationAlert]);
 
   const handleSecurePhotoConfirm = async (imageUri: string, options: CameraPhotoOptions) => {
     if (!userId || !conversationId) return;
+    if (!ensureChatActionAllowed()) return;
 
     const isVideo = pendingMediaType === 'video';
     const isMirrored = pendingIsMirrored; // Capture before clearing
+    try {
+      await validateFileSize(imageUri, isVideo ? 'video' : 'photo');
+    } catch (error) {
+      showUploadValidationAlert(error, 'This media cannot be sent. Please choose a smaller file.');
+      return;
+    }
     clearPendingMediaComposerState();
     // PARALLEL-SEND-FIX: Don't block UI with isSending for media sends
     // The pending messages array provides visual feedback instead
@@ -2110,7 +2216,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       });
       if (__DEV__) {
         console.log('[P1_MEDIA_UPLOAD] optimistic_insert', {
-          pendingId,
+          pendingRef: getSafeLogId(pendingId),
           mediaType,
           timer: options.timer,
           viewMode: options.viewingMode,
@@ -2139,7 +2245,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           }));
           if (__DEV__ && (pct === 0 || pct === 100 || Math.floor(pct) % 10 === 0)) {
             console.log('[P1_MEDIA_UPLOAD] progress', {
-              pendingId,
+              pendingRef: getSafeLogId(pendingId),
               pct: Math.round(pct),
             });
           }
@@ -2174,8 +2280,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         isMirrored: isVideo && isMirrored,
       });
       if (__DEV__) {
-        console.log('[P1_MEDIA_UPLOAD] success', { pendingId });
-        console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingId });
+        console.log('[P1_MEDIA_UPLOAD] success', { pendingRef: getSafeLogId(pendingId) });
+        console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingRef: getSafeLogId(pendingId) });
       }
       removePendingSecureMessage(pendingId);
     } catch (error) {
@@ -2195,7 +2301,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               : 'upload_failed';
             if (__DEV__) {
               console.log('[P1_MEDIA_UPLOAD] failed', {
-                pendingId,
+                pendingRef: getSafeLogId(pendingId),
                 nextStatus,
                 uploadErrorType: isUploadError ? (error as UploadError).type : undefined,
                 errorMessage: getErrorMessage(error, 'Failed'),
@@ -2272,14 +2378,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           isMirrored: retryOptions.isMirrored,
         });
         if (__DEV__) {
-          console.log('[P1_MEDIA_UPLOAD] success', { pendingId, via: 'retry_send_failed' });
-          console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingId });
+          console.log('[P1_MEDIA_UPLOAD] success', { pendingRef: getSafeLogId(pendingId), via: 'retry_send_failed' });
+          console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingRef: getSafeLogId(pendingId) });
         }
         removePendingSecureMessage(pendingId);
       } catch (error) {
         if (__DEV__) {
           console.log('[P1_MEDIA_UPLOAD] failed', {
-            pendingId,
+            pendingRef: getSafeLogId(pendingId),
             nextStatus: 'send_failed',
             via: 'retry_send_failed',
             errorMessage: getErrorMessage(error, 'Failed'),
@@ -2349,8 +2455,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         isMirrored: retryOptions.isMirrored,
       });
       if (__DEV__) {
-        console.log('[P1_MEDIA_UPLOAD] success', { pendingId, via: 'retry_upload_failed' });
-        console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingId });
+        console.log('[P1_MEDIA_UPLOAD] success', { pendingRef: getSafeLogId(pendingId), via: 'retry_upload_failed' });
+        console.log('[P1_MEDIA_UPLOAD] replace_optimistic', { pendingRef: getSafeLogId(pendingId) });
       }
       removePendingSecureMessage(pendingId);
     } catch (error) {
@@ -2364,7 +2470,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               : 'upload_failed';
             if (__DEV__) {
               console.log('[P1_MEDIA_UPLOAD] failed', {
-                pendingId,
+                pendingRef: getSafeLogId(pendingId),
                 nextStatus,
                 via: 'retry_upload_failed',
                 errorMessage: getErrorMessage(error, 'Failed'),
@@ -2417,10 +2523,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // SECURE_TIMER: determine if current user sent this message. When true,
       // the viewer suppresses the countdown and all consuming mutations.
       const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
-      console.log('[SECURE_TIMER] viewer_open', {
-        messageId,
-        currentUserId: userId,
-        senderId: msg?.senderId ?? null,
+      if (__DEV__) console.log('[SECURE_TIMER] viewer_open', {
+        messageRef: getSafeLogId(messageId),
+        hasCurrentUser: !!userId,
+        senderRef: getSafeLogId(msg?.senderId ?? null),
         isSender,
         trigger: 'tap',
       });
@@ -2445,11 +2551,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       const isMirrored = msg?.protectedMedia?.isMirrored === true;
       // SECURE_TIMER: same sender detection as tap path.
       const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
-      if (__DEV__) console.log('[HOLD-MODE] Convex holdStart:', messageId, 'isMirrored:', isMirrored);
-      console.log('[SECURE_TIMER] viewer_open', {
-        messageId,
-        currentUserId: userId,
-        senderId: msg?.senderId ?? null,
+      if (__DEV__) console.log('[HOLD-MODE] Convex holdStart', {
+        messageRef: getSafeLogId(messageId),
+        isMirrored,
+      });
+      if (__DEV__) console.log('[SECURE_TIMER] viewer_open', {
+        messageRef: getSafeLogId(messageId),
+        hasCurrentUser: !!userId,
+        senderRef: getSafeLogId(msg?.senderId ?? null),
         isSender,
         trigger: 'hold',
       });
@@ -2480,7 +2589,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     } else {
       // Convex mode: close viewer on hold end
       if (viewerMessageId === messageId) {
-        if (__DEV__) console.log('[HOLD-MODE] Convex holdEnd:', messageId);
+        if (__DEV__) console.log('[HOLD-MODE] Convex holdEnd', {
+          messageRef: getSafeLogId(messageId),
+        });
         // P1_ONCE_VIEW_FIX: For view-once ("Once") media, hold release on the
         // receiver side is the moment the media has been seen — it must be
         // expired immediately so the bubble redacts to the "expired" state
@@ -2492,7 +2603,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         const msg = findDisplayMessageById(messageId);
         const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
         if (msg?.viewOnce && !isSender && userId) {
-          console.log('[SECURE_TIMER] markExpired', { messageId, reason: 'viewonce_hold_release' });
+          if (__DEV__) console.log('[SECURE_TIMER] markExpired', {
+            messageRef: getSafeLogId(messageId),
+            reason: 'viewonce_hold_release',
+          });
           markMediaExpired({
             messageId: asMessageId(messageId),
             authUserId: userId,
@@ -2500,7 +2614,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             if (__DEV__) console.error('[P1_ONCE_VIEW_FIX] hold-release markExpired failed:', err);
           });
         } else if (msg?.viewOnce && isSender) {
-          console.log('[SECURE_TIMER] skip_sender_timer', { messageId, reason: 'viewonce_hold_release' });
+          if (__DEV__) console.log('[SECURE_TIMER] skip_sender_timer', {
+            messageRef: getSafeLogId(messageId),
+            reason: 'viewonce_hold_release',
+          });
         }
         setViewerMessageId(null);
       }
@@ -2521,16 +2638,21 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       const msg = findDisplayMessageById(messageId);
       const isSender = !!(msg?.senderId && userId && msg.senderId === userId);
       if (isSender) {
-        console.log('[SECURE_TIMER] skip_sender_timer', {
-          messageId,
+        if (__DEV__) console.log('[SECURE_TIMER] skip_sender_timer', {
+          messageRef: getSafeLogId(messageId),
           reason: 'bubble_countdown_zero',
         });
         return;
       }
       // Convex mode: call backend to mark expired
       if (userId) {
-        if (__DEV__) console.log('[EXPIRY] Marking media expired from bubble:', messageId);
-        console.log('[SECURE_TIMER] markExpired', { messageId, reason: 'bubble_countdown_zero' });
+        if (__DEV__) console.log('[EXPIRY] Marking media expired from bubble', {
+          messageRef: getSafeLogId(messageId),
+        });
+        if (__DEV__) console.log('[SECURE_TIMER] markExpired', {
+          messageRef: getSafeLogId(messageId),
+          reason: 'bubble_countdown_zero',
+        });
         markMediaExpired({
           messageId: asMessageId(messageId),
           authUserId: userId,
@@ -2542,6 +2664,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   };
 
   const handleSendDare = () => {
+    if (!ensureChatActionAllowed()) return;
     const dareRecipientId = activeConversation?.otherUser?.id;
     if (!dareRecipientId) return;
     router.push(`/(main)/dare/send?userId=${dareRecipientId}`);
@@ -2606,8 +2729,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // PRIVACY-RESTORE: Confession DMs are anonymous on the recipient's side until
   // the confessor opts to reveal. Detect both flags up-front and use them to
   // gate avatar/name rendering and profile-tap navigation.
-  const isOtherUserAnonymous = !isDemo && (otherUser as any).isAnonymous === true;
-  const isConfessionChat = !isDemo && (activeConversation as any).isConfessionChat === true;
+  const otherUserPrivacy = otherUser as typeof otherUser & { isAnonymous?: boolean };
+  const isOtherUserAnonymous = !isDemo && otherUserPrivacy.isAnonymous === true;
+  const isConfessionChat = !isDemo && activeConversation.isConfessionChat === true;
   const otherUserName = otherUser.name;
   const otherUserPhotoUrl = isOtherUserAnonymous ? undefined : otherUser.photoUrl;
   const otherUserLastActive = otherUser.lastActive ?? 0;
@@ -2624,7 +2748,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Primary source: gameSession.cooldownUntil (absolute timestamp).
   // Fallback: cooldownAnchorRef captured at press time from remainingMs.
   // cooldownTick (1s interval) drives re-render. Hidden when not in cooldown.
-  const cooldownLiveText = (() => {
+  const cooldownLiveText = useMemo(() => {
     if (isDemo || gameSession?.state !== 'cooldown') return null;
     const gs: any = gameSession;
     let expiry: number | null = null;
@@ -2643,9 +2767,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     const m = Math.floor(totalSec / 60);
     const s = totalSec % 60;
     return `${m}m ${s.toString().padStart(2, '0')}s`;
-  })();
-  // Reference cooldownTick so React re-evaluates each second while cooldown is active.
-  void cooldownTick;
+  }, [cooldownTick, gameSession, isDemo]);
   const pendingInviteBottom = composerHeight + composerBottomPadding + SPACING.sm;
 
   const canSendCustom = isDemo
@@ -3255,7 +3377,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           truthDarePauseByConversation.set(conversationId, pausedAt);
           if (__DEV__) {
             console.log('[TD_PAUSE] pause_persisted_until_new_action', {
-              conversationId,
+              conversationRef: getSafeLogId(conversationId),
               pausedAt,
             });
           }

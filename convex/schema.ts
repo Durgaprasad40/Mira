@@ -783,6 +783,8 @@ export default defineSchema({
   })
     .index('by_conversation', ['conversationId'])
     .index('by_conversation_created', ['conversationId', 'createdAt'])
+    .index('by_conversation_deliveredAt', ['conversationId', 'deliveredAt'])
+    .index('by_conversation_readAt', ['conversationId', 'readAt'])
     // BUGFIX #3: Index for idempotency lookup by clientMessageId
     .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
@@ -1547,7 +1549,10 @@ export default defineSchema({
     userId: v.id('users'),
     isTyping: v.boolean(),
     updatedAt: v.number(),
-  }).index('by_conversation', ['conversationId']).index('by_user_conversation', ['userId', 'conversationId']),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId'])
+    .index('by_updatedAt', ['updatedAt']),
 
   // Nudges table (smart notifications)
   nudges: defineTable({
@@ -2697,6 +2702,7 @@ export default defineSchema({
     lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip' | null
   })
     .index('by_conversation', ['conversationId'])
+    .index('by_conversation_createdAt', ['conversationId', 'createdAt'])
     .index('by_inviter', ['inviterId'])
     .index('by_invitee', ['inviteeId']),
 

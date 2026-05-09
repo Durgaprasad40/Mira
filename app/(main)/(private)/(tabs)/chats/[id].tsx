@@ -235,7 +235,7 @@ export default function Phase2ChatThread() {
 
   const gameSession = useQuery(
     api.games.getBottleSpinSession,
-    id ? { conversationId: id } : 'skip'
+    id && userId ? { conversationId: id, authUserId: userId } : 'skip'
   );
 
   // --------------------------------------------------------------------- mutations
