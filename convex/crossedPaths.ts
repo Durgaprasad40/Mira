@@ -3131,6 +3131,12 @@ export const getNearbyUsers = query({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
 
+    // P2 — Consent read-gate. Requester must have accepted the current
+    // Nearby / Crossed Paths disclosure before any list payload is exposed.
+    // Write paths already gate on this; the read gate prevents leaking
+    // existing data to a user who has not (re-)consented.
+    if (!hasNearbyConsent(currentUser)) return [];
+
     // Current user must be verified to see nearby users.
     // DEV-ONLY bypass (matches publishLocation / detectCrossedUsers). Engages
     // only when the Convex deployment env explicitly sets
@@ -3524,6 +3530,13 @@ export const getCrossPathHistory = query({
 
     // Get current user for distance calculation
     const currentUser = await ctx.db.get(userId);
+
+    // P2 — Consent read-gate. Requester must have accepted the current
+    // Nearby / Crossed Paths disclosure before any history payload is
+    // returned. Mirrors the gate on getNearbyUsers and the existing
+    // write-path gates.
+    if (!currentUser || !hasNearbyConsent(currentUser)) return [];
+
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
@@ -3760,15 +3773,34 @@ export const getCrossPathHistory = query({
       return b.createdAt - a.createdAt;
     });
 
+    // Fix 7 (P1) — apply per-viewer daily distinct crossed-profile cap.
+    // History rows can repeat the same other user, so dedupe by user ID
+    // before running the cap and use the surviving set to filter the
+    // result list. Already-shown-today and already-crossed pairs pass
+    // through unchanged. Order is preserved by filter().
+    const uniqueOtherUserIds = [
+      ...new Set(results.map((r) => String(r.otherUserId))),
+    ];
+    const cappedUsers = await applyDailyDistinctCrossedProfileCap(
+      ctx,
+      userId,
+      uniqueOtherUserIds.map((id) => ({ id: id as Id<'users'> })),
+      now,
+    );
+    const allowedOtherUserIds = new Set(cappedUsers.map((u) => String(u.id)));
+    const cappedResults = results.filter((r) =>
+      allowedOtherUserIds.has(String(r.otherUserId)),
+    );
+
     // [CROSSED_PATHS_AUDIT] ui — what the client-side list receives.
     console.log('[CROSSED_PATHS_AUDIT][ui]', {
       viewer: userId,
-      entriesReturned: results.length,
-      hasReasonOverlap: results.filter((r) => (r.reasonTags?.[0] ?? '') !== 'nearby').length,
-      nearbyOnly: results.filter((r) => (r.reasonTags?.[0] ?? '') === 'nearby').length,
+      entriesReturned: cappedResults.length,
+      hasReasonOverlap: cappedResults.filter((r) => (r.reasonTags?.[0] ?? '') !== 'nearby').length,
+      nearbyOnly: cappedResults.filter((r) => (r.reasonTags?.[0] ?? '') === 'nearby').length,
     });
 
-    return results;
+    return cappedResults;
   },
 });
 
@@ -4266,6 +4298,13 @@ export const getCrossedPathSummary = query({
     // Resolve authUserId to Convex ID
     const userId = await resolveUserIdByAuthId(ctx, args.userId);
     if (!userId) {
+      return { count: 0, latestCreatedAt: null };
+    }
+
+    // P2 — Consent read-gate. Requester must have accepted the current
+    // Nearby / Crossed Paths disclosure before any summary is exposed.
+    const requester = await ctx.db.get(userId);
+    if (!requester || !hasNearbyConsent(requester)) {
       return { count: 0, latestCreatedAt: null };
     }
 
