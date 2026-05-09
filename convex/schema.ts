@@ -262,27 +262,46 @@ export default defineSchema({
     locationRejectWindowStartedAt: v.optional(v.number()),
     locationSpoofSuspect: v.optional(v.boolean()),
     locationSpoofSuspectAt: v.optional(v.number()),
-    // DEPRECATED (P2 cleanup): Phase-1 iOS Significant Location Change opt-in.
-    // No longer written or read by live code — recordLocationBatch is now a
-    // safe no-op, updateNearbySettings strips this field, and getCurrentUser
-    // does not project it. Field retained only to preserve existing user
-    // documents; do NOT re-introduce reads/writes without re-adding manifest
-    // exclusions, foreground-only enforcement, and a consent re-acceptance
-    // gate. Original semantics: iOS-only opt-in for SLC-driven background
-    // sampling; default OFF; Android uses Discovery Mode (below).
+    // ACTIVE (Phase 1 background restore): iOS Significant Location Change
+    // opt-in. Default OFF (undefined). Server-side guarantees:
+    //   * Only honored when bgCrossedPathsEnabled feature flag is true
+    //   * Only honored when backgroundLocationConsentAt +
+    //     backgroundLocationConsentVersion (matching the current
+    //     BG_LOCATION_CONSENT_VERSION) are present on the user doc
+    // Toggling true via updateNearbySettings is rejected unless the
+    // background consent fields below are set. recordLocationBatch enforces
+    // backgroundLocationEnabled === true for source='slc' samples so a
+    // stale or spoofed client cannot write SLC batches without explicit
+    // user opt-in. Phase 1 backend foundation only — the iOS native
+    // background plumbing is added in a later phase.
     backgroundLocationEnabled: v.optional(v.boolean()),
-    // DEPRECATED (P2 cleanup): Phase-2 Android Discovery Mode fields. No
-    // longer written or read by live code — startDiscoveryMode and
-    // stopDiscoveryMode are safe no-ops, recordLocationBatch is disabled,
-    // and getCurrentUser does not project these. Fields retained to
-    // preserve existing user documents. Original semantics:
-    //   - discoveryModeEnabled === true AND discoveryModeExpiresAt > now
-    //     → source='bg' batches accepted
-    //   - otherwise background batches dropped server-side
-    // discoveryModeStartedAt was diagnostics-only.
+    // ACTIVE (Phase 1 background restore): Android Discovery Mode fields.
+    // Time-bounded background window (default 4h, max 8h) so Android
+    // never tracks 24/7. recordLocationBatch enforces:
+    //   discoveryModeEnabled === true AND discoveryModeExpiresAt > now
+    // for source='bg' samples; expired windows are rejected. All three
+    // are also gated server-side by bgCrossedPathsEnabled feature flag +
+    // backgroundLocationConsent presence. discoveryModeStartedAt is
+    // diagnostic-only. Phase 1 backend foundation only — the Android
+    // native foreground service / TaskManager wiring lands in a later phase.
     discoveryModeEnabled: v.optional(v.boolean()),
     discoveryModeExpiresAt: v.optional(v.number()),
     discoveryModeStartedAt: v.optional(v.number()),
+    // ACTIVE (Phase 1 background restore): Background-Crossed-Paths
+    // explicit-opt-in disclosure consent. Separate from nearbyConsentAt
+    // (which only covers foreground crossed-paths). A user who has
+    // accepted nearbyConsent but NOT this background-specific consent
+    // cannot enable backgroundLocationEnabled, cannot enable
+    // discoveryModeEnabled, and cannot have any background sample
+    // (source='slc' or source='bg') accepted by recordLocationBatch.
+    //
+    // Both fields must be present and backgroundLocationConsentVersion
+    // must equal the current BG_LOCATION_CONSENT_VERSION constant in
+    // convex/users.ts, otherwise the consent is treated as not given.
+    // Bumping that constant invalidates all old consents and forces a
+    // fresh re-acceptance — same pattern as nearbyConsentVersion.
+    backgroundLocationConsentAt: v.optional(v.number()),
+    backgroundLocationConsentVersion: v.optional(v.string()),
     nearbyPausedUntil: v.optional(v.number()),        // pause nearby visibility until timestamp
     nearbyVisibilityMode: v.optional(v.union(         // DEPRECATED (Phase-1 removed UI, Phase-2 stops reading it); kept to preserve existing data, no live code-path depends on it
       v.literal('always'),
@@ -1180,6 +1199,72 @@ export default defineSchema({
     .index('by_user_capturedAt', ['userId', 'capturedAt'])
     .index('by_capturedAt', ['capturedAt'])
     .index('by_expires', ['expiresAt']),
+
+  // Phase 1 Background Crossed Paths — server-side audit log of every
+  // recordLocationBatch call. Captures both accepted and rejected calls
+  // along with the gate that fired. Used for support + Play Store /
+  // App Store compliance evidence ("we have a tamper-proof record of
+  // every background sample we accepted or refused").
+  //
+  // Never exposed to clients. Cleaned up by an hourly cron after 30 days.
+  bgLocationAuditLog: defineTable({
+    userId: v.id('users'),
+    at: v.number(),                       // server timestamp (ms)
+    sampleCount: v.number(),              // count in the incoming batch
+    accepted: v.number(),                 // count actually written
+    dropped: v.number(),                  // sampleCount - accepted
+    sources: v.array(v.string()),         // distinct source codes in batch
+    outcome: v.union(                     // top-level outcome
+      v.literal('accepted'),
+      v.literal('rejected'),
+      v.literal('partial'),
+    ),
+    reason: v.optional(v.string()),       // gate code (e.g. 'consent_required',
+                                          // 'rate_limited', 'feature_disabled')
+    deviceHash: v.optional(v.string()),   // optional client-provided salted hash
+    expiresAt: v.number(),                // at + 30 days for TTL sweep
+  })
+    .index('by_user_at', ['userId', 'at'])
+    .index('by_expires', ['expiresAt']),
+
+  // Phase 1 Background Crossed Paths — sliding-window rate limiter for
+  // recordLocationBatch. One row per (userId, deviceHash, windowKind).
+  // windowKind=='10min' tracks the short-window quota (default 30
+  // samples / 10 minutes). windowKind=='daily' tracks the long-window
+  // quota (default 200 samples / 24 hours). Counters are reset by
+  // comparing windowStartedAt against now during the rate-limit check.
+  //
+  // deviceHash is optional — if a client doesn't supply one, the row
+  // collapses to per-user and is keyed by deviceHash='__unknown__'.
+  locationBatchRateLimit: defineTable({
+    userId: v.id('users'),
+    deviceHash: v.string(),               // '__unknown__' when client did not provide
+    windowKind: v.union(
+      v.literal('10min'),
+      v.literal('daily'),
+    ),
+    windowStartedAt: v.number(),          // ms; reset when stale
+    count: v.number(),                    // samples (not batches) accepted into the window
+    updatedAt: v.number(),
+  })
+    .index('by_user_device_window', ['userId', 'deviceHash', 'windowKind']),
+
+  // Phase 1 Background Crossed Paths — server-side feature flag table.
+  // Single source of truth for kill-switching the entire background
+  // pipeline. The only flag currently consumed is bgCrossedPathsEnabled;
+  // when missing or value !== true the recordLocationBatch handler,
+  // startDiscoveryMode, and stopDiscoveryMode all early-return.
+  //
+  // Read by isBgCrossedPathsEnabled() helper inside crossedPaths.ts.
+  // Write-side is admin-only — there is no public mutation that flips
+  // this flag.
+  featureFlags: defineTable({
+    name: v.string(),                     // e.g. 'bgCrossedPathsEnabled'
+    value: v.boolean(),                   // false = killed
+    updatedAt: v.number(),
+    updatedBy: v.optional(v.string()),    // operator id / note
+  })
+    .index('by_name', ['name']),
 
   // Privacy Zones
   // User-owned private areas such as Home, Work, Hostel, College, or Gym.

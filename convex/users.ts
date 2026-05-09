@@ -5,6 +5,7 @@ import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { validateAccess } from "./devReset";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateOwnership, validateSessionToken } from "./helpers";
+import { BG_LOCATION_CONSENT_VERSION } from "./crossedPaths";
 import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeRelationshipIntentValues,
@@ -244,11 +245,16 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     nearbyPausedUntil: user.nearbyPausedUntil,
     // Phase-2: separate crossed-paths opt-in (undefined treated as true).
     recordCrossedPaths: user.recordCrossedPaths,
-    // P2 cleanup: backgroundLocationEnabled + Phase-2 Android Discovery Mode
-    // fields (discoveryModeEnabled / discoveryModeExpiresAt /
-    // discoveryModeStartedAt) are no longer projected. The live client is
-    // foreground-only; surfacing these dormant flags only widens the attack
-    // surface for tampered clients. Schema fields remain for back-compat.
+    // Phase 1 background restore: project background-location fields so the
+    // client can render the in-app toggle, the Discovery Mode countdown, and
+    // the consent acceptance state. Server still treats these as advisory —
+    // every actual write path re-enforces the same gates server-side.
+    backgroundLocationEnabled: user.backgroundLocationEnabled,
+    discoveryModeEnabled: user.discoveryModeEnabled,
+    discoveryModeStartedAt: user.discoveryModeStartedAt,
+    discoveryModeExpiresAt: user.discoveryModeExpiresAt,
+    backgroundLocationConsentAt: user.backgroundLocationConsentAt,
+    backgroundLocationConsentVersion: user.backgroundLocationConsentVersion,
     // NOTE: nearbyVisibilityMode retained in schema for back-compat but no
     // longer surfaced to clients — UI was removed in Phase-1 and backend
     // stopped reading it in Phase-2.
@@ -1001,20 +1007,17 @@ export const updateNearbySettings = mutation({
     // Separate from nearbyEnabled, which controls whether the user is surfaced
     // through Nearby visibility.
     recordCrossedPaths: v.optional(v.boolean()),
-    // P2 cleanup: backgroundLocationEnabled is still accepted in the
-    // validator for backwards-compatibility with cached old clients, but
-    // it is dropped server-side and never patched. The live foreground-only
-    // app no longer surfaces a toggle for it.
+    // Phase 1 background restore: backgroundLocationEnabled is now accepted
+    // again, but writes are gated server-side (see handler) by the user's
+    // backgroundLocationConsent fields. A client cannot flip this true
+    // unless the user has gone through the disclosure flow first.
     backgroundLocationEnabled: v.optional(v.boolean()),
     // NOTE: nearbyVisibilityMode is deprecated — the old always/app_open/recent
     // UI was removed in Phase-1 and the backend stopped reading it in Phase-2.
     // The field is intentionally NOT accepted by this mutation anymore.
   },
   handler: async (ctx, args) => {
-    // P2 cleanup: explicitly strip backgroundLocationEnabled so a tampered
-    // client cannot re-enable the dormant iOS SLC pathway.
-    const { authUserId, incognitoMode, backgroundLocationEnabled: _bgIgnored, ...updates } = args;
-    void _bgIgnored;
+    const { authUserId, incognitoMode, backgroundLocationEnabled, ...updates } = args;
 
     // P1 SECURITY: Resolve auth ID to Convex user ID server-side
     const userId = await resolveUserIdByAuthId(ctx, authUserId);
@@ -1032,6 +1035,23 @@ export const updateNearbySettings = mutation({
         throw new Error("Premium required for Incognito Nearby");
       }
       (updates as Record<string, unknown>).incognitoMode = incognitoMode;
+    }
+
+    // Phase 1 background restore: gate backgroundLocationEnabled flips.
+    // Turning ON requires the user to have already accepted the
+    // background-location disclosure (BG_LOCATION_CONSENT_VERSION). Turning
+    // OFF is always allowed — users must always be able to disable.
+    if (backgroundLocationEnabled !== undefined) {
+      if (backgroundLocationEnabled === true) {
+        const hasBgConsent =
+          typeof user.backgroundLocationConsentAt === 'number' &&
+          user.backgroundLocationConsentAt > 0 &&
+          user.backgroundLocationConsentVersion === BG_LOCATION_CONSENT_VERSION;
+        if (!hasBgConsent) {
+          throw new Error('background_consent_required');
+        }
+      }
+      (updates as Record<string, unknown>).backgroundLocationEnabled = backgroundLocationEnabled;
     }
 
     // Filter out undefined values
@@ -1066,37 +1086,174 @@ export const updateNearbySettings = mutation({
 //     cannot keep writing.
 // ---------------------------------------------------------------------------
 
-// P2 cleanup: Phase-2 Android Discovery Mode is disabled. The live client is
-// foreground-only and no longer calls these mutations. The signatures are
-// preserved as safe no-ops so any cached old client receives a benign
-// disabled response rather than a crash. The dormant fields they used to
-// patch (discoveryModeEnabled / discoveryModeExpiresAt /
-// discoveryModeStartedAt) are no longer written here.
+/** Default Discovery Mode window length (4h). */
+const DISCOVERY_MODE_DEFAULT_DURATION_MS = 4 * 60 * 60 * 1000;
+/** Upper bound on the Discovery Mode window. Prevents clients from asking
+ *  for multi-day windows that would break the "time-limited" guarantee. */
+const DISCOVERY_MODE_MAX_DURATION_MS = 8 * 60 * 60 * 1000;
+
+/** Local feature-flag read. Mirrors isBgCrossedPathsEnabled() in
+ *  crossedPaths.ts but inlined here so users.ts doesn't take a runtime
+ *  dependency on the helper export (avoids any cross-module init order
+ *  surprise). */
+async function readBgCrossedPathsFlag(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+): Promise<boolean> {
+  const row = await ctx.db
+    .query('featureFlags')
+    .withIndex('by_name', (q: any) => q.eq('name', 'bgCrossedPathsEnabled'))
+    .first();
+  return row?.value === true;
+}
+
 export const startDiscoveryMode = mutation({
   args: {
     authUserId: v.string(),
+    // Optional: client can ask for a shorter window. Anything above the
+    // MAX is clamped; anything <=0 or missing gets the default.
     durationMs: v.optional(v.number()),
   },
-  handler: async (_ctx, _args) => {
-    return {
-      success: true,
-      disabled: true,
-      reason: 'background_location_disabled',
-      startedAt: null,
-      expiresAt: null,
-      durationMs: 0,
-    };
+  handler: async (ctx, args) => {
+    // Phase 1 kill switch — the entire background pipeline is OFF unless
+    // the featureFlags row says otherwise. Returning a benign disabled
+    // response keeps cached old clients from crashing.
+    if (!(await readBgCrossedPathsFlag(ctx))) {
+      return {
+        success: true,
+        disabled: true,
+        reason: 'background_location_disabled',
+        startedAt: null,
+        expiresAt: null,
+        durationMs: 0,
+      };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error('User not found');
+
+    // Phase 1 background restore: must have explicit background-location
+    // consent before Discovery Mode can be started server-side.
+    const hasBgConsent =
+      typeof user.backgroundLocationConsentAt === 'number' &&
+      user.backgroundLocationConsentAt > 0 &&
+      user.backgroundLocationConsentVersion === BG_LOCATION_CONSENT_VERSION;
+    if (!hasBgConsent) {
+      throw new Error('background_consent_required');
+    }
+
+    const now = Date.now();
+    const requested =
+      typeof args.durationMs === 'number' && args.durationMs > 0
+        ? args.durationMs
+        : DISCOVERY_MODE_DEFAULT_DURATION_MS;
+    const clamped = Math.min(requested, DISCOVERY_MODE_MAX_DURATION_MS);
+    const expiresAt = now + clamped;
+
+    await ctx.db.patch(userId, {
+      discoveryModeEnabled: true,
+      discoveryModeStartedAt: now,
+      discoveryModeExpiresAt: expiresAt,
+    });
+
+    // Compact server-side audit of Discovery Mode start.
+    console.log('[ANDROID_DISCOVERY][server_start]', {
+      userId,
+      startedAt: now,
+      expiresAt,
+      durationMs: clamped,
+    });
+
+    return { success: true, startedAt: now, expiresAt, durationMs: clamped };
   },
 });
 
 export const stopDiscoveryMode = mutation({
   args: { authUserId: v.string() },
-  handler: async (_ctx, _args) => {
-    return {
-      success: true,
-      disabled: true,
-      reason: 'background_location_disabled',
-    };
+  handler: async (ctx, args) => {
+    // Stop is always honored even when the feature flag is off — turning
+    // OFF a window must never be blocked, otherwise an admin disabling the
+    // flag could leave users stuck in an "active" window they can't end.
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+    await ctx.db.patch(userId, {
+      discoveryModeEnabled: false,
+      discoveryModeExpiresAt: undefined,
+      // discoveryModeStartedAt intentionally left intact for diagnostics.
+    });
+    console.log('[ANDROID_DISCOVERY][server_stop]', { userId, at: Date.now() });
+    return { success: true };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Phase 1 Background Crossed Paths — explicit consent mutations
+// ---------------------------------------------------------------------------
+// acceptBackgroundLocationConsent stamps the user doc with the current
+// BG_LOCATION_CONSENT_VERSION + a server timestamp. revoke clears both
+// fields AND tears down any active background-location state
+// (backgroundLocationEnabled=false, discoveryModeEnabled=false) so a
+// revoking user is immediately removed from the background pipeline.
+// ---------------------------------------------------------------------------
+
+export const acceptBackgroundLocationConsent = mutation({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error('User not found');
+
+    // Foreground consent is a prerequisite — a user who hasn't accepted the
+    // baseline Nearby disclosure cannot accept the stricter background one.
+    if (
+      typeof user.nearbyConsentAt !== 'number' ||
+      user.nearbyConsentAt <= 0 ||
+      !user.nearbyConsentVersion
+    ) {
+      throw new Error('foreground_consent_required');
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(userId, {
+      backgroundLocationConsentAt: now,
+      backgroundLocationConsentVersion: BG_LOCATION_CONSENT_VERSION,
+    });
+    console.log('[BG_LOCATION][consent_accepted]', {
+      userId,
+      version: BG_LOCATION_CONSENT_VERSION,
+      at: now,
+    });
+    return { success: true, at: now, version: BG_LOCATION_CONSENT_VERSION };
+  },
+});
+
+export const revokeBackgroundLocationConsent = mutation({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+    // Revoke must always be honored — never gated by the feature flag and
+    // never throws on already-revoked users (idempotent).
+    await ctx.db.patch(userId, {
+      backgroundLocationConsentAt: undefined,
+      backgroundLocationConsentVersion: undefined,
+      backgroundLocationEnabled: false,
+      discoveryModeEnabled: false,
+      discoveryModeExpiresAt: undefined,
+    });
+    console.log('[BG_LOCATION][consent_revoked]', { userId, at: Date.now() });
+    return { success: true };
   },
 });
 

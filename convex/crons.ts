@@ -175,6 +175,24 @@ crons.hourly(
   internal.crossedPaths.cleanupExpiredLocationSamples
 );
 
+// Phase 1 Background Crossed Paths: TTL sweep for the bgLocationAuditLog
+// table. Daily — audit rows have a 30-day retention so a daily sweep is
+// sufficient and keeps cron-budget usage low.
+crons.daily(
+  'cleanup-expired-bg-location-audit-log',
+  { hourUTC: 3, minuteUTC: 40 },
+  internal.crossedPaths.cleanupExpiredBgLocationAuditLog
+);
+
+// Phase 1 Background Crossed Paths: stale-row sweep for locationBatchRateLimit.
+// Daily — drops rows whose updatedAt is older than 7 days so a user that
+// has stopped sampling does not accumulate counter rows forever.
+crons.daily(
+  'cleanup-stale-location-batch-rate-limit',
+  { hourUTC: 3, minuteUTC: 55 },
+  internal.crossedPaths.cleanupStaleLocationBatchRateLimit
+);
+
 // Phase-2 Ranking: Cleanup old viewer impressions daily
 // Removes impressions older than 7 days to prevent unbounded table growth
 crons.daily(

@@ -2351,6 +2351,181 @@ const BG_LOCATION_AUDIT_ENABLED = true;
 //   - Caller must not be in an active Nearby pause
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Phase 1 Background Crossed Paths — feature flag, consent, rate-limit, audit
+// ---------------------------------------------------------------------------
+
+/** Background-Crossed-Paths consent disclosure version. Bump to invalidate
+ *  every existing consent and force re-acceptance. Mirrors the
+ *  NEARBY_CONSENT_VERSION pattern. Kept here (not on users.ts) so the gate
+ *  helper below can compare against it without an import cycle. */
+export const BG_LOCATION_CONSENT_VERSION = 'bg_crossed_paths_v1';
+
+/** Background-pipeline kill switch. Reads featureFlags table. Returns false
+ *  when the flag row is absent OR present with value !== true. Phase 1
+ *  ships with the row absent so the entire pipeline is OFF by default. */
+async function isBgCrossedPathsEnabled(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+): Promise<boolean> {
+  const row = await ctx.db
+    .query('featureFlags')
+    .withIndex('by_name', (q: any) => q.eq('name', 'bgCrossedPathsEnabled'))
+    .first();
+  return row?.value === true;
+}
+
+/** Returns true only when the user has explicitly accepted the current
+ *  background-location disclosure. Mirrors hasNearbyConsent() but checks
+ *  the separate background-consent fields so a foreground-consenting user
+ *  cannot have any background sample accepted. */
+export function hasBackgroundLocationConsent(user: Doc<'users'>): boolean {
+  return (
+    typeof user.backgroundLocationConsentAt === 'number' &&
+    user.backgroundLocationConsentAt > 0 &&
+    user.backgroundLocationConsentVersion === BG_LOCATION_CONSENT_VERSION
+  );
+}
+
+// Sliding-window rate-limit thresholds. Tuned to comfortably allow
+// legitimate Discovery Mode + iOS SLC sampling cadence (~1 sample / 5min)
+// while bounding any tampered client to a few hundred samples per day.
+const BG_RATE_LIMIT_SHORT_WINDOW_MS = 10 * 60 * 1000;        // 10 minutes
+const BG_RATE_LIMIT_SHORT_WINDOW_MAX_SAMPLES = 30;           // per device per 10 min
+const BG_RATE_LIMIT_DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;   // 24 hours
+const BG_RATE_LIMIT_DAILY_WINDOW_MAX_SAMPLES = 200;          // per device per day
+
+const BG_AUDIT_LOG_TTL_MS = 30 * 24 * 60 * 60 * 1000;        // 30 days
+
+/** Pre-flight rate-limit check + reservation. Increments the (userId,
+ *  deviceHash, kind) counters by `samplesIncoming`. Returns `accept:true`
+ *  when both windows still have room; otherwise `accept:false` with the
+ *  reason. Performed BEFORE any locationSamples insert so quota cost is
+ *  predictable. */
+async function reserveBgRateLimitSlots(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>,
+  deviceHash: string,
+  samplesIncoming: number,
+): Promise<{ accept: true } | { accept: false; reason: 'rate_limited_short' | 'rate_limited_daily' }> {
+  const now = Date.now();
+  const dh = deviceHash || '__unknown__';
+
+  // Short window
+  const shortRow = await ctx.db
+    .query('locationBatchRateLimit')
+    .withIndex('by_user_device_window', (q: any) =>
+      q.eq('userId', userId).eq('deviceHash', dh).eq('windowKind', '10min'),
+    )
+    .first();
+  let shortStartedAt = shortRow?.windowStartedAt ?? now;
+  let shortCount = shortRow?.count ?? 0;
+  if (now - shortStartedAt > BG_RATE_LIMIT_SHORT_WINDOW_MS) {
+    shortStartedAt = now;
+    shortCount = 0;
+  }
+  if (shortCount + samplesIncoming > BG_RATE_LIMIT_SHORT_WINDOW_MAX_SAMPLES) {
+    return { accept: false, reason: 'rate_limited_short' };
+  }
+
+  // Daily window
+  const dailyRow = await ctx.db
+    .query('locationBatchRateLimit')
+    .withIndex('by_user_device_window', (q: any) =>
+      q.eq('userId', userId).eq('deviceHash', dh).eq('windowKind', 'daily'),
+    )
+    .first();
+  let dailyStartedAt = dailyRow?.windowStartedAt ?? now;
+  let dailyCount = dailyRow?.count ?? 0;
+  if (now - dailyStartedAt > BG_RATE_LIMIT_DAILY_WINDOW_MS) {
+    dailyStartedAt = now;
+    dailyCount = 0;
+  }
+  if (dailyCount + samplesIncoming > BG_RATE_LIMIT_DAILY_WINDOW_MAX_SAMPLES) {
+    return { accept: false, reason: 'rate_limited_daily' };
+  }
+
+  // Both windows have headroom — reserve the slots.
+  const shortPatch = { windowStartedAt: shortStartedAt, count: shortCount + samplesIncoming, updatedAt: now };
+  if (shortRow) {
+    await ctx.db.patch(shortRow._id, shortPatch);
+  } else {
+    await ctx.db.insert('locationBatchRateLimit', {
+      userId, deviceHash: dh, windowKind: '10min', ...shortPatch,
+    });
+  }
+  const dailyPatch = { windowStartedAt: dailyStartedAt, count: dailyCount + samplesIncoming, updatedAt: now };
+  if (dailyRow) {
+    await ctx.db.patch(dailyRow._id, dailyPatch);
+  } else {
+    await ctx.db.insert('locationBatchRateLimit', {
+      userId, deviceHash: dh, windowKind: 'daily', ...dailyPatch,
+    });
+  }
+  return { accept: true };
+}
+
+/** Persist a row into bgLocationAuditLog. Best-effort — failures are logged
+ *  but never thrown so an audit-log write cannot break the user's batch. */
+async function emitBgLocationAuditLog(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  args: {
+    userId: Id<'users'>;
+    sampleCount: number;
+    accepted: number;
+    sources: string[];
+    outcome: 'accepted' | 'rejected' | 'partial';
+    reason?: string;
+    deviceHash?: string;
+  },
+): Promise<void> {
+  try {
+    const at = Date.now();
+    await ctx.db.insert('bgLocationAuditLog', {
+      userId: args.userId,
+      at,
+      sampleCount: args.sampleCount,
+      accepted: args.accepted,
+      dropped: Math.max(0, args.sampleCount - args.accepted),
+      sources: args.sources,
+      outcome: args.outcome,
+      reason: args.reason,
+      deviceHash: args.deviceHash,
+      expiresAt: at + BG_AUDIT_LOG_TTL_MS,
+    });
+  } catch (err) {
+    console.warn('[BG_LOCATION][audit_log_write_failed]', { err: String(err) });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// recordLocationBatch — Phase 1 Background Crossed Paths entry point.
+// (Restored from commit ebb838b with new server-side gates layered on top.)
+//
+// Called from:
+//   * iOS Significant Location Change background task — source='slc'
+//   * Android Discovery Mode foreground service — source='bg'
+//   * Foreground mirror writes (rare; recordLocation usually owns this) — source='fg'
+//
+// Order of gates (each early-returns + writes audit log on first failure):
+//   1. bgCrossedPathsEnabled feature flag must be true
+//   2. resolveUserIdByAuthId must return a real user
+//   3. samples non-empty + below MAX_SAMPLES_PER_BATCH
+//   4. user exists and is verified
+//   5. nearbyEnabled !== false / nearbyPausedUntil not active
+//   6. recordCrossedPaths !== false
+//   7. incognitoMode !== true
+//   8. hasNearbyConsent (foreground consent — required for any sample)
+//   9. hasBackgroundLocationConsent (background-specific consent — required
+//      whenever any sample in the batch is source='slc' or source='bg')
+//  10. source-specific opt-in (backgroundLocationEnabled OR Discovery window)
+//  11. per-user + per-device rate limit (10min + daily windows)
+//  12. per-sample validators: coord, age, future, dedupe, privacy zone,
+//      impossible-travel, retry-duplicate
+// ---------------------------------------------------------------------------
+
 export const recordLocationBatch = mutation({
   args: {
     userId: v.union(v.id('users'), v.string()),
@@ -2363,29 +2538,466 @@ export const recordLocationBatch = mutation({
         source: v.union(v.literal('bg'), v.literal('fg'), v.literal('slc')),
       }),
     ),
+    // Optional client-provided salted device hash — bound rate limit
+    // per device so a single tampered client cannot starve every other
+    // device the same user owns. Never logged in plaintext.
+    deviceHash: v.optional(v.string()),
   },
-  // P2 cleanup: Phase-1 iOS SLC + Phase-2 Android Discovery Mode are disabled.
-  // The live client is foreground-only and no longer calls this mutation.
-  // The signature is preserved as a safe no-op so any cached old client
-  // receives a benign disabled response rather than a crash. No samples
-  // are written; no detection is run; no notifications are emitted.
-  handler: async (_ctx, _args) => {
+  handler: async (ctx, args) => {
+    // 1. Feature-flag kill switch — short-circuit before any user lookup
+    //    so the disabled path has zero observable side effects.
+    if (!(await isBgCrossedPathsEnabled(ctx))) {
+      return {
+        success: true,
+        accepted: 0,
+        skipped: true,
+        reason: 'background_location_disabled',
+      };
+    }
+
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      return { success: false, accepted: 0, reason: 'user_not_found' };
+    }
+    const userId = resolvedUserId;
+    const now = Date.now();
+    const sources = Array.from(new Set(args.samples.map((s) => s.source)));
+
+    if (BG_LOCATION_AUDIT_ENABLED) {
+      console.log('[BG_LOCATION][sample_received]', {
+        userId,
+        sampleCount: args.samples.length,
+        sources,
+      });
+    }
+
+    if (args.samples.length === 0) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: 0, accepted: 0, sources,
+        outcome: 'rejected', reason: 'empty_batch', deviceHash: args.deviceHash,
+      });
+      return { success: true, accepted: 0, reason: 'empty_batch' };
+    }
+    if (args.samples.length > MAX_SAMPLES_PER_BATCH) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'batch_too_large', deviceHash: args.deviceHash,
+      });
+      return { success: false, accepted: 0, reason: 'batch_too_large' };
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return { success: false, accepted: 0, reason: 'user_not_found' };
+    }
+
+    // Early opt-out gates (no background-consent specifics yet — those
+    // come below only when the batch carries bg/slc samples).
+    if (user.nearbyEnabled === false) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'disabled_or_paused', deviceHash: args.deviceHash,
+      });
+      return { success: true, accepted: 0, reason: 'disabled_or_paused' };
+    }
+    if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'disabled_or_paused', deviceHash: args.deviceHash,
+      });
+      return { success: true, accepted: 0, reason: 'disabled_or_paused' };
+    }
+    if (user.recordCrossedPaths === false) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'crossed_paths_opt_out', deviceHash: args.deviceHash,
+      });
+      return { success: true, accepted: 0, reason: 'crossed_paths_opt_out' };
+    }
+    if (user.incognitoMode === true) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'incognito', deviceHash: args.deviceHash,
+      });
+      return { success: true, accepted: 0, reason: 'incognito' };
+    }
+    // Foreground consent gate (required for any location write).
+    if (!hasNearbyConsent(user)) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'consent_required', deviceHash: args.deviceHash,
+      });
+      return { success: true, accepted: 0, reason: 'consent_required' };
+    }
+
+    const currentStatus = user.verificationStatus || 'unverified';
+    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+    if (currentStatus !== 'verified' && !isDevBypass) {
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'unverified', deviceHash: args.deviceHash,
+      });
+      return { success: true, accepted: 0, reason: 'unverified' };
+    }
+
+    // Source-specific opt-in gates. Background writes are strictly opt-in
+    // and the gate is checked server-side so a stale / spoofed client can
+    // never write background samples without the user's consent flag.
+    //
+    //   source='slc' : iOS Significant Location Change — requires
+    //                  backgroundLocationEnabled === true.
+    //   source='bg'  : Android Discovery Mode — requires
+    //                  discoveryModeEnabled === true AND
+    //                  discoveryModeExpiresAt > now. Expired windows are
+    //                  rejected so a client whose timer failed to stop
+    //                  cannot keep writing.
+    //   source='fg'  : foreground mirror writes — still require at least
+    //                  one of the background toggles to be on, matching
+    //                  the Phase-1 semantics (fg mirroring from
+    //                  recordLocation already bypasses this mutation).
+    const sourceSet = new Set(args.samples.map((s) => s.source));
+    const hasSlc = sourceSet.has('slc');
+    const hasBg = sourceSet.has('bg');
+    const bgLocationOn = user.backgroundLocationEnabled === true;
+    const discoveryOn =
+      user.discoveryModeEnabled === true &&
+      typeof user.discoveryModeExpiresAt === 'number' &&
+      user.discoveryModeExpiresAt > now;
+
+    // Background-specific consent gate — required for any bg/slc sample.
+    // A user who accepted only the foreground disclosure (nearbyConsent)
+    // cannot have a background sample accepted, even if the toggle on
+    // their user doc is somehow true.
+    if ((hasSlc || hasBg) && !hasBackgroundLocationConsent(user)) {
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][dropped]', {
+          userId,
+          reason: 'bg_consent_required',
+          sampleCount: args.samples.length,
+        });
+      }
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'bg_consent_required', deviceHash: args.deviceHash,
+      });
+      return { success: false, accepted: 0, reason: 'bg_consent_required' };
+    }
+
+    if (hasSlc && !bgLocationOn) {
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][dropped]', {
+          userId,
+          reason: 'background_not_enabled',
+          sampleCount: args.samples.length,
+        });
+      }
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'background_not_enabled', deviceHash: args.deviceHash,
+      });
+      return { success: false, accepted: 0, reason: 'background_not_enabled' };
+    }
+
+    if (hasBg && !discoveryOn) {
+      // Intentionally logged under ANDROID_DISCOVERY so Phase-2 telemetry
+      // is separable from Phase-1 iOS logs.
+      console.log('[ANDROID_DISCOVERY][dropped]', {
+        userId,
+        reason: 'discovery_mode_not_active',
+        discoveryModeEnabled: user.discoveryModeEnabled ?? false,
+        discoveryModeExpiresAt: user.discoveryModeExpiresAt ?? null,
+        now,
+        sampleCount: args.samples.length,
+      });
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'discovery_mode_not_active', deviceHash: args.deviceHash,
+      });
+      return { success: false, accepted: 0, reason: 'discovery_mode_not_active' };
+    }
+
+    // If the batch has neither slc nor bg sources, fall back to checking that
+    // at least one of the background opt-ins is on (defensive; shouldn't
+    // happen in practice because recordLocation handles fg mirror writes).
+    if (!hasSlc && !hasBg && !bgLocationOn && !discoveryOn) {
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][dropped]', {
+          userId,
+          reason: 'no_opt_in',
+          sampleCount: args.samples.length,
+        });
+      }
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: 'no_opt_in', deviceHash: args.deviceHash,
+      });
+      return { success: false, accepted: 0, reason: 'no_opt_in' };
+    }
+
+    // Rate-limit pre-flight. Reserves quota for `samples.length` even if
+    // some samples are later rejected by per-sample validators — this
+    // intentionally bounds compute spent on attacker-controlled batches.
+    const rl = await reserveBgRateLimitSlots(
+      ctx, userId, args.deviceHash || '__unknown__', args.samples.length,
+    );
+    if (!rl.accept) {
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][dropped]', {
+          userId,
+          reason: rl.reason,
+          sampleCount: args.samples.length,
+        });
+      }
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: rl.reason, deviceHash: args.deviceHash,
+      });
+      return { success: false, accepted: 0, reason: rl.reason };
+    }
+
+    const userPrivacyZones = await getPrivacyZonesForUser(ctx, userId);
+
+    // Sort incoming samples by capturedAt ascending so downstream dedupe +
+    // "latest sample wins" semantics are deterministic.
+    const sortedSamples = [...args.samples].sort((a, b) => a.capturedAt - b.capturedAt);
+
+    // Pre-fetch this user's most recent sample for dedupe.
+    const mostRecentExisting = await ctx.db
+      .query('locationSamples')
+      .withIndex('by_user_capturedAt', (q: any) => q.eq('userId', userId))
+      .order('desc')
+      .first();
+    let lastAcceptedAt = mostRecentExisting ? mostRecentExisting.capturedAt : 0;
+
+    let accepted = 0;
+    let droppedStale = 0;
+    let droppedFuture = 0;
+    let droppedDedupe = 0;
+    let droppedPrivacyZone = 0;
+    let duplicateCount = 0;
+    let droppedInvalid = 0;
+    // Fix 3 — count samples rejected by impossible-travel evaluation.
+    let droppedSuspiciousLocation = 0;
+    let latestAcceptedSample: { lat: number; lng: number; capturedAt: number; accuracy?: number } | null = null;
+    // Fix 3 — track the latest accepted location across the loop so each
+    // sample is checked against the running point (not a stale user doc).
+    let lastAcceptedSafetyPoint = getLatestAcceptedLocation(user);
+
+    for (const raw of sortedSamples) {
+      // Basic coord validity (reject NaN / out-of-range).
+      if (
+        !Number.isFinite(raw.lat) || !Number.isFinite(raw.lng) ||
+        raw.lat < -90 || raw.lat > 90 ||
+        raw.lng < -180 || raw.lng > 180 ||
+        !Number.isFinite(raw.capturedAt)
+      ) {
+        droppedInvalid++;
+        if (BG_LOCATION_AUDIT_ENABLED) {
+          console.log('[BG_LOCATION][dropped]', { userId, reason: 'invalid_coord', source: raw.source });
+        }
+        continue;
+      }
+      // Reject samples older than the TTL — can't detect crossings we'd
+      // immediately sweep out anyway.
+      if (now - raw.capturedAt > LOCATION_SAMPLE_TTL_MS) {
+        droppedStale++;
+        continue;
+      }
+      // Reject samples dated in the future (clock skew / replay).
+      if (raw.capturedAt > now + 5 * 60 * 1000) {
+        droppedFuture++;
+        continue;
+      }
+      if (
+        await isPointInsideUserPrivacyZone(
+          ctx,
+          userId,
+          raw.lat,
+          raw.lng,
+          userPrivacyZones,
+        )
+      ) {
+        droppedPrivacyZone++;
+        logPrivacyZoneSkip(`recordLocationBatch:${raw.source}`, userId);
+        continue;
+      }
+      // Fix 3 — evaluate impossible-travel against the running last-accepted
+      // safety point so each sample in the batch is checked in isolation.
+      const locationSafety = evaluateImpossibleTravel(lastAcceptedSafetyPoint, {
+        latitude: raw.lat,
+        longitude: raw.lng,
+        acceptedAt: raw.capturedAt,
+      });
+      if (locationSafety.rejected) {
+        droppedSuspiciousLocation++;
+        await recordLocationSafetyReject(ctx, userId, locationSafety);
+        continue;
+      }
+      const snapped = roundToGrid(raw.lat, raw.lng);
+      const existingSameCapture = await ctx.db
+        .query('locationSamples')
+        .withIndex('by_user_capturedAt', (q: any) =>
+          q.eq('userId', userId).eq('capturedAt', raw.capturedAt),
+        )
+        .collect();
+      const isRetryDuplicate = existingSameCapture.some((sample: any) =>
+        sample.source === raw.source &&
+        Math.abs(sample.lat - snapped.lat) < 0.000001 &&
+        Math.abs(sample.lng - snapped.lng) < 0.000001,
+      );
+      if (isRetryDuplicate) {
+        duplicateCount++;
+        continue;
+      }
+      // Dedupe against last accepted sample for this user.
+      if (raw.capturedAt - lastAcceptedAt < SAMPLE_DEDUPE_MIN_GAP_MS) {
+        droppedDedupe++;
+        continue;
+      }
+
+      await ctx.db.insert('locationSamples', {
+        userId,
+        lat: snapped.lat,
+        lng: snapped.lng,
+        capturedAt: raw.capturedAt,
+        source: raw.source,
+        accuracy: raw.accuracy,
+        expiresAt: raw.capturedAt + LOCATION_SAMPLE_TTL_MS,
+      });
+
+      lastAcceptedAt = raw.capturedAt;
+      accepted++;
+      latestAcceptedSample = {
+        lat: snapped.lat,
+        lng: snapped.lng,
+        capturedAt: raw.capturedAt,
+        accuracy: raw.accuracy,
+      };
+      // Fix 3 — advance the running safety point so subsequent samples in
+      // this batch are evaluated against the most recent accepted location.
+      lastAcceptedSafetyPoint = {
+        latitude: snapped.lat,
+        longitude: snapped.lng,
+        acceptedAt: raw.capturedAt,
+      };
+
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[BG_LOCATION][sample_written]', {
+          userId,
+          source: raw.source,
+          capturedAt: raw.capturedAt,
+        });
+      }
+    }
+
+    if (BG_LOCATION_AUDIT_ENABLED) {
+      const droppedCountForLog =
+        droppedDedupe + droppedStale + droppedFuture + droppedInvalid + droppedPrivacyZone + droppedSuspiciousLocation;
+      const skippedCount = droppedCountForLog + duplicateCount;
+      console.log('[BG_LOCATION][batch_result]', {
+        userId,
+        acceptedCount: accepted,
+        duplicateCount,
+        droppedCount: droppedCountForLog,
+        skippedCount,
+        droppedDedupe,
+        droppedStale,
+        droppedFuture,
+        droppedPrivacyZone,
+        droppedInvalid,
+        droppedSuspiciousLocation,
+        sources,
+      });
+    }
+
+    // Only continue to user-doc update + detection if at least one sample
+    // was accepted. Otherwise the batch is effectively a no-op.
+    if (!latestAcceptedSample) {
+      const droppedCount =
+        droppedDedupe + droppedStale + droppedFuture + droppedInvalid + droppedPrivacyZone + droppedSuspiciousLocation;
+      const reason =
+        droppedSuspiciousLocation > 0
+          ? 'suspicious_location'
+          : droppedPrivacyZone > 0
+            ? 'privacy_zone'
+            : undefined;
+      await emitBgLocationAuditLog(ctx, {
+        userId, sampleCount: args.samples.length, accepted: 0, sources,
+        outcome: 'rejected', reason: reason ?? 'all_samples_dropped', deviceHash: args.deviceHash,
+      });
+      return {
+        success: true,
+        accepted: 0,
+        acceptedCount: 0,
+        droppedStale,
+        droppedFuture,
+        droppedDedupe,
+        droppedPrivacyZone,
+        duplicateCount,
+        droppedInvalid,
+        droppedSuspiciousLocation,
+        droppedCount,
+        skippedCount: droppedCount + duplicateCount,
+        reason,
+      };
+    }
+
+    // Update the user doc's last-known coordinate + activity timestamp using
+    // the latest accepted (snapped) sample. This keeps Nearby map visibility
+    // coherent without requiring the user to open the app. We only update
+    // when the background sample is newer than what's already stored.
+    const userLastUpdated = user.lastLocationUpdatedAt ?? 0;
+    if (latestAcceptedSample.capturedAt > userLastUpdated) {
+      await ctx.db.patch(userId, {
+        latitude: latestAcceptedSample.lat,
+        longitude: latestAcceptedSample.lng,
+        lastActive: Math.max(user.lastActive ?? 0, latestAcceptedSample.capturedAt),
+        lastLocationUpdatedAt: latestAcceptedSample.capturedAt,
+      });
+    }
+
+    // Run windowed detection using the latest accepted sample as the anchor.
+    // Detection looks at locationSamples from other users with capturedAt
+    // within ±10min of this sample. All existing opt-out / block / compat
+    // rules apply.
+    const detection = await detectCrossingsForSample(ctx, {
+      viewerId: userId,
+      viewer: user,
+      lat: latestAcceptedSample.lat,
+      lng: latestAcceptedSample.lng,
+      sampleTime: latestAcceptedSample.capturedAt,
+      accuracy: latestAcceptedSample.accuracy,
+    });
+
+    const droppedCount =
+      droppedDedupe + droppedStale + droppedFuture + droppedInvalid + droppedPrivacyZone + droppedSuspiciousLocation;
+
+    await emitBgLocationAuditLog(ctx, {
+      userId,
+      sampleCount: args.samples.length,
+      accepted,
+      sources,
+      outcome: accepted === args.samples.length ? 'accepted' : 'partial',
+      deviceHash: args.deviceHash,
+    });
+
     return {
       success: true,
-      accepted: 0,
-      skipped: true,
-      reason: 'background_location_disabled',
+      accepted,
+      droppedStale,
+      droppedFuture,
+      droppedDedupe,
+      droppedPrivacyZone,
+      duplicateCount,
+      droppedInvalid,
+      droppedSuspiciousLocation,
+      droppedCount,
+      skippedCount: droppedCount + duplicateCount,
+      acceptedCount: accepted,
+      crossingsWritten: detection.crossingsWritten,
     };
   },
 });
-
-// P2 cleanup: the original recordLocationBatch handler body (sample
-// validation, gating on backgroundLocationEnabled / discoveryModeEnabled,
-// privacy-zone skip, impossible-travel evaluation, locationSamples insert,
-// and detectCrossingsForSample call) was removed in this commit. Restore
-// it from git history if background location is ever re-introduced —
-// alongside re-adding the foreground-only manifest exclusions and a
-// consent re-acceptance gate.
 
 
 // ---------------------------------------------------------------------------
@@ -2781,6 +3393,48 @@ export const cleanupExpiredLocationSamples = internalMutation({
       await ctx.db.delete(row._id);
     }
     return { deleted: expired.length };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// cleanupExpiredBgLocationAuditLog — TTL sweep for bgLocationAuditLog.
+// Referenced by the 'cleanup-expired-bg-location-audit-log' cron (daily).
+// ---------------------------------------------------------------------------
+
+export const cleanupExpiredBgLocationAuditLog = internalMutation({
+  handler: async (ctx) => {
+    const now = Date.now();
+    const expired = await ctx.db
+      .query('bgLocationAuditLog')
+      .withIndex('by_expires')
+      .filter((q) => q.lt(q.field('expiresAt'), now))
+      .collect();
+    for (const row of expired) {
+      await ctx.db.delete(row._id);
+    }
+    return { deleted: expired.length };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// cleanupStaleLocationBatchRateLimit — sweeps any rate-limit row whose
+// daily window expired more than 7 days ago. Short-window rows roll over
+// in place, so they don't need cleanup; this only protects against
+// accumulating rows for users who have stopped sampling entirely.
+// ---------------------------------------------------------------------------
+
+export const cleanupStaleLocationBatchRateLimit = internalMutation({
+  handler: async (ctx) => {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const all = await ctx.db.query('locationBatchRateLimit').collect();
+    let deleted = 0;
+    for (const row of all) {
+      if ((row.updatedAt ?? 0) < cutoff) {
+        await ctx.db.delete(row._id);
+        deleted++;
+      }
+    }
+    return { deleted };
   },
 });
 
