@@ -2,12 +2,16 @@ import React, { useMemo, useRef, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Animated } from 'react-native';
 import Reanimated, { FadeIn } from 'react-native-reanimated';
 import { Image } from 'expo-image';
-import { COLORS, FONT_SIZE, FONT_WEIGHT, moderateScale } from '@/lib/constants';
+import { COLORS, FONT_SIZE, FONT_WEIGHT } from '@/lib/constants';
+import { CHAT_TYPOGRAPHY } from '@/lib/chatTypography';
 import { DEMO_PROFILES } from '@/lib/demoData';
 import type { PresenceStatus } from '@/hooks/usePresence';
 
 // System message marker regex (matches [SYSTEM:subtype] prefix)
 const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+// Default cap for badges/initials (small, decorative). Name/message/time
+// use variant-specific caps via CHAT_TYPOGRAPHY below.
+const TEXT_PROPS = { maxFontSizeMultiplier: 1.2 } as const;
 
 interface ConversationItemProps {
   id: string;
@@ -89,11 +93,21 @@ function ConversationItemComponent({
   }, [hasUnread, highlightAnim]);
 
   // Press feedback animation (subtle, no bounce)
+  // BUG FIX: useNativeDriver MUST be false here. The same <Animated.View>
+  // also animates `backgroundColor` (highlightAnim, JS-driven, since
+  // backgroundColor is not supported by the native driver). Mixing a
+  // native-driven `transform` with a JS-driven `backgroundColor` on the
+  // SAME animated node throws at runtime: "Attempting to run JS driven
+  // animation on animated node that has been moved to 'native' earlier".
+  // That uncaught error propagates to the MainTabs AppErrorBoundary and
+  // shows "Something went wrong", which also unmounts the live Messages/
+  // Discover subscriptions. Running this 80–100ms scale on JS is
+  // imperceptible and removes the conflict.
   const handlePressIn = useCallback(() => {
     Animated.timing(scaleAnim, {
       toValue: 0.98,
       duration: 80,
-      useNativeDriver: true,
+      useNativeDriver: false,
     }).start();
   }, [scaleAnim]);
 
@@ -101,7 +115,7 @@ function ConversationItemComponent({
     Animated.timing(scaleAnim, {
       toValue: 1,
       duration: 100,
-      useNativeDriver: true,
+      useNativeDriver: false,
     }).start();
   }, [scaleAnim]);
 
@@ -215,13 +229,13 @@ function ConversationItemComponent({
             />
           ) : (
             <View style={[styles.avatar, styles.avatarPlaceholder]}>
-              <Text style={styles.avatarInitials}>{avatarInitials}</Text>
+              <Text {...TEXT_PROPS} style={styles.avatarInitials}>{avatarInitials}</Text>
             </View>
           )}
           {isActiveNow && <View style={styles.activeNowDot} />}
           {isPreMatch && (
             <View style={styles.preMatchBadge}>
-              <Text style={styles.preMatchText}>Pre-Match</Text>
+              <Text {...TEXT_PROPS} style={styles.preMatchText}>Pre-Match</Text>
             </View>
           )}
         </TouchableOpacity>
@@ -232,6 +246,7 @@ function ConversationItemComponent({
           <View style={styles.header}>
             <View style={styles.nameRow}>
               <Text
+                maxFontSizeMultiplier={CHAT_TYPOGRAPHY.inboxName.maxFontSizeMultiplier}
                 style={[styles.name, hasUnread && styles.nameUnread]}
                 numberOfLines={1}
               >
@@ -239,12 +254,15 @@ function ConversationItemComponent({
               </Text>
               {otherUserIsVerified && (
                 <View style={styles.verifiedBadge}>
-                  <Text style={styles.verifiedBadgeText}>✓</Text>
+                  <Text {...TEXT_PROPS} style={styles.verifiedBadgeText}>✓</Text>
                 </View>
               )}
             </View>
             {lastMessage && (
-              <Text style={styles.time}>
+              <Text
+                maxFontSizeMultiplier={CHAT_TYPOGRAPHY.inboxMeta.maxFontSizeMultiplier}
+                style={styles.time}
+              >
                 {formatTime(lastMessage.createdAt)}
               </Text>
             )}
@@ -253,6 +271,7 @@ function ConversationItemComponent({
           {/* Bottom row: Message preview + Unread indicator */}
           <View style={styles.messageRow}>
             <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.inboxPreview.maxFontSizeMultiplier}
               style={[styles.message, hasUnread && styles.unreadMessage]}
               numberOfLines={1}
             >
@@ -261,7 +280,7 @@ function ConversationItemComponent({
             {hasUnread && (
               <View style={styles.unreadDot}>
                 {unreadCount > 1 && (
-                  <Text style={styles.unreadDotText}>
+                  <Text {...TEXT_PROPS} style={styles.unreadDotText}>
                     {unreadCount > 9 ? '9+' : unreadCount}
                   </Text>
                 )}
@@ -302,8 +321,9 @@ function areConversationItemPropsEqual(
 export const ConversationItem = React.memo(ConversationItemComponent, areConversationItemPropsEqual);
 ConversationItem.displayName = 'ConversationItem';
 
-// Responsive avatar size (48-52px range for comfortable touch)
-const AVATAR_SIZE = moderateScale(52, 0.3);
+// Fixed avatar size (48 dp) — production chat-app norm; avoids width-based
+// drift from `moderateScale` on narrower devices like OnePlus 360 dp.
+const AVATAR_SIZE = 48;
 
 const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
@@ -318,7 +338,7 @@ const styles = StyleSheet.create({
   },
   innerContainer: {
     flexDirection: 'row',
-    paddingVertical: 14,
+    paddingVertical: 10,
     paddingHorizontal: 16,
     alignItems: 'center',
     // Use spacing instead of visible divider for premium feel
@@ -400,7 +420,8 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   name: {
-    fontSize: 16,
+    fontSize: CHAT_TYPOGRAPHY.inboxName.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.inboxName.lineHeight,
     fontWeight: '600',
     color: COLORS.text,
     flexShrink: 1,
@@ -411,7 +432,8 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
   time: {
-    fontSize: 12,
+    fontSize: CHAT_TYPOGRAPHY.inboxMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.inboxMeta.lineHeight,
     color: COLORS.textMuted,
     marginLeft: 8,
     flexShrink: 0,
@@ -421,12 +443,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   message: {
-    fontSize: 14,
+    fontSize: CHAT_TYPOGRAPHY.inboxPreview.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.inboxPreview.lineHeight,
     color: COLORS.textLight,
     flex: 1,
     marginRight: 8,
     flexShrink: 1,
-    lineHeight: 20,
   },
   unreadMessage: {
     fontWeight: '600',

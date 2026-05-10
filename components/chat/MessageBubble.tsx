@@ -16,10 +16,11 @@
  *   logic, or any callback behavior.
  */
 import React from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable } from 'react-native';
 import Animated, { FadeIn, SlideInUp } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
+import { CHAT_DENSITY, CHAT_TYPOGRAPHY, getChatBubbleMaxWidth } from '@/lib/chatTypography';
 import MediaMessage from './MediaMessage';
 import { ProtectedMediaBubble } from './ProtectedMediaBubble';
 import { SystemMessage, type SystemSubtype } from './SystemMessage';
@@ -45,11 +46,17 @@ const PHASE2 = {
   otherShadow: '#000000',
 } as const;
 
+const BUBBLE_BODY_TEXT_PROPS = {
+  maxFontSizeMultiplier: CHAT_TYPOGRAPHY.bubbleBody.maxFontSizeMultiplier,
+} as const;
+const BUBBLE_META_TEXT_PROPS = {
+  maxFontSizeMultiplier: CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier,
+} as const;
+const INLINE_TIME_PERIOD_RE = /^(.*?)(\s(?:AM|PM))$/;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // LAYOUT CONSTANTS - Tight, modern chat layout (WhatsApp/Telegram density)
 // ═══════════════════════════════════════════════════════════════════════════
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
 // Avatar sizing - larger, premium presence; left-side uses real estate well.
 // AVATAR-PREMIUM: bumped from 26 → 34 so received messages have a clear
 // identity anchor without crowding the bubble.
@@ -60,11 +67,11 @@ const AVATAR_GAP = 6;
 // Bubble constraints - maximize usable width.
 // LEFT-SIDE-USE: bumped from 0.80 → 0.86 so received messages can take
 // closer to ~90% of usable width once avatar gutter is accounted for.
-const MAX_BUBBLE_WIDTH = Math.min(SCREEN_WIDTH * 0.86, 340);
+const MAX_BUBBLE_WIDTH = getChatBubbleMaxWidth();
 
 // Border radius for premium rounded look
-const BUBBLE_RADIUS = 18;
-const BUBBLE_TAIL_RADIUS = 4; // Smaller radius for the tail corner
+const BUBBLE_RADIUS = CHAT_DENSITY.bubbleRadius;
+const BUBBLE_TAIL_RADIUS = CHAT_DENSITY.bubbleTailRadius; // Smaller radius for the tail corner
 
 interface MessageBubbleProps {
   message: {
@@ -167,6 +174,8 @@ interface MessageBubbleProps {
    * change — colors only.
    */
   theme?: 'phase1' | 'phase2';
+  /** Phase-1 Messages-only: compact Truth/Dare system chips without changing Phase-2. */
+  compactTruthDareSystemMessages?: boolean;
 }
 
 // Detect messages that are only emoji (1–8 emoji, no other text)
@@ -212,6 +221,10 @@ function isSystemSubtype(value: unknown): value is SystemSubtype {
   return typeof value === 'string' && SYSTEM_SUBTYPES.has(value as SystemSubtype);
 }
 
+function isTruthDareSystemSubtype(value: unknown): value is SystemSubtype {
+  return value === 'truthdare' || value === 'tod_perm' || value === 'tod_temp';
+}
+
 function MessageBubbleComponent({
   message,
   isOwn,
@@ -234,6 +247,7 @@ function MessageBubbleComponent({
   autoDownloadMedia = false,
   onMediaDownloaded,
   theme = 'phase1',
+  compactTruthDareSystemMessages = false,
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
@@ -247,6 +261,13 @@ function MessageBubbleComponent({
         shadowColor: PHASE2.ownShadow,
         shadowOpacity: 0.32,
         shadowRadius: 6,
+        // P1-CORNER-FIX: base `ownBubble` no longer sets `elevation` because
+        // Android elevation does not honor asymmetric border radii (Phase-1
+        // pink artifact). Restore Phase-2 elevation here so Phase-2 visual
+        // identity is preserved exactly. Phase-2 uses a different shadowColor
+        // and a fully-rounded look that masks the Android rectangular shadow,
+        // so the artifact does not manifest in Phase-2.
+        elevation: 2,
       }
     : null;
   const otherBubbleOverlay = isPhase2
@@ -266,6 +287,25 @@ function MessageBubbleComponent({
   const avatarFallbackOverlay = isPhase2
     ? { backgroundColor: PHASE2.avatarFallbackBg }
     : null;
+  const usePhase1OwnInlineMeta = isOwn && !isPhase2;
+  const usePhase1OwnInlineTimestamp = usePhase1OwnInlineMeta && showTimestamp;
+
+  const renderInlineTime = (timestamp: number) => {
+    const value = formatTime(timestamp);
+    if (!usePhase1OwnInlineMeta) return value;
+
+    const parts = value.match(INLINE_TIME_PERIOD_RE);
+    if (!parts) return value;
+
+    return (
+      <>
+        {parts[1]}
+        <Text {...BUBBLE_META_TEXT_PROPS} style={styles.phase1OwnInlinePeriod}>
+          {parts[2]}
+        </Text>
+      </>
+    );
+  };
 
   // Entry animation: subtle fade + slide up for new messages
   const enteringAnimation = FadeIn.duration(180).withInitialValues({
@@ -311,7 +351,7 @@ function MessageBubbleComponent({
           disabled={!onAvatarPress}
         >
           <View style={[styles.avatar, styles.avatarFallback, avatarFallbackOverlay]}>
-            <Text style={styles.avatarInitials}>{initials}</Text>
+            <Text {...BUBBLE_BODY_TEXT_PROPS} style={styles.avatarInitials}>{initials}</Text>
           </View>
         </TouchableOpacity>
       );
@@ -352,6 +392,7 @@ function MessageBubbleComponent({
       <SystemMessage
         text={message.content}
         subtype={isSystemSubtype(message.systemSubtype) ? message.systemSubtype : undefined}
+        compact={compactTruthDareSystemMessages && isTruthDareSystemSubtype(message.systemSubtype)}
       />
     );
   }
@@ -385,6 +426,7 @@ function MessageBubbleComponent({
         <SystemMessage
           text={displayText}
           subtype={isSystemSubtype(subtype) ? subtype : undefined}
+          compact={compactTruthDareSystemMessages && isTruthDareSystemSubtype(subtype)}
         />
       );
     }
@@ -431,17 +473,17 @@ function MessageBubbleComponent({
             ) : isSending ? (
               <View style={styles.pendingRow}>
                 <ActivityIndicator size="small" color="#FFFFFF" />
-                <Text style={styles.pendingSubtext}>Sending…</Text>
+                <Text {...BUBBLE_BODY_TEXT_PROPS} style={styles.pendingSubtext}>Sending…</Text>
               </View>
             ) : hasFailed ? (
               <View style={styles.pendingRow}>
                 <Ionicons name="alert-circle" size={16} color="#FCA5A5" />
-                <Text style={styles.pendingSubtext}>Tap to retry</Text>
+                <Text {...BUBBLE_BODY_TEXT_PROPS} style={styles.pendingSubtext}>Tap to retry</Text>
               </View>
             ) : (
               <View style={styles.pendingRow}>
                 <ActivityIndicator size="small" color="#FFFFFF" />
-                <Text style={styles.pendingSubtext}>{pendingLabel}</Text>
+                <Text {...BUBBLE_BODY_TEXT_PROPS} style={styles.pendingSubtext}>{pendingLabel}</Text>
               </View>
             )}
           </View>
@@ -473,7 +515,7 @@ function MessageBubbleComponent({
         <View style={[styles.bubble, styles.ownBubble, ownBubbleOverlay, styles.pendingBubble]}>
           <View style={styles.pendingContent}>
             <ActivityIndicator size="small" color={COLORS.white} />
-            <Text style={styles.pendingText}>{pendingLabel}</Text>
+            <Text {...BUBBLE_BODY_TEXT_PROPS} style={styles.pendingText}>{pendingLabel}</Text>
           </View>
         </View>
       </View>
@@ -525,7 +567,7 @@ function MessageBubbleComponent({
         {!message.isExpired && (showTimestamp || isOwn) && (
           <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
             {showTimestamp && (
-              <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
+              <Text {...BUBBLE_META_TEXT_PROPS} style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
                 {formatTime(message.createdAt)}
               </Text>
             )}
@@ -589,7 +631,7 @@ function MessageBubbleComponent({
             {(showTimestamp || isOwn) && (
               <View style={[styles.imageFooter, !showTimestamp && styles.statusOnlyFooter]}>
                 {showTimestamp && (
-                  <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
+                  <Text {...BUBBLE_META_TEXT_PROPS} style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
                     {formatTime(message.createdAt)}
                   </Text>
                 )}
@@ -656,12 +698,12 @@ function MessageBubbleComponent({
         <View style={[styles.bubble, styles.dareBubble, isOwn && styles.ownBubble, isOwn && ownBubbleOverlay]}>
           <View style={styles.dareHeader}>
             <Ionicons name="dice" size={20} color={COLORS.white} />
-            <Text style={styles.dareTitle}>
+            <Text {...BUBBLE_BODY_TEXT_PROPS} style={styles.dareTitle}>
               {isOwn ? 'Dare Sent' : `${otherUserName || 'Someone'} sent a dare`}
             </Text>
           </View>
-          <Text style={styles.dareContent}>{message.content}</Text>
-          <Text style={[styles.time, styles.dareTime, isOwn ? ownTimeOverlay : timeOverlay]}>{formatTime(message.createdAt)}</Text>
+          <Text {...BUBBLE_BODY_TEXT_PROPS} style={styles.dareContent}>{message.content}</Text>
+          <Text {...BUBBLE_META_TEXT_PROPS} style={[styles.time, styles.dareTime, isOwn ? ownTimeOverlay : timeOverlay]}>{formatTime(message.createdAt)}</Text>
         </View>
       </Animated.View>
     );
@@ -687,7 +729,7 @@ function MessageBubbleComponent({
         !isEmojiOnly && (isOwn ? ownBubbleOverlay : otherBubbleOverlay),
         isEmojiOnly && styles.emojiBubble,
       ]}>
-        <Text style={[
+        <Text {...BUBBLE_BODY_TEXT_PROPS} style={[
           styles.text,
           isOwn && styles.ownText,
           !isEmojiOnly && (isOwn ? ownTextOverlay : textOverlay),
@@ -695,14 +737,15 @@ function MessageBubbleComponent({
           // INLINE-TIME: reserve space at bottom-right of the bubble for the
           // floating timestamp/tick (WhatsApp-style). Skip for emoji-only.
           (showTimestamp || isOwn) && !isEmojiOnly && styles.textWithInlineMeta,
+          (showTimestamp || isOwn) && !isEmojiOnly && usePhase1OwnInlineTimestamp && styles.phase1OwnTextWithInlineMeta,
         ]}>
           {message.content}
         </Text>
         {(showTimestamp || isOwn) && !isEmojiOnly && (
-          <View style={styles.inlineMeta}>
+          <View style={[styles.inlineMeta, usePhase1OwnInlineTimestamp && styles.phase1OwnInlineMeta]}>
             {showTimestamp && (
-              <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
-                {formatTime(message.createdAt)}
+              <Text {...BUBBLE_META_TEXT_PROPS} style={[styles.time, usePhase1OwnInlineMeta && styles.phase1OwnInlineTime, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
+                {renderInlineTime(message.createdAt)}
               </Text>
             )}
             {isOwn && (() => {
@@ -721,7 +764,7 @@ function MessageBubbleComponent({
         {isEmojiOnly && (showTimestamp || isOwn) && (
           <View style={styles.footer}>
             {showTimestamp && (
-              <Text style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
+              <Text {...BUBBLE_META_TEXT_PROPS} style={[styles.time, isOwn && styles.ownTime, isOwn ? ownTimeOverlay : timeOverlay]}>
                 {formatTime(message.createdAt)}
               </Text>
             )}
@@ -788,6 +831,7 @@ function areMessageBubblePropsEqual(
     // PHASE-2 PREMIUM: theme prop drives palette overlays — must re-render
     // when toggled (Phase-1 callers always omit it so this is a no-op).
     prev.theme === next.theme &&
+    prev.compactTruthDareSystemMessages === next.compactTruthDareSystemMessages &&
     prevMedia?.localUri === nextMedia?.localUri &&
     prevMedia?.mediaType === nextMedia?.mediaType &&
     prevMedia?.timer === nextMedia?.timer &&
@@ -857,14 +901,22 @@ const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
   bubble: {
     maxWidth: MAX_BUBBLE_WIDTH,
-    paddingHorizontal: 13,
-    paddingVertical: 9,
+    paddingHorizontal: CHAT_DENSITY.bubblePaddingH,
+    paddingVertical: CHAT_DENSITY.bubblePaddingV,
     borderRadius: BUBBLE_RADIUS,
     backgroundColor: COLORS.backgroundDark,
   },
   // PREMIUM-BUBBLE-PAIR (reverted): Own bubble deep-rose #E94E77 — brand-on
   // rose that feels sophisticated against the clean-white received bubble.
   // Matching shadow tint gives it subtle premium depth.
+  // P1-CORNER-FIX: Android `elevation` does not honor asymmetric border radii
+  // (the bubble has borderRadius 18 on three corners and borderBottomRightRadius 4
+  // for the tail). Combined with shadowColor '#E94E77', Android renders a faint
+  // pink rectangular shadow that bleeds past the rounded corners — visible as a
+  // 90° edge / pink rectangle on large outgoing bubbles. iOS uses
+  // shadowColor/Offset/Opacity/Radius which auto-compute a shape-aware shadowPath,
+  // so iOS keeps its premium tint. Phase-2 restores `elevation` via
+  // `ownBubbleOverlay` below, preserving its visual identity unchanged.
   ownBubble: {
     backgroundColor: '#E94E77',
     borderBottomRightRadius: BUBBLE_TAIL_RADIUS,
@@ -872,7 +924,6 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.18,
     shadowRadius: 4,
-    elevation: 2,
   },
   // PREMIUM-BUBBLE-PAIR (reverted): Received bubble clean white with a
   // hairline border — iMessage-style premium ghost bubble that pairs
@@ -980,9 +1031,9 @@ const styles = StyleSheet.create({
   // TEXT - Readable, clean typography
   // ═══════════════════════════════════════════════════════════════════════════
   text: {
-    fontSize: 16,
+    fontSize: CHAT_TYPOGRAPHY.bubbleBody.fontSize,
     color: COLORS.text,
-    lineHeight: 22,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleBody.lineHeight,
   },
   ownText: {
     color: COLORS.white,
@@ -1005,6 +1056,10 @@ const styles = StyleSheet.create({
     paddingRight: 52,
     paddingBottom: 2,
   },
+  phase1OwnTextWithInlineMeta: {
+    paddingRight: 66,
+    paddingBottom: 4,
+  },
   inlineMeta: {
     position: 'absolute',
     right: 8,
@@ -1013,10 +1068,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 3,
   },
+  phase1OwnInlineMeta: {
+    right: 10,
+    bottom: 5,
+    gap: 5,
+  },
   time: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: COLORS.textMuted,
     letterSpacing: -0.2,
+  },
+  phase1OwnInlineTime: {
+    fontSize: 10,
+    lineHeight: 13,
+    letterSpacing: 0,
+  },
+  phase1OwnInlinePeriod: {
+    fontSize: 9,
+    lineHeight: 11,
+    fontWeight: '400',
   },
   ownTime: {
     color: 'rgba(255, 255, 255, 0.55)',
@@ -1043,19 +1114,20 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   dareTitle: {
-    fontSize: 14,
+    fontSize: CHAT_TYPOGRAPHY.bubbleBody.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleBody.lineHeight,
     fontWeight: '600',
     color: COLORS.white,
     marginLeft: 8,
   },
   dareContent: {
-    fontSize: 15,
+    fontSize: CHAT_TYPOGRAPHY.bubbleBody.fontSize,
     color: COLORS.white,
-    lineHeight: 21,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleBody.lineHeight,
     marginBottom: 6,
   },
   dareTime: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
     color: 'rgba(255, 255, 255, 0.55)',
   },
 });

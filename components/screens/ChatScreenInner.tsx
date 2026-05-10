@@ -204,7 +204,9 @@ type BottleSpinSessionView = {
 
 const PHOTO_UPLOAD_COMPRESSION_THRESHOLD_BYTES = 4 * 1024 * 1024;
 const PHOTO_UPLOAD_MAX_WIDTH = 1600;
-const MAX_MESSAGE_CONTENT_LENGTH = 5000;
+const MAX_MESSAGE_CONTENT_LENGTH = 400;
+const SYSTEM_MESSAGE_ROW_RE = /^\[SYSTEM:[a-z_]+\]/i;
+const EXPIRED_MEDIA_ROW_HIDE_AFTER_MS = 60_000;
 
 const asConversationId = (value: string): ConversationId => value as ConversationId;
 const asMessageId = (value: string): MessageId => value as MessageId;
@@ -215,6 +217,23 @@ const getErrorMessage = (error: unknown, fallback: string) =>
 
 const isAbortError = (error: unknown) =>
   error instanceof Error && error.name === 'AbortError';
+
+const isNonBubbleMessageRow = (message: RenderMessage | undefined | null): boolean => {
+  if (!message) return false;
+  if (message.type === 'system') return true;
+  if (message.type === 'text' && SYSTEM_MESSAGE_ROW_RE.test(message.content)) {
+    return true;
+  }
+  if (
+    (message.isProtected || message.mediaId) &&
+    message.isExpired &&
+    typeof message.expiredAt === 'number' &&
+    Date.now() - message.expiredAt > EXPIRED_MEDIA_ROW_HIDE_AFTER_MS
+  ) {
+    return true;
+  }
+  return false;
+};
 
 const getSafeLogId = (value?: string | null): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value.slice(-6) : undefined;
@@ -949,24 +968,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         .catch((err) => {
           if (__DEV__) console.warn('[TD_END_TRACE] cleanup_expired_failed', err);
         });
-
-      // Show appropriate system message
-      const messages: Record<string, string> = {
-        invite_expired: 'Truth or Dare invite expired',
-        not_started: 'Truth or Dare was not started in time',
-        timeout: 'Truth or Dare ended due to inactivity',
-      };
-      const msg = messages[gameSession.endedReason];
-      if (msg) {
-        sendMessage({
-          conversationId: asConversationId(conversationId),
-          authUserId: userId,
-          content: `[SYSTEM:truthdare]${msg}`,
-          type: 'text',
-        }).catch((err) => {
-          if (__DEV__) console.warn('[TD_SYSTEM_MSG] Failed:', err);
-        });
-      }
     }
 
     // TD-LIFECYCLE: Close invite modal when game becomes active
@@ -1252,15 +1253,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               conversationId,
             });
             if (result.success) {
-              // Send system message announcing game start
-              sendMessage({
-                conversationId: asConversationId(conversationId),
-                authUserId: userId,
-                content: '[SYSTEM:truthdare]Game started!',
-                type: 'text',
-              }).catch((err) => {
-                if (__DEV__) console.warn('[TD_SYSTEM_MSG] Failed:', err);
-              });
               setShowTruthDareGame(true);
             }
           } catch (err) {
@@ -1273,8 +1265,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         return;
       }
 
-      // Game is started - open the modal normally
-      setShowTruthDareGame(true);
+      const turnPhase = gameSession.turnPhase ?? 'idle';
+      const spinTurnRole = gameSession.spinTurnRole || 'inviter';
+
+      if (turnPhase === 'idle') {
+        if (myRole && spinTurnRole === myRole) {
+          setShowTruthDareGame(true);
+        }
+        return;
+      }
+
+      if (turnPhase === 'choosing') {
+        if (myRole && gameSession.currentTurnRole === myRole) {
+          setShowTruthDareGame(true);
+        }
+        return;
+      }
+
       return;
     }
 
@@ -1318,22 +1325,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       });
       if (__DEV__) console.log('[TD_MESSAGES][mutation_success] sendBottleSpinInvite');
       setShowTruthDareInvite(false);
-
-      // Send system message about invite (neutral phrasing that works for both parties)
-      // Using inviter's name so recipient sees "[Name] wants to play..." and sender sees their own name
-      const inviterName = currentUser?.name || 'Someone';
-      const markedMessage = `[SYSTEM:truthdare]${inviterName} wants to play Truth or Dare!`;
-      await sendMessage({
-        conversationId: asConversationId(conversationId),
-        authUserId: userId,
-        content: markedMessage,
-        type: 'text',
-      });
     } catch (error) {
       if (__DEV__) console.warn('[TD_MESSAGES][mutation_error] sendBottleSpinInvite', error);
       Alert.alert('Error', getErrorMessage(error, 'Failed to send invite'));
     }
-  }, [userId, conversationId, truthDareOtherUserId, sendInviteMutation, currentUser, sendMessage, ensureChatActionAllowed]);
+  }, [userId, conversationId, truthDareOtherUserId, sendInviteMutation, ensureChatActionAllowed]);
 
   // Respond to game invite
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
@@ -1346,28 +1342,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         conversationId,
         accept,
       });
-
-      // Send system message about response (neutral phrasing)
-      const responderName = currentUser?.name || 'Someone';
-      const responseText = accept
-        ? `${responderName} is ready to play! Game starting...`
-        : `${responderName} declined the game invite`;
-      const markedMessage = `[SYSTEM:truthdare]${responseText}`;
-      await sendMessage({
-        conversationId: asConversationId(conversationId),
-        authUserId: userId,
-        content: markedMessage,
-        type: 'text',
-      });
-
-      // If accepted, open the game
-      if (accept) {
-        setShowTruthDareGame(true);
-      }
     } catch (error) {
       Alert.alert('Error', getErrorMessage(error, 'Failed to respond to invite'));
     }
-  }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage, ensureChatActionAllowed]);
+  }, [userId, conversationId, respondToInviteMutation, ensureChatActionAllowed]);
 
   // End game (called from BottleSpinGame)
   // TD_END_TRACE: centralised instrumentation so any future accidental
@@ -1404,8 +1382,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [isDemo, userId, conversationId, endGameMutation]);
 
-  // Handler to send Truth/Dare result message to chat
-  // Uses system message style: demo mode uses type:'system', Convex uses [SYSTEM:truthdare] marker
+  // Handler for BottleSpinGame result callbacks. Live mode writes canonical
+  // T/D chips from the backend game mutations; this callback only bridges
+  // demo messages and the explicit "end game" action.
   const handleSendTruthDareResult = useCallback(async (message: string) => {
     if (!conversationId) return;
     if (!ensureChatActionAllowed()) return;
@@ -1436,21 +1415,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           createdAt: Date.now(),
         };
         addDemoMessage(conversationId, demoSystemMessage);
-      } else if (userId) {
-        // Convex mode: prefix with hidden marker (stripped by MessageBubble)
-        const markedMessage = `[SYSTEM:truthdare]${message}`;
-        // MSG-001 FIX: Use authUserId for server-side verification
-        await sendMessage({
-          conversationId: asConversationId(conversationId),
-          authUserId: userId,
-          content: markedMessage,
-          type: 'text',
-        });
       }
     } catch {
       // Silent fail - game continues even if message fails
     }
-  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage, handleEndGame, ensureChatActionAllowed]);
+  }, [conversationId, isDemo, addDemoMessage, handleEndGame, ensureChatActionAllowed]);
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
@@ -1789,9 +1758,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       updateOptimisticTextMessage(message.clientMessageId, (current) => ({
         ...current,
         optimisticStatus: 'failed',
-        errorMessage: `Messages can be up to ${MAX_MESSAGE_CONTENT_LENGTH.toLocaleString()} characters.`,
+        errorMessage: 'Message is too long.',
       }));
-      Alert.alert('Message Too Long', `Messages can be up to ${MAX_MESSAGE_CONTENT_LENGTH.toLocaleString()} characters.`);
+      Alert.alert('Message Too Long', 'Message is too long.');
       return false;
     }
 
@@ -1887,7 +1856,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       return;
     }
     if (normalizedText.length > MAX_MESSAGE_CONTENT_LENGTH) {
-      Alert.alert('Message Too Long', `Messages can be up to ${MAX_MESSAGE_CONTENT_LENGTH.toLocaleString()} characters.`);
+      Alert.alert('Message Too Long', 'Message is too long.');
       return;
     }
 
@@ -2791,6 +2760,47 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         (!activeConversation.isPreMatch && currentUser.subscriptionTier !== 'free')
       : false;
 
+  const isTruthDarePendingSentByMe =
+    !isDemo && gameSession?.state === 'pending' && isTruthDareInviter;
+  const isTruthDarePendingReceivedByMe =
+    !isDemo && gameSession?.state === 'pending' && isTruthDareInvitee;
+  const isTruthDareActive = !isDemo && gameSession?.state === 'active';
+  const isTruthDareStarted = isTruthDareActive && !!gameSessionView?.gameStartedAt;
+  const isTruthDareAwaitingStart = isTruthDareActive && !gameSessionView?.gameStartedAt;
+  const isTruthDareMyStartAction = isTruthDareAwaitingStart && isTruthDareInviter;
+  const currentTruthDareSpinRole = truthDareSpinTurnRole || 'inviter';
+  const isTruthDareMySpinAction =
+    isTruthDareStarted &&
+    gameSessionView?.turnPhase === 'idle' &&
+    !!truthDareRole &&
+    currentTruthDareSpinRole === truthDareRole;
+  const isTruthDareMyChooseAction =
+    isTruthDareStarted &&
+    gameSessionView?.turnPhase === 'choosing' &&
+    !!truthDareRole &&
+    gameSessionView?.currentTurnRole === truthDareRole;
+  const isTruthDareWaitingAction =
+    (isTruthDareAwaitingStart && isTruthDareInvitee) ||
+    (isTruthDareStarted &&
+      !isTruthDareMySpinAction &&
+      !isTruthDareMyChooseAction &&
+      (gameSessionView?.turnPhase === 'idle' ||
+        gameSessionView?.turnPhase === 'spinning' ||
+        gameSessionView?.turnPhase === 'choosing'));
+  const truthDareHeaderButtonLabel = isTruthDarePendingSentByMe
+    ? 'Sent'
+    : isTruthDareMyStartAction
+      ? 'Start'
+      : isTruthDareMySpinAction
+        ? 'Spin'
+        : isTruthDareMyChooseAction
+          ? 'Choose'
+          : isTruthDareWaitingAction
+            ? 'Waiting'
+            : 'T/D';
+  const isTruthDareHeaderButtonDisabled =
+    isTruthDarePendingSentByMe || isTruthDareWaitingAction;
+
   return (
     <View style={styles.container}>
       {/* LOCKED: P1 chat header avatar + open profile. Do not modify without explicit approval. */}
@@ -2909,10 +2919,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             // edges always registers a press on the visible T/D button.
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
             style={styles.gameButton}
-            disabled={!isDemo && gameSession?.state === 'pending' && isTruthDareInviter}
+            disabled={isTruthDareHeaderButtonDisabled}
             testID="chat-header-truthdare-button"
             accessibilityRole="button"
-            accessibilityLabel="Truth or Dare"
+            accessibilityLabel={`Truth or Dare ${truthDareHeaderButtonLabel}`}
           >
             <View style={[
               styles.truthDareButton,
@@ -2930,19 +2940,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 style={styles.truthDareLabel}
                 numberOfLines={1}
               >
-                {/* TD-UX: Show contextual status on button */}
-                {!isDemo && gameSession?.state === 'pending' && isTruthDareInviter
-                  ? 'Sent'
-                  : !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && isTruthDareInviter
-                    ? 'Start!'
-                    : 'T/D'}
+                {truthDareHeaderButtonLabel}
               </Text>
               {/* Pending invite indicator (for invitee) */}
-              {gameSession?.state === 'pending' && isTruthDareInvitee && (
+              {isTruthDarePendingReceivedByMe && (
                 <View style={styles.truthDareBadge} />
               )}
               {/* TD-UX: Badge dot for inviter when ready to start */}
-              {!isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && isTruthDareInviter && (
+              {isTruthDareMyStartAction && (
                 <View style={styles.truthDareStartBadge} />
               )}
             </View>
@@ -3028,12 +3033,19 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               msgSenderId === currentUserId
             );
 
-            // AVATAR GROUPING: Determine if this is the last message in a sender group
-            // Show avatar only on the LAST message of consecutive messages from the same sender
-            const nextMessage = displayMessages[index + 1];
-            const isLastInGroup = !nextMessage || nextMessage.senderId !== item.senderId;
-            // Show avatar only for received messages (not own) and only on last in group
-            const showAvatar = !isMessageOwn && isLastInGroup;
+            // AVATAR GROUPING: system/hidden rows do not consume grouping.
+            // Show avatar only on the LAST visible received bubble in a run.
+            let nextBubbleIndex = index + 1;
+            while (
+              nextBubbleIndex < displayMessages.length &&
+              isNonBubbleMessageRow(displayMessages[nextBubbleIndex])
+            ) {
+              nextBubbleIndex += 1;
+            }
+            const nextVisibleBubble = displayMessages[nextBubbleIndex];
+            const currentIsNonBubble = isNonBubbleMessageRow(item);
+            const isLastInGroup = !nextVisibleBubble || nextVisibleBubble.senderId !== item.senderId;
+            const showAvatar = !isMessageOwn && !currentIsNonBubble && isLastInGroup;
 
             // SECURE-MEDIA-FIX: Merge backend viewMode into protectedMedia for consistent mode
             // This ensures both sender and receiver use the same viewMode from the single source of truth
@@ -3104,6 +3116,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                   // bypass the gate internally.
                   requireMediaDownloadBeforeOpen
                   autoDownloadMedia={false}
+                  compactTruthDareSystemMessages
                 />
                 {isMessageOwn && optimisticStatus === 'sending' && (
                   <View style={styles.optimisticStatusRow}>
@@ -3171,6 +3184,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           keyboardDismissMode="interactive"
           onContentSizeChange={onContentSizeChange}
         />
+          {showTypingIndicator && (
+            <View
+              pointerEvents="none"
+              style={[
+                styles.typingIndicatorFloating,
+                { bottom: composerHeight + composerBottomPadding + SPACING.xs },
+              ]}
+            >
+              <View style={styles.typingIndicatorBar}>
+                <View style={styles.typingIndicatorDot} />
+                <Text {...TEXT_PROPS} style={styles.typingIndicatorText}>
+                  {otherUserName} is typing…
+                </Text>
+              </View>
+            </View>
+          )}
+
           {/* ─── COMPOSER (fixed to bottom of chatArea — sibling of FlashList) ─── */}
           <View
             onLayout={onComposerLayout}
@@ -3179,14 +3209,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             {/* COOLDOWN-UI: persistent pill removed — replaced with a floating
                 top notification rendered absolutely below the header (see
                 cooldownToastFloating below). Composer no longer reserves space. */}
-            {showTypingIndicator && (
-              <View style={styles.typingIndicatorBar}>
-                <View style={styles.typingIndicatorDot} />
-                <Text {...TEXT_PROPS} style={styles.typingIndicatorText}>
-                  {otherUserName} is typing…
-                </Text>
-              </View>
-            )}
             {/* L2 FIX: Voice messages only work in demo mode - hide from production UI */}
             <MessageInput
                 onSend={handleSend}
@@ -3420,6 +3442,7 @@ const styles = StyleSheet.create({
   // pure-white app background) — like WhatsApp/iMessage chat surface.
   chatArea: {
     flex: 1,
+    position: 'relative' as const,
     backgroundColor: '#F5F5F7',
   },
   composerWrapper: {
@@ -3699,13 +3722,29 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     lineHeight: lineHeight(FONT_SIZE.sm, 1.25),
   },
+  typingIndicatorFloating: {
+    position: 'absolute' as const,
+    left: SPACING.md,
+    right: SPACING.md,
+    zIndex: 20,
+    elevation: 20,
+    alignItems: 'flex-start' as const,
+  },
   typingIndicatorBar: {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     gap: SPACING.xs,
-    paddingHorizontal: SPACING.base,
+    alignSelf: 'flex-start' as const,
+    paddingHorizontal: SPACING.sm + SPACING.xxs,
     paddingVertical: SPACING.xs,
-    backgroundColor: COLORS.background,
+    borderRadius: SIZES.radius.full,
+    backgroundColor: 'rgba(255, 255, 255, 0.96)',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
   },
   typingIndicatorDot: {
     width: SPACING.xs,

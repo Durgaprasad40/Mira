@@ -10,7 +10,7 @@
 
 import { v } from 'convex/values';
 import { query, mutation, internalMutation, internalQuery, MutationCtx, QueryCtx } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { Doc, Id } from './_generated/dataModel';
 import { validateSessionToken, resolveUserIdByAuthId, getPhase2DisplayName } from './helpers';
 import { shouldCreatePhase2PrivateMessagesNotification } from './phase2NotificationPrefs';
 import { markPrivateMessageNotificationsForConversation } from './privateNotifications';
@@ -133,6 +133,39 @@ function getPrivateConversationPreviewContent(
     return 'Secure media expired';
   }
   return message.content || null;
+}
+
+function isUnavailableUser(user: Doc<'users'> | null | undefined): boolean {
+  return (
+    !user ||
+    user.deletedAt !== undefined ||
+    user.isActive === false ||
+    user.isBanned === true
+  );
+}
+
+function buildClosedPrivateConversationPayload(
+  conversation: Doc<'privateConversations'>,
+  otherParticipantId: Id<'users'> | null
+) {
+  return {
+    id: conversation._id,
+    matchId: conversation.matchId,
+    participantId: otherParticipantId,
+    participantName: 'Conversation closed',
+    participantPhotoUrl: null,
+    participantLastActive: 0,
+    participantIntentKey: null,
+    unreadCount: 0,
+    connectionSource: conversation.connectionSource || 'desire_match',
+    createdAt: conversation.createdAt,
+    isBlocked: false,
+    isPhotoBlurred: false,
+    photoAccessStatus: 'none' as const,
+    canViewClearPhoto: false,
+    participantDeleted: true,
+    terminalState: 'user_removed' as const,
+  };
 }
 
 // Helper: Check if either user has blocked the other (shared across phases)
@@ -301,7 +334,7 @@ export const getUserPrivateConversations = query({
 
         // Get other participant's user record
         const otherUser = await ctx.db.get(otherParticipantId);
-        if (!otherUser) return null;
+        if (!otherUser || isUnavailableUser(otherUser)) return null;
 
         // Get other participant's Phase-2 private profile for display name
         const otherPrivateProfile = await ctx.db
@@ -507,6 +540,9 @@ export const getPrivateMessages = query({
 
     // P0-SAFETY: Block check - blocked users cannot read message history
     const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+    if (!otherParticipantId) {
+      return [];
+    }
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
       console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to read messages:', {
         userId: (userId as string)?.slice(-8),
@@ -514,6 +550,15 @@ export const getPrivateMessages = query({
         conversationId: (conversationId as string)?.slice(-8),
       });
       return []; // Fail closed - return empty, do not leak message history
+    }
+    const otherUser = await ctx.db.get(otherParticipantId);
+    if (isUnavailableUser(otherUser)) {
+      console.log('[P2_MSG_CLOSED] Unavailable participant attempted message read:', {
+        userId: (userId as string)?.slice(-8),
+        otherUserId: (otherParticipantId as string)?.slice(-8),
+        conversationId: (conversationId as string)?.slice(-8),
+      });
+      return [];
     }
 
     // Build query
@@ -664,9 +709,18 @@ export const markPrivateMessagesRead = mutation({
 
     // P0-SAFETY: Block check - blocked users cannot mark messages as read
     const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+    if (!otherParticipantId) {
+      return { success: true, markedCount: 0 };
+    }
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
       console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to mark messages read');
       throw new Error('Access denied');
+    }
+    {
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) {
+        return { success: true, markedCount: 0 };
+      }
     }
 
     // Get all unread messages sent by others
@@ -780,6 +834,14 @@ export const sendPrivateMessage = mutation({
     if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
       throw new Error('Cannot send message');
     }
+    if (!recipientId) {
+      throw new Error('Conversation closed');
+    }
+
+    const recipient = await ctx.db.get(recipientId);
+    if (isUnavailableUser(recipient)) {
+      throw new Error('Conversation closed');
+    }
 
     // Rate limiting: 10 messages per minute per sender per conversation
     // T/D SYSTEM MESSAGES: Skip rate limiting for system messages (game events)
@@ -802,7 +864,7 @@ export const sendPrivateMessage = mutation({
 
     // Verify sender exists and is active
     const sender = await ctx.db.get(senderId);
-    if (!sender || !sender.isActive) {
+    if (isUnavailableUser(sender)) {
       throw new Error('Sender not found or inactive');
     }
 
@@ -998,13 +1060,20 @@ export const getPrivateConversation = query({
     // Get other participant info
     const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
     if (!otherParticipantId) {
-      return null;
+      return buildClosedPrivateConversationPayload(conversation, null);
     }
 
     // Check block status
     const isBlocked = await isBlockedBidirectional(ctx, userId, otherParticipantId);
 
     const otherUser = await ctx.db.get(otherParticipantId);
+    if (isUnavailableUser(otherUser)) {
+      return buildClosedPrivateConversationPayload(
+        conversation,
+        otherParticipantId
+      );
+    }
+
     const otherPrivateProfile = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', otherParticipantId))
@@ -1127,7 +1196,28 @@ export const getTotalUnreadCount = query({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
-    return participations.reduce((total, p) => total + p.unreadCount, 0);
+    let totalUnreadCount = 0;
+    for (const participation of participations) {
+      if (participation.isHidden === true || participation.unreadCount <= 0) {
+        continue;
+      }
+      const conversation = await ctx.db.get(participation.conversationId);
+      if (!conversation || !conversation.participants.includes(userId)) {
+        continue;
+      }
+      const otherParticipantId = conversation.participants.find(
+        (pid) => pid !== userId
+      );
+      if (!otherParticipantId) continue;
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) continue;
+      if (await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+        continue;
+      }
+      totalUnreadCount += participation.unreadCount;
+    }
+
+    return totalUnreadCount;
   },
 });
 
@@ -1175,6 +1265,8 @@ export const getPrivateUnreadConversationCount = query({
 
       const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
       if (!otherParticipantId) continue;
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) continue;
       if (await isBlockedBidirectional(ctx, userId, otherParticipantId)) continue;
 
       const realUnreadCount = await computeUnreadCountFromPrivateMessages(
@@ -1231,9 +1323,18 @@ export const markPrivateMessagesDelivered = mutation({
 
     // P0-SAFETY: Block check - blocked users cannot mark messages as delivered
     const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+    if (!otherParticipantId) {
+      return { success: true, count: 0 };
+    }
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
       console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to mark messages delivered');
       return { success: false, count: 0 };
+    }
+    {
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) {
+        return { success: true, count: 0 };
+      }
     }
 
     // Get all messages from OTHER user that are not yet delivered
@@ -1296,6 +1397,21 @@ export const markAllPrivateMessagesDelivered = mutation({
 
     // Mark all undelivered messages in each conversation
     for (const participation of participations) {
+      if (participation.isHidden === true) continue;
+      const conversation = await ctx.db.get(participation.conversationId);
+      if (!conversation || !conversation.participants.includes(userId)) {
+        continue;
+      }
+      const otherParticipantId = conversation.participants.find(
+        (pid) => pid !== userId
+      );
+      if (!otherParticipantId) continue;
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) continue;
+      if (await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+        continue;
+      }
+
       const undeliveredMessages = await ctx.db
         .query('privateMessages')
         .withIndex('by_conversation', (q) => q.eq('conversationId', participation.conversationId))
@@ -1522,6 +1638,12 @@ export const openPrivateSecureMedia = mutation({
     ) {
       return { status: 'not_authorized' as const };
     }
+    if (otherParticipantId) {
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) {
+        return { status: 'not_authorized' as const };
+      }
+    }
 
     if (!message.imageStorageId) {
       return { status: 'no_media' as const };
@@ -1663,6 +1785,13 @@ export const markPrivateSecureMediaViewed = mutation({
     if (!conversation || !conversation.participants.includes(userId)) {
       return { success: false, error: 'not_authorized' };
     }
+    const otherParticipantId = conversation.participants.find((id) => id !== userId);
+    if (otherParticipantId) {
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) {
+        return { success: false, error: 'conversation_closed' };
+      }
+    }
 
     if (!isPrivateVisualMediaType(message.type)) {
       return { success: false, error: 'not_visual_media' };
@@ -1738,6 +1867,13 @@ export const markPrivateSecureMediaExpired = mutation({
     const conversation = await ctx.db.get(message.conversationId);
     if (!conversation || !conversation.participants.includes(userId)) {
       return { success: false, error: 'not_authorized' };
+    }
+    const otherParticipantId = conversation.participants.find((id) => id !== userId);
+    if (otherParticipantId) {
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) {
+        return { success: false, error: 'conversation_closed' };
+      }
     }
 
     // Skip if already expired (idempotent)
@@ -1884,6 +2020,10 @@ export const updatePresence = mutation({
       console.log('[P2_PRESENCE_WRITE] Failed: user_not_found for authUserId:', authUserId?.slice(-8));
       return { success: false, error: 'user_not_found' };
     }
+    const user = await ctx.db.get(userId);
+    if (isUnavailableUser(user)) {
+      return { success: false, error: 'user_unavailable' };
+    }
 
     const now = Date.now();
 
@@ -1923,6 +2063,11 @@ export const getPresence = query({
     userId: v.id('users'),
   },
   handler: async (ctx, { userId }) => {
+    const user = await ctx.db.get(userId);
+    if (isUnavailableUser(user)) {
+      return 0;
+    }
+
     const presence = await ctx.db
       .query('privateUserPresence')
       .withIndex('by_user', (q) => q.eq('userId', userId))
@@ -1958,6 +2103,13 @@ export const setPrivateTypingStatus = mutation({
     const conversation = await ctx.db.get(conversationId);
     if (!conversation || !conversation.participants.includes(userId)) {
       return { success: false };
+    }
+    const otherParticipantId = conversation.participants.find((id) => id !== userId);
+    if (otherParticipantId) {
+      const otherUser = await ctx.db.get(otherParticipantId);
+      if (isUnavailableUser(otherUser)) {
+        return { success: false };
+      }
     }
 
     // Upsert typing status
@@ -2016,6 +2168,8 @@ export const getPrivateTypingStatus = query({
     // Find the other participant
     const otherUserId = conversation.participants.find((id) => id !== userId);
     if (!otherUserId) return { isTyping: false };
+    const otherUser = await ctx.db.get(otherUserId);
+    if (isUnavailableUser(otherUser)) return { isTyping: false };
 
     // Get other user's typing status
     const typingStatus = await ctx.db

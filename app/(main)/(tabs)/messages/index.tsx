@@ -61,7 +61,10 @@ const SECTION_SPACING = {
   avatarSize: SIZES.avatar.lg,
   avatarGap: UI_SPACING.md,
 } as const;
-const TITLE_FONT_SIZE = FONT_SIZE.h2;
+// Fixed inbox title size (22 dp) — production chat-app norm. Previously
+// FONT_SIZE.h2 (~28 dp via moderateScale) which read oversized on narrower
+// 360 dp devices (e.g. OnePlus with Display Size override).
+const TITLE_FONT_SIZE = 22;
 const LIKE_CARD_NAME_SIZE = moderateScale(15, 0.4);
 const PREVIEW_TEXT_SIZE = moderateScale(15, 0.4);
 const MODAL_TITLE_SIZE = FONT_SIZE.h1;
@@ -2251,7 +2254,7 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    fontSize: 15,
+    fontSize: 14,
     color: COLORS.text,
     paddingVertical: 11,
     letterSpacing: 0.1,

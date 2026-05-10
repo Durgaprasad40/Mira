@@ -227,6 +227,8 @@ export default function MainTabsLayout() {
           headerShown: false,
           tabBarActiveTintColor: COLORS.primary,
           tabBarInactiveTintColor: COLORS.textLight,
+          tabBarAllowFontScaling: false,
+          tabBarLabelStyle: { fontSize: 10 },
         }}
       >
         <Tabs.Screen

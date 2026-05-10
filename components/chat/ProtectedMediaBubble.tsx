@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
+import { CHAT_TYPOGRAPHY } from '@/lib/chatTypography';
 import { log } from '@/utils/logger';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 import { useAuthStore } from '@/stores/authStore';
@@ -329,7 +330,10 @@ export function ProtectedMediaBubble({
     return (
       <View style={styles.expiredPill}>
         <Ionicons name="lock-closed" size={14} color={COLORS.textMuted} />
-        <Text style={styles.expiredText}>Expired</Text>
+        <Text
+          maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+          style={styles.expiredText}
+        >Expired</Text>
       </View>
     );
   }
@@ -342,7 +346,10 @@ export function ProtectedMediaBubble({
       <Pressable onPress={() => setLoadRequested(true)} style={styles.container}>
         <View style={styles.placeholderInner}>
           <Ionicons name="arrow-down-circle" size={26} color="#FFFFFF" />
-          <Text style={styles.placeholderText}>Tap to load</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.mediaCaption.maxFontSizeMultiplier}
+            style={styles.placeholderText}
+          >Tap to load</Text>
         </View>
       </Pressable>
     );
@@ -355,7 +362,10 @@ export function ProtectedMediaBubble({
       <View style={styles.container}>
         <View style={styles.placeholderInner}>
           <ActivityIndicator size="small" color="#FFFFFF" />
-          <Text style={styles.placeholderText}>Loading…</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.mediaCaption.maxFontSizeMultiplier}
+            style={styles.placeholderText}
+          >Loading…</Text>
         </View>
       </View>
     );
@@ -394,13 +404,19 @@ export function ProtectedMediaBubble({
       {displayTimerLabel && !isOwn && (
         <View style={styles.timerBadge}>
           <Ionicons name="time-outline" size={10} color="#FFFFFF" />
-          <Text style={styles.timerText}>{displayTimerLabel}</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+            style={styles.timerText}
+          >{displayTimerLabel}</Text>
         </View>
       )}
 
       {/* Hold/Tap to view hint - centered */}
       <View style={styles.hintOverlay}>
-        <Text style={styles.hintText}>
+        <Text
+          maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+          style={styles.hintText}
+        >
           {isHoldMode ? 'Hold to view' : 'Tap to view'}
         </Text>
       </View>
@@ -429,7 +445,10 @@ export function ProtectedMediaBubble({
         {/* Timer countdown badge for sender */}
         <View style={styles.senderTimerBadge}>
           <Ionicons name="eye" size={10} color={COLORS.primary} />
-          <Text style={styles.senderTimerText}>Viewing • {timerLabel}</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+            style={styles.senderTimerText}
+          >Viewing • {timerLabel}</Text>
         </View>
       </View>
     );
@@ -442,7 +461,10 @@ export function ProtectedMediaBubble({
         {bubbleContent}
         <View style={styles.senderOpenedBadge}>
           <Ionicons name="eye" size={10} color={COLORS.success} />
-          <Text style={styles.senderOpenedText}>Opened</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+            style={styles.senderOpenedText}
+          >Opened</Text>
         </View>
       </View>
     );
@@ -498,7 +520,8 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   timerText: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: '#FFFFFF',
     fontWeight: '600',
   },
@@ -508,7 +531,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   hintText: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: 'rgba(255,255,255,0.4)',
     fontWeight: '500',
     textAlign: 'center',
@@ -523,7 +547,8 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   expiredText: {
-    fontSize: 11,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
@@ -544,7 +569,8 @@ const styles = StyleSheet.create({
   },
   placeholderText: {
     color: '#FFFFFF',
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.mediaCaption.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.mediaCaption.lineHeight,
     fontWeight: '600',
   },
   // SENDER-TIMER: Wrapper for bubble + external timer
@@ -563,7 +589,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   senderTimerText: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: COLORS.primary,
     fontWeight: '600',
   },
@@ -579,7 +606,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   senderOpenedText: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: COLORS.success,
     fontWeight: '600',
   },

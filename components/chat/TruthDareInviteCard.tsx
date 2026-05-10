@@ -8,6 +8,7 @@ import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
+import { CHAT_TYPOGRAPHY } from '@/lib/chatTypography';
 
 // PHASE-2 PREMIUM (T/D): dark-glass / midnight-plum palette consumed only when
 // the parent passes theme="phase2". Phase-1 callers leave the prop unset so all
@@ -109,11 +110,17 @@ export function TruthDareInviteCard({
           <View style={[styles.iconContainer, iconOverlay]}>
             <Ionicons name="wine" size={24} color={COLORS.white} />
           </View>
-          <Text style={[styles.title, titleOverlay]}>Truth or Dare</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.truthDareTitle.maxFontSizeMultiplier}
+            style={[styles.title, titleOverlay]}
+          >Truth or Dare</Text>
         </View>
 
         {/* Message */}
-        <Text style={[styles.message, messageOverlay]}>
+        <Text
+          maxFontSizeMultiplier={CHAT_TYPOGRAPHY.mediaCaption.maxFontSizeMultiplier}
+          style={[styles.message, messageOverlay]}
+        >
           {isInvitee
             ? `${inviterName} invited you to play Truth or Dare`
             : 'You sent a game invite'}
@@ -130,7 +137,10 @@ export function TruthDareInviteCard({
               {isResponding ? (
                 <ActivityIndicator size="small" color={indicatorRejectColor} />
               ) : (
-                <Text style={[styles.rejectButtonText, rejectTextOverlay]}>Reject</Text>
+                <Text
+                  maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+                  style={[styles.rejectButtonText, rejectTextOverlay]}
+                >Reject</Text>
               )}
             </TouchableOpacity>
             <TouchableOpacity
@@ -141,14 +151,20 @@ export function TruthDareInviteCard({
               {isResponding ? (
                 <ActivityIndicator size="small" color={COLORS.white} />
               ) : (
-                <Text style={styles.acceptButtonText}>Accept</Text>
+                <Text
+                  maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+                  style={styles.acceptButtonText}
+                >Accept</Text>
               )}
             </TouchableOpacity>
           </View>
         ) : (
           <View style={styles.waitingContainer}>
             <ActivityIndicator size="small" color={indicatorWaitColor} />
-            <Text style={[styles.waitingText, waitingTextOverlay]}>Waiting for response...</Text>
+            <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+              style={[styles.waitingText, waitingTextOverlay]}
+            >Waiting for response...</Text>
           </View>
         )}
       </View>
@@ -186,12 +202,14 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   title: {
-    fontSize: 16,
+    fontSize: CHAT_TYPOGRAPHY.truthDareTitle.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.truthDareTitle.lineHeight,
     fontWeight: '700',
     color: COLORS.text,
   },
   message: {
-    fontSize: 14,
+    fontSize: CHAT_TYPOGRAPHY.mediaCaption.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.mediaCaption.lineHeight,
     color: COLORS.textLight,
     marginBottom: 16,
     textAlign: 'center',
@@ -232,7 +250,8 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   waitingText: {
-    fontSize: 13,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: COLORS.textLight,
     fontStyle: 'italic',
   },

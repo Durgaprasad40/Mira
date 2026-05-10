@@ -35,6 +35,7 @@ import { useDemoStore } from "@/stores/demoStore";
 import { isDemoAuthMode } from "@/config/demo";
 import { registerDemoUser } from "@/lib/demoAuth";
 import { useAuthSubmit } from "@/hooks/useAuthSubmit";
+import { sanitizeAuthError } from "@/lib/authErrors";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Ionicons } from "@expo/vector-icons";
@@ -750,7 +751,7 @@ export default function BasicInfoScreen() {
       }
     } catch (error: any) {
       // Handle unexpected errors (USER_EXISTS is already handled by the hook)
-      Alert.alert("Error", error.message || "Failed to create account");
+      Alert.alert("Error", sanitizeAuthError(error, 'register'));
     } finally {
       setIsSubmitting(false);
     }

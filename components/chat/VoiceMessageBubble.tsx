@@ -35,6 +35,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { COLORS } from '@/lib/constants';
+import { CHAT_TYPOGRAPHY } from '@/lib/chatTypography';
 
 // Global reference to currently playing sound (ensures only one plays at a time)
 let currentPlayingSound: Audio.Sound | null = null;
@@ -512,7 +513,10 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
             })}
           </View>
           {/* Duration label */}
-          <Text style={[styles.duration, { color: C.textLight }]}>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.voiceMeta.maxFontSizeMultiplier}
+            style={[styles.duration, { color: C.textLight }]}
+          >
             {isUnavailable ? 'Unavailable' : isPlaying ? formatDuration(playbackPosition) : formatDuration(durationMs)}
           </Text>
         </View>
@@ -526,7 +530,10 @@ export const VoiceMessageBubble = memo(function VoiceMessageBubble({
 
       {/* Timestamp and tick status */}
       <View style={styles.footer}>
-        <Text style={[styles.timestamp, { color: C.textLight }]}>
+        <Text
+          maxFontSizeMultiplier={CHAT_TYPOGRAPHY.voiceMeta.maxFontSizeMultiplier}
+          style={[styles.timestamp, { color: C.textLight }]}
+        >
           {formatTime(timestamp)}
         </Text>
         {/* VOICE-TICKS: Show tick for own messages */}
@@ -610,7 +617,8 @@ const styles = StyleSheet.create({
     minHeight: 4,
   },
   duration: {
-    fontSize: 11,
+    fontSize: CHAT_TYPOGRAPHY.voiceMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.voiceMeta.lineHeight,
     fontWeight: '500',
   },
   // [P1_VOICE_UI_UPGRADE] Mic badge — subtle 22x22 glyph that anchors the
@@ -631,7 +639,8 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   timestamp: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.voiceMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.voiceMeta.lineHeight,
   },
   tickIcon: {
     marginLeft: 2,

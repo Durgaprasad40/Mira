@@ -2,6 +2,11 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
+import { CHAT_DENSITY, CHAT_TYPOGRAPHY } from '@/lib/chatTypography';
+
+const SYSTEM_NOTICE_TEXT_PROPS = {
+  maxFontSizeMultiplier: CHAT_TYPOGRAPHY.systemNotice.maxFontSizeMultiplier,
+} as const;
 
 export type SystemSubtype =
   | 'screenshot_taken'
@@ -21,6 +26,7 @@ export type SystemSubtype =
 interface SystemMessageProps {
   text: string;
   subtype?: SystemSubtype;
+  compact?: boolean;
 }
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
@@ -39,11 +45,11 @@ const SUBTYPE_ICONS: Record<SystemSubtype, { name: IoniconName; color: string }>
   tod_temp: { name: 'dice', color: COLORS.secondary },
 };
 
-export function SystemMessage({ text, subtype }: SystemMessageProps) {
+export function SystemMessage({ text, subtype, compact = false }: SystemMessageProps) {
   const iconInfo = subtype ? SUBTYPE_ICONS[subtype] : null;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, compact && styles.compactContainer]}>
       {iconInfo && (
         <Ionicons
           name={iconInfo.name}
@@ -52,7 +58,7 @@ export function SystemMessage({ text, subtype }: SystemMessageProps) {
           style={styles.icon}
         />
       )}
-      <Text style={styles.text}>{text}</Text>
+      <Text {...SYSTEM_NOTICE_TEXT_PROPS} style={[styles.text, compact && styles.compactText]}>{text}</Text>
     </View>
   );
 }
@@ -64,18 +70,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 12,
     paddingVertical: 5,
-    marginVertical: 6,
+    marginVertical: CHAT_DENSITY.systemMessageMargin,
     borderRadius: 10,
     backgroundColor: COLORS.backgroundDark,
     gap: 5,
+  },
+  compactContainer: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    marginVertical: 4,
   },
   icon: {
     marginRight: 2,
   },
   text: {
-    fontSize: 12,
+    fontSize: CHAT_TYPOGRAPHY.systemNotice.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.systemNotice.lineHeight,
     color: COLORS.textLight,
     fontStyle: 'italic',
     textAlign: 'center',
+  },
+  compactText: {
+    lineHeight: 15,
   },
 });

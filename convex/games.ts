@@ -117,11 +117,44 @@ async function hasBlockBetween(
   return !!reverse;
 }
 
+function isUnavailableUser(user: Doc<'users'> | null | undefined): boolean {
+  return (
+    !user ||
+    user.deletedAt !== undefined ||
+    user.isActive === false ||
+    user.isBanned === true
+  );
+}
+
+async function resolveLiveUserIdByAuthId(
+  ctx: QueryCtx | MutationCtx,
+  authUserId: string
+): Promise<Id<'users'> | null> {
+  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!userId) return null;
+  const user = await ctx.db.get(userId);
+  return isUnavailableUser(user) ? null : userId;
+}
+
+async function areBottleSpinParticipantsLive(
+  ctx: QueryCtx | MutationCtx,
+  participants: Id<'users'>[]
+): Promise<boolean> {
+  const users = await Promise.all(participants.map((id) => ctx.db.get(id)));
+  return users.every((user) => !isUnavailableUser(user));
+}
+
 async function getBottleSpinConversationAccess(
   ctx: QueryCtx | MutationCtx,
   conversationId: string,
   viewerUserId: Id<'users'>
-): Promise<{ ok: true; participants: Id<'users'>[] } | { ok: false; reason: 'missing' | 'expired' | 'not_participant' }> {
+): Promise<
+  | { ok: true; participants: Id<'users'>[] }
+  | {
+      ok: false;
+      reason: 'missing' | 'expired' | 'not_participant' | 'participant_unavailable';
+    }
+> {
   const now = Date.now();
 
   const phase1ConversationId = ctx.db.normalizeId('conversations', conversationId);
@@ -134,6 +167,9 @@ async function getBottleSpinConversationAccess(
       if (!conversation.participants.includes(viewerUserId)) {
         return { ok: false, reason: 'not_participant' };
       }
+      if (!(await areBottleSpinParticipantsLive(ctx, conversation.participants))) {
+        return { ok: false, reason: 'participant_unavailable' };
+      }
       return { ok: true, participants: conversation.participants };
     }
   }
@@ -144,6 +180,9 @@ async function getBottleSpinConversationAccess(
     if (conversation) {
       if (!conversation.participants.includes(viewerUserId)) {
         return { ok: false, reason: 'not_participant' };
+      }
+      if (!(await areBottleSpinParticipantsLive(ctx, conversation.participants))) {
+        return { ok: false, reason: 'participant_unavailable' };
       }
       return { ok: true, participants: conversation.participants };
     }
@@ -187,6 +226,10 @@ export const getBottleSpinSkips = query({
     if (!userId) {
       return { skipCount: 0 };
     }
+    const access = await getBottleSpinConversationAccess(ctx, convoId, userId);
+    if (!access.ok) {
+      return { skipCount: 0 };
+    }
 
     // Look up skip tracking record
     const record = await ctx.db
@@ -209,7 +252,7 @@ export const incrementBottleSpinSkip = mutation({
     delta: v.optional(v.number()),
   },
   handler: async (ctx, { convoId, windowKey, authUserId, delta = 1 }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -267,6 +310,10 @@ export const resetBottleSpinSkips = mutation({
     if (!userId) {
       throw new Error('Invalid user identity');
     }
+    const access = await getBottleSpinConversationAccess(ctx, convoId, userId);
+    if (!access.ok) {
+      return { success: true };
+    }
 
     // Find and delete the record
     const existing = await ctx.db
@@ -297,7 +344,7 @@ export const getGlobalBottleSpinSkips = query({
   },
   handler: async (ctx, { authUserId, windowKey }) => {
     // Resolve auth ID to Convex user ID using app's custom auth pattern
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return { skipCount: 0 };
     }
@@ -323,7 +370,7 @@ export const incrementGlobalBottleSpinSkip = mutation({
   },
   handler: async (ctx, { authUserId, windowKey, delta = 1 }) => {
     // Resolve auth ID to Convex user ID using app's custom auth pattern
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -411,7 +458,7 @@ export const getBottleSpinSession = query({
     authUserId: v.string(),
   },
   handler: async (ctx, { conversationId, authUserId }) => {
-    const viewerUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    const viewerUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!viewerUserId) {
       return { state: 'none' as const };
     }
@@ -549,12 +596,12 @@ export const sendBottleSpinInvite = mutation({
       throw new Error('You cannot invite yourself');
     }
 
-    const inviterUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    const inviterUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!inviterUserId) {
       throw new Error('Unauthorized: user not found');
     }
 
-    const inviteeUserId = await resolveUserIdByAuthId(ctx, otherUserId);
+    const inviteeUserId = await resolveLiveUserIdByAuthId(ctx, otherUserId);
     if (!inviteeUserId) {
       throw new Error('Invited user not found');
     }
@@ -624,7 +671,7 @@ export const respondToBottleSpinInvite = mutation({
     accept: v.boolean(),
   },
   handler: async (ctx, { authUserId, conversationId, accept }) => {
-    const responderUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    const responderUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!responderUserId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -653,7 +700,7 @@ export const respondToBottleSpinInvite = mutation({
       throw new Error('Only the invited user can respond');
     }
 
-    const inviterUserId = await resolveUserIdByAuthId(ctx, session.inviterId);
+    const inviterUserId = await resolveLiveUserIdByAuthId(ctx, session.inviterId);
     if (inviterUserId) {
       await assertBottleSpinConversationUsable(ctx, conversationId, responderUserId, inviterUserId);
     }
@@ -719,7 +766,8 @@ export const endBottleSpinGame = mutation({
     conversationId: v.string(),
   },
   handler: async (ctx, { authUserId, conversationId }) => {
-    if (!await resolveUserIdByAuthId(ctx, authUserId)) {
+    const actorUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
+    if (!actorUserId) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -741,6 +789,7 @@ export const endBottleSpinGame = mutation({
     if (session.inviterId !== authUserId && session.inviteeId !== authUserId) {
       throw new Error('Only participants can end the game');
     }
+    await assertBottleSpinConversationUsable(ctx, conversationId, actorUserId);
 
     // TD-LIFECYCLE: End the game with proper reason tracking
     await ctx.db.patch(session._id, {
@@ -772,7 +821,7 @@ export const startBottleSpinGame = mutation({
     conversationId: v.string(),
   },
   handler: async (ctx, { authUserId, conversationId }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -794,6 +843,7 @@ export const startBottleSpinGame = mutation({
     if (session.inviterId !== authUserId) {
       return { success: false, reason: 'only_inviter_can_start' as const };
     }
+    await assertBottleSpinConversationUsable(ctx, conversationId, userId);
 
     // Check if game already started (idempotent)
     if (session.gameStartedAt) {
@@ -832,9 +882,13 @@ export const cleanupExpiredSession = mutation({
     ),
   },
   handler: async (ctx, { authUserId, conversationId, endedReason }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
+    }
+    const conversationAccess = await getBottleSpinConversationAccess(ctx, conversationId, userId);
+    if (!conversationAccess.ok) {
+      return { success: true, cleanedCount: 0 };
     }
 
     const now = Date.now();
@@ -932,7 +986,7 @@ export const setBottleSpinTurn = mutation({
     lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip'
   },
   handler: async (ctx, { authUserId, conversationId, currentTurnRole, turnPhase, lastSpinResult }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -958,7 +1012,7 @@ export const setBottleSpinTurn = mutation({
 
     // SPIN-TURN-FIX: Determine caller's role for ownership enforcement.
     const callerRole: 'inviter' | 'invitee' = session.inviterId === authUserId ? 'inviter' : 'invitee';
-    const otherParticipantUserId = await resolveUserIdByAuthId(
+    const otherParticipantUserId = await resolveLiveUserIdByAuthId(
       ctx,
       callerRole === 'inviter' ? session.inviteeId : session.inviterId
     );

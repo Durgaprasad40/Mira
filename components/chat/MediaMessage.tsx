@@ -12,6 +12,7 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useMediaViewStore } from '@/stores/mediaViewStore';
 import { COLORS } from '@/lib/constants';
+import { CHAT_TYPOGRAPHY } from '@/lib/chatTypography';
 import {
   getCachedMediaUri,
   getMediaUri,
@@ -230,7 +231,10 @@ export default function MediaMessage({
       <View style={styles.container}>
         <View style={styles.consumedOverlay}>
           <Ionicons name="eye-off" size={20} color="rgba(255,255,255,0.5)" />
-          <Text style={styles.consumedText}>Viewed</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+            style={styles.consumedText}
+          >Viewed</Text>
         </View>
       </View>
     );
@@ -250,17 +254,26 @@ export default function MediaMessage({
         {downloading ? (
           <>
             <ActivityIndicator size="small" color="#FFFFFF" />
-            <Text style={styles.placeholderText}>Loading…</Text>
+            <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.mediaCaption.maxFontSizeMultiplier}
+              style={styles.placeholderText}
+            >Loading…</Text>
           </>
         ) : downloadError ? (
           <>
             <Ionicons name="refresh" size={28} color="#FFFFFF" />
-            <Text style={styles.placeholderText}>Tap to retry</Text>
+            <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.mediaCaption.maxFontSizeMultiplier}
+              style={styles.placeholderText}
+            >Tap to retry</Text>
           </>
         ) : (
           <>
             <Ionicons name="arrow-down-circle" size={36} color="#FFFFFF" />
-            <Text style={styles.placeholderText}>
+            <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.mediaCaption.maxFontSizeMultiplier}
+              style={styles.placeholderText}
+            >
               {type === 'video' ? 'Tap to load video' : 'Tap to load'}
             </Text>
           </>
@@ -275,17 +288,26 @@ export default function MediaMessage({
         {downloading ? (
           <>
             <ActivityIndicator size="small" color="#FFFFFF" />
-            <Text style={styles.placeholderTextSmall}>Loading…</Text>
+            <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+              style={styles.placeholderTextSmall}
+            >Loading…</Text>
           </>
         ) : downloadError ? (
           <>
             <Ionicons name="refresh" size={20} color="#FFFFFF" />
-            <Text style={styles.placeholderTextSmall}>Tap to retry</Text>
+            <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+              style={styles.placeholderTextSmall}
+            >Tap to retry</Text>
           </>
         ) : (
           <>
             <Ionicons name="arrow-down-circle" size={26} color="#FFFFFF" />
-            <Text style={styles.placeholderTextSmall}>{label}</Text>
+            <Text
+              maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+              style={styles.placeholderTextSmall}
+            >{label}</Text>
           </>
         )}
       </View>
@@ -371,7 +393,10 @@ export default function MediaMessage({
 
         {/* Tap to view hint */}
         <View style={styles.hintOverlay}>
-          <Text style={styles.hintText}>Tap to view</Text>
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+            style={styles.hintText}
+          >Tap to view</Text>
         </View>
 
         {/* Privacy overlay */}
@@ -457,7 +482,10 @@ export default function MediaMessage({
       )}
 
       <View style={styles.hintOverlay}>
-        <Text style={styles.hintText}>Hold to view</Text>
+        <Text
+          maxFontSizeMultiplier={CHAT_TYPOGRAPHY.bubbleMeta.maxFontSizeMultiplier}
+          style={styles.hintText}
+        >Hold to view</Text>
       </View>
 
       <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
@@ -507,7 +535,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   hintText: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: 'rgba(255, 255, 255, 0.5)',
     fontWeight: '600',
     textAlign: 'center',
@@ -519,7 +548,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.border,
   },
   consumedText: {
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     color: 'rgba(0, 0, 0, 0.4)',
     marginTop: 3,
     fontWeight: '500',
@@ -565,12 +595,14 @@ const styles = StyleSheet.create({
   },
   placeholderText: {
     color: '#FFFFFF',
-    fontSize: 12,
+    fontSize: CHAT_TYPOGRAPHY.mediaCaption.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.mediaCaption.lineHeight,
     fontWeight: '600',
   },
   placeholderTextSmall: {
     color: '#FFFFFF',
-    fontSize: 10,
+    fontSize: CHAT_TYPOGRAPHY.bubbleMeta.fontSize,
+    lineHeight: CHAT_TYPOGRAPHY.bubbleMeta.lineHeight,
     fontWeight: '600',
   },
 });

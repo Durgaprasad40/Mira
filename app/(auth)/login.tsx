@@ -28,6 +28,7 @@ import { useDemoStore } from "@/stores/demoStore";
 import { isDemoAuthMode } from "@/config/demo";
 import { getDemoOnboardingStatus, loginDemoUser } from "@/lib/demoAuth";
 import { getOnboardingResumeRoute } from "@/lib/onboardingRouting";
+import { sanitizeAuthError } from "@/lib/authErrors";
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -94,7 +95,7 @@ export default function LoginScreen() {
         }
       } catch (e: any) {
         console.error('[DEMO_AUTH] Login error:', e);
-        setError(e.message || "Login failed");
+        setError(sanitizeAuthError(e, 'login'));
       } finally {
         setIsLoading(false);
       }
@@ -122,7 +123,7 @@ export default function LoginScreen() {
           router.replace("/(onboarding)/basic-info?confirm=true" as any);
         }
       } catch (e: any) {
-        setError(e.message || "Login failed");
+        setError(sanitizeAuthError(e, 'login'));
       } finally {
         setIsLoading(false);
       }
@@ -180,7 +181,7 @@ export default function LoginScreen() {
         }
       }
     } catch (error: any) {
-      setError(error.message || "Login failed. Please check your credentials.");
+      setError(sanitizeAuthError(error, 'login'));
     } finally {
       setIsLoading(false);
     }

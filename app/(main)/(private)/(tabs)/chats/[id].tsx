@@ -220,10 +220,15 @@ export default function Phase2ChatThread() {
     api.privateConversations.getPrivateConversation,
     id && userId ? { conversationId: id as any, authUserId: userId } : 'skip'
   );
+  const isConversationClosed =
+    conversation !== undefined &&
+    conversation !== null &&
+    (((conversation as any).participantDeleted === true) ||
+      ((conversation as any).terminalState === 'user_removed'));
 
   const messages = useQuery(
     api.privateConversations.getPrivateMessages,
-    id && userId
+    id && userId && !isConversationClosed
       ? { conversationId: id as any, authUserId: userId, limit: 100 }
       : 'skip'
   );
@@ -235,7 +240,9 @@ export default function Phase2ChatThread() {
 
   const gameSession = useQuery(
     api.games.getBottleSpinSession,
-    id && userId ? { conversationId: id, authUserId: userId } : 'skip'
+    id && userId && !isConversationClosed
+      ? { conversationId: id, authUserId: userId }
+      : 'skip'
   );
 
   // --------------------------------------------------------------------- mutations
@@ -397,6 +404,7 @@ export default function Phase2ChatThread() {
   // and ladder subtitle in their header.
   useEffect(() => {
     if (!userId) return;
+    if (isConversationClosed) return;
     updatePrivatePresence({ authUserId: userId }).catch(() => {
       // Silent fail — presence is best-effort.
     });
@@ -406,7 +414,7 @@ export default function Phase2ChatThread() {
       });
     }, 30_000);
     return () => clearInterval(interval);
-  }, [userId, updatePrivatePresence]);
+  }, [userId, isConversationClosed, updatePrivatePresence]);
 
   // SECURE-MEDIA OPEN STATE (Phase-1 parity, Phase-2 backend):
   //   - protectedViewer: holds the message currently shown in the secure
@@ -431,9 +439,9 @@ export default function Phase2ChatThread() {
   const contentHeightRef = useRef(0);
 
   // --------------------------------------------------------------------- derived
-  const otherUserId = (conversation as any)?.participantId as
-    | string
-    | undefined;
+  const otherUserId = isConversationClosed
+    ? undefined
+    : ((conversation as any)?.participantId as string | undefined);
   // ANON-LOADING-FIX:
   //   participantName may be undefined (query loading), null (backend has no
   //   private profile/handle yet), or the literal string "Anonymous" from
@@ -450,16 +458,18 @@ export default function Phase2ChatThread() {
     lastStableOtherNameRef.current = stableOtherUserName;
   }
   const otherUserName = stableOtherUserName ?? 'this user';
-  const otherPhotoUrl = (conversation as any)?.participantPhotoUrl as
-    | string
-    | undefined;
+  const otherPhotoUrl = isConversationClosed
+    ? undefined
+    : ((conversation as any)?.participantPhotoUrl as string | undefined);
   // P2_HEADER_PARITY: lastActive timestamp for the other participant, sourced
   // from the Phase-2-isolated `privateUserPresence` table (NOT users.lastActive)
   // via `api.privateConversations.getPrivateConversation`. Mirrors Phase-1's
   // `otherUserLastActive` (ChatScreenInner.tsx:2697-2741) and powers the
   // header presence dot + status subtitle ladder below.
   const participantLastActive =
-    ((conversation as any)?.participantLastActive as number | undefined) ?? 0;
+    isConversationClosed
+      ? 0
+      : ((conversation as any)?.participantLastActive as number | undefined) ?? 0;
 
   const tdState = ((gameSession as any)?.state as GameState | undefined) ??
     undefined;
@@ -539,12 +549,29 @@ export default function Phase2ChatThread() {
     }
   }, [id, gameSession, tdState, amInviter, amInvitee]);
 
+  useEffect(() => {
+    if (!isConversationClosed) return;
+    setShowInviteModal(false);
+    setShowGameModal(false);
+    setShowMenu(false);
+    setShowReportSheet(false);
+    setShowSpinHint(false);
+    setShowCooldownToast(false);
+    setTdToast(null);
+    setProtectedViewer(null);
+    setNormalViewer(null);
+    setPendingMediaUri(null);
+    pendingMessagesRef.current = [];
+    setPendingPhase2Messages([]);
+  }, [isConversationClosed]);
+
   // --------------------------------------------------------------------- side effects
   // Mark conversation as read whenever a new message arrives or thread mounts.
   useEffect(() => {
     if (!id || !token) return;
+    if (isConversationClosed) return;
     markRead({ conversationId: id as any, token }).catch(() => {});
-  }, [id, token, markRead, messages?.length]);
+  }, [id, token, isConversationClosed, markRead, messages?.length]);
 
   // Auto-open game modal when game becomes active AND has actually started
   // (i.e. inviter pressed start). Phase-1 parity: ChatScreenInner doesn't
@@ -552,6 +579,7 @@ export default function Phase2ChatThread() {
   // must not fire while the inviter has not yet manually started the game,
   // otherwise both sides see an empty BottleSpinGame stuck in pre-start.
   useEffect(() => {
+    if (isConversationClosed) return;
     if (!gameSession) return;
     if (tdState === 'active' && gameStartedAt && !tdPaused) {
       setShowGameModal(true);
@@ -565,13 +593,14 @@ export default function Phase2ChatThread() {
       setTdPaused(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tdState, tdPaused, gameStartedAt]);
+  }, [isConversationClosed, tdState, tdPaused, gameStartedAt]);
 
   // P2_TD_AUTO_PROMPT: live chooser prompt. The header T/D button already
   // opens BottleSpinGame manually, but the selected player must not need to
   // tap it after the bottle lands. Listen to the backend turn state and open
   // the existing compact action sheet when this device owns the choosing turn.
   useEffect(() => {
+    if (isConversationClosed) return;
     if (!truthDareAutoPromptKey) return;
     if (tdState !== 'active') return;
     if (truthDareTurnPhase !== 'choosing') return;
@@ -614,6 +643,7 @@ export default function Phase2ChatThread() {
     myTruthDareRole,
     truthDareAutoPromptKey,
     showGameModal,
+    isConversationClosed,
   ]);
 
   // P2_TD_RECEIVER_PARITY: Auto-open the invite modal on the invitee's
@@ -638,6 +668,7 @@ export default function Phase2ChatThread() {
   //      (the ref is only ever set inside the `amInvitee` branch).
   const autoOpenedInviteSessionRef = useRef<string | null>(null);
   useEffect(() => {
+    if (isConversationClosed) return;
     const pendingSessionId = (gameSession as any)?.sessionId as
       | string
       | undefined;
@@ -664,7 +695,7 @@ export default function Phase2ChatThread() {
       setShowInviteModal(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tdState, amInvitee, gameSession]);
+  }, [tdState, amInvitee, gameSession, isConversationClosed]);
 
   // P2_TD_FIX: Auto-cleanup expired sessions so the next invite doesn't hit
   // "Game already active". Phase-1 parity: ChatScreenInner.tsx:885-928. The
@@ -680,6 +711,7 @@ export default function Phase2ChatThread() {
     | undefined;
   useEffect(() => {
     if (!id || !userId) return;
+    if (isConversationClosed) return;
     if (tdState !== 'expired' || !endedReason) return;
     console.log('[P2_TD_CLEANUP]', { id, endedReason });
     cleanupExpired({
@@ -689,7 +721,7 @@ export default function Phase2ChatThread() {
     }).catch((err) =>
       console.warn('[P2_TD_CLEANUP] failed:', err?.message ?? err)
     );
-  }, [id, userId, tdState, endedReason, cleanupExpired]);
+  }, [id, userId, isConversationClosed, tdState, endedReason, cleanupExpired]);
 
   // Cleanup cooldown timer on unmount.
   useEffect(() => {
@@ -906,6 +938,9 @@ export default function Phase2ChatThread() {
       console.log('[P2_TD] missing user or id', { currentUserId: userId, id });
       return;
     }
+    if (isConversationClosed) {
+      return;
+    }
 
     // P2_TD_PARITY: Phase-1 ChatScreenInner.tsx:1147-1152 — when the session
     // query is still loading, treat as "no session" and open the invite modal
@@ -1014,9 +1049,11 @@ export default function Phase2ChatThread() {
     otherUserName,
     showCooldownFor3s,
     startGame,
+    isConversationClosed,
   ]);
 
   const handleSendInvite = useCallback(async () => {
+    if (isConversationClosed) return;
     if (!userId || !id || !otherUserId) {
       Alert.alert('Not ready', 'Cannot send invite right now.');
       return;
@@ -1085,9 +1122,11 @@ export default function Phase2ChatThread() {
     otherUserName,
     sendInvite,
     showCooldownFor3s,
+    isConversationClosed,
   ]);
 
   const handleAcceptInvite = useCallback(async () => {
+    if (isConversationClosed) return;
     if (!userId || !id) return;
     try {
       await respondInvite({
@@ -1104,9 +1143,10 @@ export default function Phase2ChatThread() {
     } catch (err: any) {
       Alert.alert('Could not accept', String(err?.message ?? err));
     }
-  }, [userId, id, respondInvite]);
+  }, [userId, id, respondInvite, isConversationClosed]);
 
   const handleDeclineInvite = useCallback(async () => {
+    if (isConversationClosed) return;
     if (!userId || !id) return;
     try {
       await respondInvite({
@@ -1121,11 +1161,12 @@ export default function Phase2ChatThread() {
     } catch (err: any) {
       Alert.alert('Could not decline', String(err?.message ?? err));
     }
-  }, [userId, id, respondInvite]);
+  }, [userId, id, respondInvite, isConversationClosed]);
 
   const handleSendText = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
+      if (isConversationClosed) return;
       if (!trimmed || !id || !token) return;
       try {
         await sendPrivateMessage({
@@ -1141,7 +1182,7 @@ export default function Phase2ChatThread() {
         Alert.alert('Send failed', String(err?.message ?? err));
       }
     },
-    [id, token, sendPrivateMessage]
+    [id, token, sendPrivateMessage, isConversationClosed]
   );
 
   // P2_TD_PARITY: BottleSpinGame emits result strings (e.g. "Truth: <q>",
@@ -1153,6 +1194,7 @@ export default function Phase2ChatThread() {
   // cooldown and the modal closes), but we no longer write any chat row.
   const handleSendResultMessage = useCallback(
     async (msg: string) => {
+      if (isConversationClosed) return;
       if (!id || !userId) return;
       const isEndGameSystemMessage = /^[^\s].* ended the game$/.test(msg);
       if (isEndGameSystemMessage) {
@@ -1168,7 +1210,7 @@ export default function Phase2ChatThread() {
       // the local `tdToast` effect above and via the BottleSpinGame modal's
       // own inline UI for the active player.
     },
-    [id, userId, endGame]
+    [id, userId, endGame, isConversationClosed]
   );
 
   const handleBottleGameClose = useCallback(() => {
@@ -1225,6 +1267,7 @@ export default function Phase2ChatThread() {
 
   const handleSendVoiceMessage = useCallback(
     async (audioUri: string, durationMs: number) => {
+      if (isConversationClosed) return;
       if (!id || !token) return;
       try {
         const storageId = await uploadMediaBlob(audioUri, 'audio/m4a');
@@ -1247,7 +1290,7 @@ export default function Phase2ChatThread() {
         Alert.alert('Send failed', String(err?.message ?? err));
       }
     },
-    [id, token, uploadMediaBlob, sendPrivateMessage]
+    [id, token, uploadMediaBlob, sendPrivateMessage, isConversationClosed]
   );
 
   // Stage an asset into the review sheet (Phase-1 setPendingImageUri parity).
@@ -1287,6 +1330,7 @@ export default function Phase2ChatThread() {
   // Mirrors Phase-1 ChatScreenInner.tsx:2099-2213 + 2254-2390.
   const runP2UploadAndSend = useCallback(
     async (pendingId: string) => {
+      if (isConversationClosed) return;
       if (!id || !token || !userId) {
         console.warn('[P2_MEDIA_UPLOAD_START] missing id/token/userId', {
           hasId: !!id,
@@ -1437,6 +1481,7 @@ export default function Phase2ChatThread() {
       sendPrivateMessage,
       updatePendingPhase2Message,
       removePendingPhase2Message,
+      isConversationClosed,
     ]
   );
 
@@ -1446,6 +1491,10 @@ export default function Phase2ChatThread() {
   // stays on the replayable voice path.
   const handleConfirmSecureSend = useCallback(
     async (uri: string, options: Phase2CameraPhotoOptions) => {
+      if (isConversationClosed) {
+        clearPendingMedia();
+        return;
+      }
       if (!id || !token || !userId) {
         clearPendingMedia();
         return;
@@ -1493,6 +1542,7 @@ export default function Phase2ChatThread() {
       addPendingPhase2Message,
       clearPendingMedia,
       runP2UploadAndSend,
+      isConversationClosed,
     ]
   );
 
@@ -1540,6 +1590,7 @@ export default function Phase2ChatThread() {
   // replaced because it surfaces the OS camera UI, which is photo-only on
   // many Android devices and doesn't enforce the 30s rule.
   const handleSendCameraPress = useCallback(() => {
+    if (isConversationClosed) return;
     if (!id || !token) return;
     router.push({
       pathname: '/(main)/camera-composer',
@@ -1548,7 +1599,7 @@ export default function Phase2ChatThread() {
         conversationId: String(id),
       },
     } as any);
-  }, [id, token, router]);
+  }, [id, token, router, isConversationClosed]);
 
   // CAMERA-VIDEO-FIX: Pick up captured media when this thread regains focus
   // after camera-composer calls `router.back()`. The composer writes to
@@ -1557,6 +1608,7 @@ export default function Phase2ChatThread() {
   // state, which mounts <Phase2CameraPhotoSheet> for one-time review.
   useFocusEffect(
     useCallback(() => {
+      if (isConversationClosed) return;
       if (!id) return;
       const captured = popHandoff<{
         uri?: string;
@@ -1586,10 +1638,11 @@ export default function Phase2ChatThread() {
       setPendingIsMirrored(!!captured.isMirrored);
       setPendingMediaUri(uri);
       setPendingMediaType(type);
-    }, [id])
+    }, [id, isConversationClosed])
   );
 
   const handleSendGalleryPress = useCallback(async () => {
+    if (isConversationClosed) return;
     if (!id || !token) return;
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (permission.status !== 'granted') {
@@ -1608,7 +1661,7 @@ export default function Phase2ChatThread() {
     if (!result.canceled && result.assets[0]) {
       stageAsset(result.assets[0], false);
     }
-  }, [id, token, stageAsset]);
+  }, [id, token, stageAsset, isConversationClosed]);
 
   // --------------------------------------------------------------------- safety handlers
   const handleBlock = useCallback(() => {
@@ -1828,9 +1881,9 @@ export default function Phase2ChatThread() {
   // appear. The synchronous render-time ref mutation is safe (no setState).
   const isInitialPayloadReady =
     conversation !== undefined &&
-    stableMessages !== undefined &&
     currentUser !== undefined &&
-    gameSession !== undefined;
+    (isConversationClosed ||
+      (stableMessages !== undefined && gameSession !== undefined));
   if (isInitialPayloadReady) {
     hasInitialPayloadRef.current = true;
   }
@@ -1863,6 +1916,7 @@ export default function Phase2ChatThread() {
   }, [stableMessages, pendingPhase2Messages, secureMediaNowMs]);
 
   const handleOpenProtectedMedia = useCallback(async (item: any, isOwn: boolean) => {
+    if (isConversationClosed) return;
     const mediaType: 'image' | 'video' = item.type === 'video' ? 'video' : 'image';
     const mediaLabel = mediaType === 'video' ? 'video' : 'photo';
 
@@ -1914,7 +1968,7 @@ export default function Phase2ChatThread() {
     } catch (err: any) {
       Alert.alert('Couldn’t Open', String(err?.message ?? 'Failed to open media.'));
     }
-  }, [token, openPrivateSecureMedia]);
+  }, [token, openPrivateSecureMedia, isConversationClosed]);
 
   const renderItem = useCallback(
     ({ item, index }: { item: any; index: number }) => {
@@ -2107,6 +2161,60 @@ export default function Phase2ChatThread() {
       >
         <View style={styles.loading} pointerEvents="none">
           <ActivityIndicator size="large" color={C.primary} />
+        </View>
+      </LinearGradient>
+    );
+  }
+
+  // --------------------------------------------------------------------- early-return: unavailable participant tombstone
+  if (isConversationClosed) {
+    return (
+      <LinearGradient
+        colors={['#101426', '#1A1633', '#16213E']}
+        locations={[0, 0.55, 1]}
+        style={[
+          styles.container,
+          styles.gradientContainer,
+          { paddingTop: insets.top },
+        ]}
+      >
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.headerBtn}
+            onPress={() => router.back()}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="chevron-back" size={26} color={C.text} />
+          </TouchableOpacity>
+          <View style={styles.headerInfo}>
+            <View style={[styles.headerAvatar, styles.headerAvatarFallback]}>
+              <Ionicons name="person-remove-outline" size={20} color={C.textLight} />
+            </View>
+            <View style={styles.headerNameWrap}>
+              <Text style={styles.headerName} numberOfLines={1}>
+                Conversation closed
+              </Text>
+              <Text style={styles.headerStatus} numberOfLines={1}>
+                Account unavailable
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={styles.closedState}>
+          <View style={styles.closedIcon}>
+            <Ionicons name="lock-closed-outline" size={28} color={C.primary} />
+          </View>
+          <Text style={styles.closedTitle}>Conversation closed</Text>
+          <Text style={styles.closedSubtitle}>
+            This account is no longer available.
+          </Text>
+          <TouchableOpacity
+            style={styles.errorBtn}
+            onPress={() => router.replace('/(main)/(private)/(tabs)/chats' as any)}
+          >
+            <Text style={styles.errorBtnText}>Go back</Text>
+          </TouchableOpacity>
         </View>
       </LinearGradient>
     );
@@ -2933,6 +3041,37 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   emptyText: { color: C.textLight, fontSize: 14, textAlign: 'center' },
+  closedState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+  },
+  closedIcon: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(233, 69, 96, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(233, 69, 96, 0.28)',
+    marginBottom: 16,
+  },
+  closedTitle: {
+    color: C.text,
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  closedSubtitle: {
+    color: C.textLight,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
+    marginBottom: 18,
+  },
   // PHASE-2 PREMIUM (T/D): deeper plum-tinted backdrop so the invite modal
   // sits inside the same midnight palette as the gradient surface.
   modalBackdrop: {

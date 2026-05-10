@@ -9,6 +9,10 @@ import {
   isChatRoomPrivateDmExpired,
 } from './chatRoomDmRetention';
 
+const PHASE1_TEXT_MESSAGE_MAX_LENGTH = 400;
+const SHARED_DM_MESSAGE_MAX_LENGTH = 5000;
+const SYSTEM_MESSAGE_PREFIX = '[SYSTEM:';
+
 // Phase-2: Helper to check if user has any active chatRoom readOnly penalty
 async function hasActiveChatRoomPenalty(
   ctx: QueryCtx | MutationCtx,
@@ -95,6 +99,20 @@ function isPreMutualConfessionConversation(
     !!conversation.anonymousParticipantId ||
     !!conversation.expiresAt
   );
+}
+
+function getTextMessageMaxLength(
+  conversation: Doc<'conversations'>,
+  type: 'text' | 'image' | 'video' | 'template' | 'dare' | 'voice',
+  content: string
+): number {
+  if (type !== 'text' && type !== 'template') return SHARED_DM_MESSAGE_MAX_LENGTH;
+  if (type === 'text' && content.startsWith(SYSTEM_MESSAGE_PREFIX)) {
+    return SHARED_DM_MESSAGE_MAX_LENGTH;
+  }
+  return isChatRoomPrivateDmConversation(conversation)
+    ? SHARED_DM_MESSAGE_MAX_LENGTH
+    : PHASE1_TEXT_MESSAGE_MAX_LENGTH;
 }
 
 async function getPhase1PrimaryPhoto(
@@ -466,8 +484,7 @@ export const sendMessage = mutation({
       throw new Error('Message cannot be empty');
     }
 
-    // P2-006 FIX: Enforce message length limit (5000 characters max)
-    if (normalizedContent.length > 5000) {
+    if (normalizedContent.length > getTextMessageMaxLength(conversation, type, normalizedContent)) {
       throw new Error('Message too long');
     }
 
@@ -723,7 +740,7 @@ export const sendPreMatchMessage = mutation({
       throw new Error('Message cannot be empty');
     }
 
-    if (normalizedContent.length > 5000) {
+    if (normalizedContent.length > PHASE1_TEXT_MESSAGE_MAX_LENGTH) {
       throw new Error('Message too long');
     }
 

@@ -27,6 +27,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { useScreenTrace } from "@/lib/devTrace";
+import { sanitizeAuthError } from "@/lib/authErrors";
 
 // P1 STABILITY: Track auth state version to detect stale async callbacks
 let globalAuthVersion = 0;
@@ -106,7 +107,7 @@ export default function OTPScreen() {
     } catch (error: any) {
       // P1 STABILITY: Check mount status before showing alert
       if (!mountedRef.current) return;
-      Alert.alert("Error", error.message || "Failed to send OTP");
+      Alert.alert("Error", sanitizeAuthError(error, 'otp_send'));
     }
   };
 
@@ -160,7 +161,7 @@ export default function OTPScreen() {
       if (!mountedRef.current) return;
       Alert.alert(
         "Verification Failed",
-        error.message || "Invalid OTP. Please try again.",
+        sanitizeAuthError(error, 'otp_verify'),
       );
     } finally {
       // P1 STABILITY: Only update state if still mounted
@@ -182,7 +183,7 @@ export default function OTPScreen() {
     } catch (error: any) {
       // P1 STABILITY: Check mount status before showing alert
       if (!mountedRef.current) return;
-      Alert.alert("Error", error.message || "Failed to resend OTP");
+      Alert.alert("Error", sanitizeAuthError(error, 'otp_send'));
     }
   };
 

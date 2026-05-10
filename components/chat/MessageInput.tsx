@@ -13,7 +13,9 @@ import { isDemoMode } from '@/config/demo';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 
 const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
-const FREE_USER_TEXT_LIMIT = 150;
+const PHASE1_TEXT_INPUT_MAX_LENGTH = 400;
+const PHASE2_LEGACY_TEXT_INPUT_MAX_LENGTH = 150;
+const TEXT_PROPS = { maxFontSizeMultiplier: 1.2 } as const;
 
 interface MessageInputProps {
   onSend: (text: string, type?: 'text' | 'template') => void | Promise<void>;
@@ -305,11 +307,9 @@ export function MessageInput({
     ? (isRecording ? COLORS.error : p2.textLight)
     : (isRecording ? COLORS.error : COLORS.textLight);
   const plusIconColor = isPhase2 ? p2.primary : COLORS.primary;
-  const textLimit = !isDemoMode && !canSendCustom ? FREE_USER_TEXT_LIMIT : undefined;
-  const remainingChars = textLimit ? textLimit - text.length : null;
-  const shouldShowLimitCounter =
-    remainingChars !== null && (isFocused || text.length >= FREE_USER_TEXT_LIMIT - 20);
-  const isAtTextLimit = remainingChars !== null && remainingChars <= 0;
+  const textLimit = isPhase2
+    ? PHASE2_LEGACY_TEXT_INPUT_MAX_LENGTH
+    : PHASE1_TEXT_INPUT_MAX_LENGTH;
 
   return (
     <View style={containerStyle}>
@@ -356,7 +356,7 @@ export function MessageInput({
       {showTemplates && (
         <View style={styles.templatesContainer}>
           <View style={styles.templatesHeader}>
-            <Text style={styles.templatesTitle}>Message Templates</Text>
+            <Text {...TEXT_PROPS} style={styles.templatesTitle}>Message Templates</Text>
             <TouchableOpacity onPress={() => setShowTemplates(false)}>
               <Ionicons name="close" size={24} color={COLORS.text} />
             </TouchableOpacity>
@@ -367,7 +367,7 @@ export function MessageInput({
               style={styles.templateItem}
               onPress={() => handleTemplateSelect(template)}
             >
-              <Text style={styles.templateText}>{template.text.replace('{name}', recipientName || 'there')}</Text>
+              <Text {...TEXT_PROPS} style={styles.templateText}>{template.text.replace('{name}', recipientName || 'there')}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -377,7 +377,7 @@ export function MessageInput({
       {isRecording && (
         <View style={styles.recordingBanner}>
           <View style={styles.recordingDot} />
-          <Text style={styles.recordingText}>
+          <Text {...TEXT_PROPS} style={styles.recordingText}>
             Recording... {formatTime(elapsedMs)} / {formatTime(maxDurationMs)}
           </Text>
           <TouchableOpacity onPress={toggleRecording} style={styles.stopRecordingButton}>
@@ -456,11 +456,6 @@ export function MessageInput({
             textContentType="none"
             importantForAutofill="noExcludeDescendants"
           />
-          {shouldShowLimitCounter && (
-            <Text style={[styles.limitCounter, isAtTextLimit && styles.limitCounterReached]}>
-              {isAtTextLimit ? 'Limit reached' : `${remainingChars} left`}
-            </Text>
-          )}
         </Animated.View>
 
         {!isRecording && (
@@ -581,9 +576,9 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   attachCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -625,17 +620,6 @@ const styles = StyleSheet.create({
   inputRecording: {
     borderWidth: 1,
     borderColor: COLORS.error + '40',
-  },
-  limitCounter: {
-    position: 'absolute',
-    right: 12,
-    bottom: 4,
-    fontSize: 10,
-    color: COLORS.textMuted,
-    fontWeight: '600',
-  },
-  limitCounterReached: {
-    color: COLORS.error,
   },
   sendButton: {
     width: 40,
