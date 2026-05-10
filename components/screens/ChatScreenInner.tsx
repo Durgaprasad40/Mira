@@ -952,16 +952,38 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         return;
       }
       // Cleanup the expired session in backend
+      const expiredReason = gameSession.endedReason as 'invite_expired' | 'not_started' | 'timeout';
       cleanupExpiredMutation({
         authUserId: userId,
         conversationId,
-        endedReason: gameSession.endedReason as 'invite_expired' | 'not_started' | 'timeout',
+        endedReason: expiredReason,
       })
-        .then(() => {
+        .then((result) => {
           if (__DEV__) {
             console.log('[TD_END_TRACE] cooldown_set', {
               via: 'cleanupExpiredSession',
               endedReason: gameSession.endedReason,
+            });
+          }
+          // PHASE-1 T/D CHIP RESTORE: Phase-1 conversations have no canonical
+          // backend chip (insertTodSystemMessage targets privateMessages only).
+          // When cleanup actually transitioned a session, surface a transient
+          // expiry chip via the [SYSTEM:truthdare] marker so the chat reflects
+          // the timeout. cleanedCount > 0 mirrors the backend's idempotency
+          // guard so retries do not spam duplicate chips.
+          const cleanedCount = (result as { cleanedCount?: number } | undefined)?.cleanedCount ?? 0;
+          if (cleanedCount > 0) {
+            const expiryCopy =
+              expiredReason === 'invite_expired'
+                ? 'Game invite expired'
+                : 'Game ended due to inactivity';
+            sendMessage({
+              conversationId: asConversationId(conversationId),
+              authUserId: userId,
+              content: `[SYSTEM:truthdare]${expiryCopy}`,
+              type: 'text',
+            }).catch((chipErr) => {
+              if (__DEV__) console.warn('[TD_SYSTEM_MSG] expiry_chip_failed', chipErr);
             });
           }
         })
@@ -990,7 +1012,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (gameSession.state !== 'cooldown') {
       setShowCooldownMessage(false);
     }
-  }, [isDemo, gameSession?.state, gameSession?.endedReason, gameSession?.gameStartedAt, isTruthDareInvitee, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation]);
+  }, [isDemo, gameSession?.state, gameSession?.endedReason, gameSession?.gameStartedAt, isTruthDareInvitee, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation, sendMessage]);
 
   useEffect(() => {
     return () => {
@@ -1253,6 +1275,20 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               conversationId,
             });
             if (result.success) {
+              // PHASE-1 T/D CHIP RESTORE: emit transient "Game started" chip
+              // for Phase-1 conversations only on the first successful start
+              // (skip on idempotent retries where alreadyStarted === true).
+              // Phase-2 backend writes its own chip via insertTodSystemMessage.
+              if (!('alreadyStarted' in result) || result.alreadyStarted !== true) {
+                sendMessage({
+                  conversationId: asConversationId(conversationId),
+                  authUserId: userId,
+                  content: '[SYSTEM:truthdare]Game started',
+                  type: 'text',
+                }).catch((chipErr) => {
+                  if (__DEV__) console.warn('[TD_SYSTEM_MSG] start_chip_failed', chipErr);
+                });
+              }
               setShowTruthDareGame(true);
             }
           } catch (err) {
@@ -1297,7 +1333,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       console.log('[TD_MESSAGES][open_modal] state_none_open_invite');
     }
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId, conversationId, startGameMutation, isTruthDarePaused, showSpinHint, ensureChatActionAllowed]);
+  }, [isDemo, gameSession, userId, conversationId, startGameMutation, isTruthDarePaused, showSpinHint, ensureChatActionAllowed, sendMessage]);
 
   // Send game invite
   const handleSendInvite = useCallback(async () => {
@@ -1342,10 +1378,26 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         conversationId,
         accept,
       });
+      // PHASE-1 T/D CHIP RESTORE: Phase-1 conversations have no canonical
+      // backend chip, so emit a transient accept/decline chip here. The
+      // popup-after-accept fix is preserved — this only writes a chat chip
+      // and never opens the game modal.
+      const responderName = currentUser?.name || 'Someone';
+      const responseText = accept
+        ? `${responderName} accepted the invite`
+        : `${responderName} declined the invite`;
+      sendMessage({
+        conversationId: asConversationId(conversationId),
+        authUserId: userId,
+        content: `[SYSTEM:truthdare]${responseText}`,
+        type: 'text',
+      }).catch((chipErr) => {
+        if (__DEV__) console.warn('[TD_SYSTEM_MSG] respond_chip_failed', chipErr);
+      });
     } catch (error) {
       Alert.alert('Error', getErrorMessage(error, 'Failed to respond to invite'));
     }
-  }, [userId, conversationId, respondToInviteMutation, ensureChatActionAllowed]);
+  }, [userId, conversationId, respondToInviteMutation, ensureChatActionAllowed, sendMessage, currentUser?.name]);
 
   // End game (called from BottleSpinGame)
   // TD_END_TRACE: centralised instrumentation so any future accidental
@@ -1382,9 +1434,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [isDemo, userId, conversationId, endGameMutation]);
 
-  // Handler for BottleSpinGame result callbacks. Live mode writes canonical
-  // T/D chips from the backend game mutations; this callback only bridges
-  // demo messages and the explicit "end game" action.
+  // Handler for BottleSpinGame result callbacks. BottleSpinGame composes the
+  // user-facing string ("X chose TRUTH", "X skipped their turn", "X ended the
+  // game"). For Phase-1 conversations the backend insertTodSystemMessage
+  // helper silently no-ops (it targets privateMessages only), so we re-emit
+  // the chip here via the [SYSTEM:...] marker. Permanent chips
+  // ([SYSTEM:tod_perm]) for "chose TRUTH/DARE" so the transcript records the
+  // choice; transient chips ([SYSTEM:truthdare]) for "skipped"/"ended" so the
+  // chat does not accumulate noisy history.
   const handleSendTruthDareResult = useCallback(async (message: string) => {
     if (!conversationId) return;
     if (!ensureChatActionAllowed()) return;
@@ -1415,11 +1472,26 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           createdAt: Date.now(),
         };
         addDemoMessage(conversationId, demoSystemMessage);
+      } else if (userId) {
+        // PHASE-1 T/D CHIP RESTORE: classify result strings produced by
+        // BottleSpinGame so the transcript shows compact chips. "chose
+        // TRUTH"/"chose DARE" stay permanent (tod_perm); "skipped"/"ended"
+        // are transient (truthdare → 1 min after readAt, 3 min hard cap via
+        // MessageBubble's marker auto-hide).
+        const isPermanentResult = / chose (TRUTH|DARE)$/.test(message);
+        const subtype = isPermanentResult ? 'tod_perm' : 'truthdare';
+        await sendMessage({
+          conversationId: asConversationId(conversationId),
+          authUserId: userId,
+          content: `[SYSTEM:${subtype}]${message}`,
+          type: 'text',
+        });
       }
-    } catch {
-      // Silent fail - game continues even if message fails
+    } catch (chipErr) {
+      // Silent fail - game continues even if chip insertion fails
+      if (__DEV__) console.warn('[TD_SYSTEM_MSG] result_chip_failed', chipErr);
     }
-  }, [conversationId, isDemo, addDemoMessage, handleEndGame, ensureChatActionAllowed]);
+  }, [conversationId, isDemo, userId, addDemoMessage, handleEndGame, ensureChatActionAllowed, sendMessage]);
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
