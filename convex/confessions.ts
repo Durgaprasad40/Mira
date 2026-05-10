@@ -4,6 +4,7 @@ import { internal } from './_generated/api';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from './helpers';
 import { moderationStatusForCount } from './lib/confessionModeration';
+import { ensureActiveMatchForPair } from './matches';
 import type { ConfessionModerationStatus } from './lib/confessionModeration';
 
 // Phone number & email patterns for server-side validation
@@ -57,6 +58,9 @@ type ConfessionConnectStatus =
   | 'cancelled_by_from'
   | 'expired';
 type ConfessionConnectViewerRole = 'requester' | 'owner';
+type ConfessionConnectNotificationType =
+  | 'confession_connect_requested'
+  | 'confession_connect_accepted';
 
 // Canonical reply identity mode used by the current product contract.
 // Legacy 'blur' literal maps to 'blur_photo'; unknown/missing maps using isAnonymous.
@@ -492,6 +496,122 @@ async function pairCanUseConfessionConnect(
   return true;
 }
 
+async function upsertConfessionConnectNotification(
+  ctx: MutationCtx,
+  args: {
+    userId: Id<'users'>;
+    type: ConfessionConnectNotificationType;
+    title: string;
+    body: string;
+    data: {
+      confessionId: string;
+      connectId: string;
+      fromUserId?: string;
+      conversationId?: string;
+      matchId?: string;
+      source?: string;
+    };
+    dedupeKey: string;
+    now: number;
+  }
+): Promise<void> {
+  const expiresAt = args.now + 24 * 60 * 60 * 1000;
+  const existing = await ctx.db
+    .query('notifications')
+    .withIndex('by_user_dedupe', (q) =>
+      q.eq('userId', args.userId).eq('dedupeKey', args.dedupeKey)
+    )
+    .first();
+
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      type: args.type,
+      title: args.title,
+      body: args.body,
+      data: args.data,
+      phase: 'phase1',
+      createdAt: args.now,
+      expiresAt,
+      readAt: undefined,
+    });
+    return;
+  }
+
+  await ctx.db.insert('notifications', {
+    userId: args.userId,
+    type: args.type,
+    title: args.title,
+    body: args.body,
+    data: args.data,
+    phase: 'phase1',
+    dedupeKey: args.dedupeKey,
+    createdAt: args.now,
+    expiresAt,
+  });
+
+  await ctx.scheduler.runAfter(0, internal.pushNotifications.send, {
+    userId: args.userId,
+    title: args.title,
+    body: args.body,
+    data: args.data,
+    type: args.type,
+  });
+}
+
+async function notifyConfessionConnectRequested(
+  ctx: MutationCtx,
+  args: {
+    toUserId: Id<'users'>;
+    fromUserId: Id<'users'>;
+    confessionId: Id<'confessions'>;
+    connectId: Id<'confessionConnects'>;
+    now: number;
+  }
+): Promise<void> {
+  await upsertConfessionConnectNotification(ctx, {
+    userId: args.toUserId,
+    type: 'confession_connect_requested',
+    title: 'New connect request',
+    body: 'Someone wants to connect from your confession.',
+    data: {
+      confessionId: String(args.confessionId),
+      connectId: String(args.connectId),
+      fromUserId: String(args.fromUserId),
+      source: 'confession',
+    },
+    dedupeKey: `confession_connect_requested:${args.connectId}`,
+    now: args.now,
+  });
+}
+
+async function notifyConfessionConnectAccepted(
+  ctx: MutationCtx,
+  args: {
+    requesterUserId: Id<'users'>;
+    confessionId: Id<'confessions'>;
+    connectId: Id<'confessionConnects'>;
+    conversationId: Id<'conversations'>;
+    matchId: Id<'matches'>;
+    now: number;
+  }
+): Promise<void> {
+  await upsertConfessionConnectNotification(ctx, {
+    userId: args.requesterUserId,
+    type: 'confession_connect_accepted',
+    title: 'You connected',
+    body: "You both connected. Say hi when you're ready.",
+    data: {
+      confessionId: String(args.confessionId),
+      connectId: String(args.connectId),
+      conversationId: String(args.conversationId),
+      matchId: String(args.matchId),
+      source: 'confession',
+    },
+    dedupeKey: `confession_connect_accepted:${args.connectId}`,
+    now: args.now,
+  });
+}
+
 function confessionAllowsConnectPromotion(
   confession: Doc<'confessions'>,
   connect: Doc<'confessionConnects'>,
@@ -515,13 +635,35 @@ function confessionAllowsConnectPromotion(
   );
 }
 
+function confessionConversationMatchesConnect(
+  conversation: Doc<'conversations'>,
+  connect: Doc<'confessionConnects'>,
+  confession: Doc<'confessions'>
+): boolean {
+  if (conversation.confessionId && conversation.confessionId !== confession._id) {
+    return false;
+  }
+  const participants = new Set(conversation.participants.map(String));
+  return (
+    participants.has(String(connect.fromUserId)) &&
+    participants.has(String(connect.toUserId))
+  );
+}
+
+function canAttachConfessionMetadataToConversation(
+  conversation: Doc<'conversations'>,
+  confession: Doc<'confessions'>
+): boolean {
+  return !conversation.confessionId || conversation.confessionId === confession._id;
+}
+
 async function ensureMutualConfessionConversation(
   ctx: MutationCtx,
   connect: Doc<'confessionConnects'>,
   confession: Doc<'confessions'>,
   now: number,
   options?: { beingMarkedMutual?: boolean }
-): Promise<Id<'conversations'>> {
+): Promise<{ conversationId: Id<'conversations'>; matchId: Id<'matches'> }> {
   const beingMarkedMutual = options?.beingMarkedMutual === true;
   if (connect.status !== 'mutual' && !beingMarkedMutual) {
     throw new Error('Connect request unavailable');
@@ -540,12 +682,19 @@ async function ensureMutualConfessionConversation(
     throw new Error('Connect request unavailable');
   }
 
+  const matchId = await ensureActiveMatchForPair(
+    ctx,
+    connect.fromUserId,
+    connect.toUserId,
+    'confession'
+  );
+
   let conversation: Doc<'conversations'> | null = null;
   if (connect.conversationId) {
     const existingById = await ctx.db.get(connect.conversationId);
     if (
       existingById &&
-      (!existingById.confessionId || existingById.confessionId === confession._id)
+      confessionConversationMatchesConnect(existingById, connect, confession)
     ) {
       conversation = existingById;
     }
@@ -554,14 +703,27 @@ async function ensureMutualConfessionConversation(
   if (!conversation) {
     conversation = await ctx.db
       .query('conversations')
+      .withIndex('by_match', (q) => q.eq('matchId', matchId))
+      .first();
+  }
+
+  if (!conversation) {
+    conversation = await ctx.db
+      .query('conversations')
       .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
       .first();
+    if (conversation && !confessionConversationMatchesConnect(conversation, connect, confession)) {
+      conversation = null;
+    }
   }
 
   const participants = [connect.fromUserId, connect.toUserId];
   if (conversation) {
     await ctx.db.patch(conversation._id, {
-      confessionId: confession._id,
+      matchId,
+      ...(canAttachConfessionMetadataToConversation(conversation, confession)
+        ? { confessionId: confession._id }
+        : {}),
       participants,
       isPreMatch: false,
       expiresAt: undefined,
@@ -570,10 +732,11 @@ async function ensureMutualConfessionConversation(
     });
     await ensureConversationParticipantRow(ctx, conversation._id, connect.fromUserId);
     await ensureConversationParticipantRow(ctx, conversation._id, connect.toUserId);
-    return conversation._id;
+    return { conversationId: conversation._id, matchId };
   }
 
   const conversationId = await ctx.db.insert('conversations', {
+    matchId,
     confessionId: confession._id,
     participants,
     isPreMatch: false,
@@ -584,7 +747,7 @@ async function ensureMutualConfessionConversation(
 
   await ensureConversationParticipantRow(ctx, conversationId, connect.fromUserId);
   await ensureConversationParticipantRow(ctx, conversationId, connect.toUserId);
-  return conversationId;
+  return { conversationId, matchId };
 }
 
 // Create a new confession
@@ -1408,7 +1571,7 @@ export const getMyReplyForConfession = query({
 });
 
 // Toggle emoji reaction — one emoji per user per confession (toggle/replace)
-// Special behavior: if tagged user likes a tagged confession, create a DM thread
+// Emoji reactions are reaction-only; Connect / Reject owns chat and match creation.
 export const toggleReaction = mutation({
   args: {
     confessionId: v.id('confessions'),
@@ -1474,48 +1637,7 @@ export const toggleReaction = mutation({
       const actualCount = await recomputeReactionCount();
       await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
 
-      // SPECIAL: If tagged user likes a tagged confession, create/find a DM thread
-      let chatUnlocked = false;
-      if (confession.taggedUserId && userId === confession.taggedUserId) {
-        // Check if conversation already exists for this confession (idempotency)
-        const existingConvo = await ctx.db
-          .query('conversations')
-          .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
-          .first();
-
-        if (!existingConvo) {
-          // Create new conversation between author and tagged user
-          const now = Date.now();
-          const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-          const conversationId = await ctx.db.insert('conversations', {
-            confessionId: args.confessionId,
-            participants: [confession.userId, confession.taggedUserId],
-            isPreMatch: true, // Confession-based threads are pre-match
-            createdAt: now,
-            lastMessageAt: now,
-            expiresAt: now + TWENTY_FOUR_HOURS, // Confession chats expire in 24h
-            // PRIVACY FIX: Mark confession author as anonymous participant
-            // Their real identity should not be revealed to the tagged user
-            anonymousParticipantId: confession.isAnonymous ? confession.userId : undefined,
-          });
-
-          // Create participant junction rows for efficient Messages queries
-          await ctx.db.insert('conversationParticipants', {
-            conversationId,
-            userId: confession.userId,
-            unreadCount: 0,
-          });
-          await ctx.db.insert('conversationParticipants', {
-            conversationId,
-            userId: confession.taggedUserId,
-            unreadCount: 0,
-          });
-
-          chatUnlocked = true;
-        }
-      }
-
-      return { added: true, replaced: false, chatUnlocked };
+      return { added: true, replaced: false, chatUnlocked: false };
     }
   },
 });
@@ -2186,6 +2308,15 @@ export const requestConfessionConnect = mutation({
         throw new Error('Connect unavailable');
       }
       const current = await patchExpiredConnectIfNeeded(ctx, existing, now);
+      if (current.status === 'pending') {
+        await notifyConfessionConnectRequested(ctx, {
+          toUserId: confession.userId,
+          fromUserId: viewerId,
+          confessionId,
+          connectId: current._id,
+          now,
+        });
+      }
       return serializeConfessionConnect(current);
     }
 
@@ -2203,6 +2334,15 @@ export const requestConfessionConnect = mutation({
     if (!connect) {
       throw new Error('Connect unavailable');
     }
+
+    await notifyConfessionConnectRequested(ctx, {
+      toUserId: confession.userId,
+      fromUserId: viewerId,
+      confessionId,
+      connectId,
+      now,
+    });
+
     return serializeConfessionConnect(connect);
   },
 });
@@ -2241,7 +2381,7 @@ export const respondToConfessionConnect = mutation({
     }
 
     if (decision === 'connect' && connect.status === 'mutual') {
-      const conversationId = await ensureMutualConfessionConversation(
+      const { conversationId, matchId } = await ensureMutualConfessionConversation(
         ctx,
         connect,
         confession,
@@ -2253,6 +2393,14 @@ export const respondToConfessionConnect = mutation({
           updatedAt: now,
         });
       }
+      await notifyConfessionConnectAccepted(ctx, {
+        requesterUserId: connect.fromUserId,
+        confessionId: connect.confessionId,
+        connectId,
+        conversationId,
+        matchId,
+        now,
+      });
       const updated = await ctx.db.get(connectId);
       if (!updated) {
         throw new Error('Connect request unavailable');
@@ -2285,7 +2433,7 @@ export const respondToConfessionConnect = mutation({
       return serializeConfessionConnect(updated);
     }
 
-    const conversationId = await ensureMutualConfessionConversation(
+    const { conversationId, matchId } = await ensureMutualConfessionConversation(
       ctx,
       connect,
       confession,
@@ -2298,6 +2446,15 @@ export const respondToConfessionConnect = mutation({
       conversationId,
       updatedAt: now,
       respondedAt: now,
+    });
+
+    await notifyConfessionConnectAccepted(ctx, {
+      requesterUserId: connect.fromUserId,
+      confessionId: connect.confessionId,
+      connectId,
+      conversationId,
+      matchId,
+      now,
     });
 
     const updated = await ctx.db.get(connectId);
@@ -2334,7 +2491,7 @@ export const promoteConfessionConnectToConversation = mutation({
     }
 
     const now = Date.now();
-    const conversationId = await ensureMutualConfessionConversation(
+    const { conversationId } = await ensureMutualConfessionConversation(
       ctx,
       connect,
       confession,
@@ -2478,7 +2635,7 @@ export const getConfessionConnectStatus = query({
       canCancel,
       expiresAt: existing.expiresAt,
       respondedAt: existing.respondedAt,
-      conversationId: existing.conversationId,
+      conversationId: effectiveStatus === 'mutual' ? existing.conversationId : undefined,
     };
   },
 });

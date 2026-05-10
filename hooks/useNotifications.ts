@@ -20,7 +20,13 @@ const PHASE2_TYPES = new Set([
 ]);
 
 // Phase-1 demo-only types
-const PHASE1_DEMO_TYPES = new Set(['crossed_paths', 'nearby']);
+const PHASE1_DEMO_TYPES = new Set([
+  'crossed_paths',
+  'nearby',
+  'tagged_confession',
+  'confession_connect_requested',
+  'confession_connect_accepted',
+]);
 
 // Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell.
 const BELL_EXCLUDED_TYPES = new Set([
@@ -147,6 +153,12 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `confession_reaction:${data?.confessionId ?? 'unknown'}`;
     case 'confession_reply':
       return `confession_reply:${data?.confessionId ?? 'unknown'}`;
+    case 'tagged_confession':
+      return `tagged_confession:${data?.confessionId ?? 'unknown'}`;
+    case 'confession_connect_requested':
+      return `confession_connect_requested:${data?.connectId ?? data?.confessionId ?? 'unknown'}`;
+    case 'confession_connect_accepted':
+      return `confession_connect_accepted:${data?.connectId ?? data?.conversationId ?? 'unknown'}`;
     // P2-007 FIX: Phase-2 notification deduplication
     case 'phase2_match':
       // Dedupe by conversation ID (one notification per match conversation)

@@ -96,6 +96,7 @@ type LiveConversation = {
   isPreMatch: boolean;
   createdAt: number;
   isConfessionChat?: boolean;
+  isPreMutualConfessionChat?: boolean;
   expiresAt?: number;
   isExpired?: boolean;
   otherUser?: {
@@ -527,6 +528,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         },
         isPreMatch: storedMeta.isPreMatch,
         isConfessionChat: storedMeta.isConfessionChat,
+        isPreMutualConfessionChat: storedMeta.isConfessionChat,
         expiresAt: storedMeta.expiresAt,
       }
     : null;
@@ -2680,6 +2682,34 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     return name.slice(0, 2).toUpperCase() || '??';
   }, [activeConversation?.otherUser?.name]);
 
+  // COOLDOWN-LIVE: derive "XXm XXs" countdown text.
+  // HOOK-ORDER FIX: this useMemo MUST live above the early-return paths below
+  // (`!activeConversation`, `!otherUser`) so the hook list stays stable
+  // across renders. The body itself returns `null` when not applicable, so
+  // the visual behavior is unchanged. Primary source: gameSession.cooldownUntil
+  // (absolute timestamp). Fallback: cooldownAnchorRef captured at press time
+  // from remainingMs. cooldownTick (1s interval) drives re-render.
+  const cooldownLiveText = useMemo(() => {
+    if (isDemo || gameSession?.state !== 'cooldown') return null;
+    const gs: any = gameSession;
+    let expiry: number | null = null;
+    if (typeof gs.cooldownUntil === 'number' && gs.cooldownUntil > 0) {
+      expiry = gs.cooldownUntil;
+    } else if (cooldownAnchorRef.current && cooldownAnchorRef.current > Date.now()) {
+      expiry = cooldownAnchorRef.current;
+    } else if (typeof gs.remainingMs === 'number' && gs.remainingMs > 0) {
+      // Last-resort: approximate from live remainingMs snapshot.
+      expiry = Date.now() + gs.remainingMs;
+    }
+    if (!expiry) return null;
+    const remaining = Math.max(0, expiry - Date.now());
+    if (remaining <= 0) return null;
+    const totalSec = Math.floor(remaining / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}m ${s.toString().padStart(2, '0')}s`;
+  }, [cooldownTick, gameSession, isDemo]);
+
   // CRITICAL DISTINCTION:
   //   conversation === undefined  → Convex query still loading (show spinner)
   //   conversation === null       → Convex returned no result (show "not found")
@@ -2731,7 +2761,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // gate avatar/name rendering and profile-tap navigation.
   const otherUserPrivacy = otherUser as typeof otherUser & { isAnonymous?: boolean };
   const isOtherUserAnonymous = !isDemo && otherUserPrivacy.isAnonymous === true;
-  const isConfessionChat = !isDemo && activeConversation.isConfessionChat === true;
+  // Confess metadata can remain on a promoted mutual conversation. Only the
+  // backend's pre-mutual mode flag should trigger anonymous Confess UI.
+  const isPreMutualConfessionChat =
+    !isDemo && activeConversation.isPreMutualConfessionChat === true;
+  const isConfessionChat = isPreMutualConfessionChat;
   const otherUserName = otherUser.name;
   const otherUserPhotoUrl = isOtherUserAnonymous ? undefined : otherUser.photoUrl;
   const otherUserLastActive = otherUser.lastActive ?? 0;
@@ -2744,30 +2778,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Keyboard-open stays at 0 (KAV handles keyboard offset internally).
   const composerBottomPadding = 0;
 
-  // COOLDOWN-LIVE: derive "XXm XXs" countdown text.
-  // Primary source: gameSession.cooldownUntil (absolute timestamp).
-  // Fallback: cooldownAnchorRef captured at press time from remainingMs.
-  // cooldownTick (1s interval) drives re-render. Hidden when not in cooldown.
-  const cooldownLiveText = useMemo(() => {
-    if (isDemo || gameSession?.state !== 'cooldown') return null;
-    const gs: any = gameSession;
-    let expiry: number | null = null;
-    if (typeof gs.cooldownUntil === 'number' && gs.cooldownUntil > 0) {
-      expiry = gs.cooldownUntil;
-    } else if (cooldownAnchorRef.current && cooldownAnchorRef.current > Date.now()) {
-      expiry = cooldownAnchorRef.current;
-    } else if (typeof gs.remainingMs === 'number' && gs.remainingMs > 0) {
-      // Last-resort: approximate from live remainingMs snapshot.
-      expiry = Date.now() + gs.remainingMs;
-    }
-    if (!expiry) return null;
-    const remaining = Math.max(0, expiry - Date.now());
-    if (remaining <= 0) return null;
-    const totalSec = Math.floor(remaining / 1000);
-    const m = Math.floor(totalSec / 60);
-    const s = totalSec % 60;
-    return `${m}m ${s.toString().padStart(2, '0')}s`;
-  }, [cooldownTick, gameSession, isDemo]);
+  // cooldownLiveText is computed above the early-return paths to keep hook
+  // order stable across renders (see HOOK-ORDER FIX comment near its
+  // declaration). It is consumed by the cooldown banner JSX below.
   const pendingInviteBottom = composerHeight + composerBottomPadding + SPACING.sm;
 
   const canSendCustom = isDemo

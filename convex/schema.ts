@@ -708,8 +708,8 @@ export default defineSchema({
     crossedPathsCount: v.optional(v.number()),
     isActive: v.boolean(),
     // Track how this match was created for UI organization
-    // 'super_like' matches appear in Super Likes section, 'like' in New Matches
-    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
+    // 'super_like' matches appear in Super Likes section, 'like'/'confession' in New Matches
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'), v.literal('confession'))),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
@@ -1034,6 +1034,8 @@ export default defineSchema({
       // Phase-1 confession surface: tagged-confession bell item that deep-links
       // to /(main)/confession-thread. Payload uses data.confessionId.
       v.literal('tagged_confession'),
+      v.literal('confession_connect_requested'),
+      v.literal('confession_connect_accepted'),
       // Legacy Phase-2 literals retained for backwards compatibility with
       // existing rows; new writes MUST go to `privateNotifications`.
       v.literal('phase2_match'),
@@ -1052,7 +1054,9 @@ export default defineSchema({
       // required to open the thread; fromUserId is recorded for moderation
       // / future allowlist checks but is never rendered in notification text.
       confessionId: v.optional(v.string()),
+      connectId: v.optional(v.string()),
       fromUserId: v.optional(v.string()),
+      source: v.optional(v.string()),
       // Legacy fields retained for backwards compatibility
       phase: v.optional(v.string()),
       otherUserId: v.optional(v.string()),

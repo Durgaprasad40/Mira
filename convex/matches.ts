@@ -1,17 +1,103 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { mutation, query, type MutationCtx } from './_generated/server';
+import { Id, type Doc } from './_generated/dataModel';
 import { resolveUserIdByAuthId } from './helpers';
+
+type Phase1MatchSource = 'like' | 'super_like' | 'confession';
+
+function getSortedMatchPair(userAId: Id<'users'>, userBId: Id<'users'>) {
+  return userAId < userBId
+    ? { user1Id: userAId, user2Id: userBId }
+    : { user1Id: userBId, user2Id: userAId };
+}
+
+async function getPhase1MatchesForPair(
+  ctx: MutationCtx,
+  userAId: Id<'users'>,
+  userBId: Id<'users'>
+): Promise<Doc<'matches'>[]> {
+  const { user1Id, user2Id } = getSortedMatchPair(userAId, userBId);
+  const [canonicalRows, legacyReverseRows] = await Promise.all([
+    ctx.db
+      .query('matches')
+      .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+      .collect(),
+    ctx.db
+      .query('matches')
+      .withIndex('by_users', (q) => q.eq('user1Id', user2Id).eq('user2Id', user1Id))
+      .collect(),
+  ]);
+
+  const seen = new Set<string>();
+  return [...canonicalRows, ...legacyReverseRows].filter((match) => {
+    const key = String(match._id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Idempotently ensures a Phase-1 active match exists for a pair.
+ *
+ * Safety checks (block/report/deleted/banned) are intentionally kept in the
+ * caller so feature-specific consent rules stay close to the product flow.
+ */
+export async function ensureActiveMatchForPair(
+  ctx: MutationCtx,
+  userAId: Id<'users'>,
+  userBId: Id<'users'>,
+  source: Phase1MatchSource
+): Promise<Id<'matches'>> {
+  if (userAId === userBId) {
+    throw new Error('Cannot match a user with themselves');
+  }
+
+  const now = Date.now();
+  const existingMatches = await getPhase1MatchesForPair(ctx, userAId, userBId);
+  const activeMatches = existingMatches.filter((match) => match.isActive);
+  if (activeMatches.length > 0) {
+    activeMatches.sort((a, b) => a._id.localeCompare(b._id));
+    return activeMatches[0]._id;
+  }
+
+  if (existingMatches.length > 0) {
+    existingMatches.sort((a, b) => a._id.localeCompare(b._id));
+    const match = existingMatches[0];
+    const patch: Partial<Doc<'matches'>> = {
+      isActive: true,
+      matchedAt: now,
+      user1UnmatchedAt: undefined,
+      user2UnmatchedAt: undefined,
+    };
+    if (source === 'confession') {
+      patch.matchSource = 'confession';
+    }
+    await ctx.db.patch(match._id, patch);
+    return match._id;
+  }
+
+  const { user1Id, user2Id } = getSortedMatchPair(userAId, userBId);
+  return ctx.db.insert('matches', {
+    user1Id,
+    user2Id,
+    matchedAt: now,
+    isActive: true,
+    matchSource: source,
+  });
+}
 
 // Get all matches for a user
 // FIX: Excludes blocked users (bidirectional)
 export const getMatches = query({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50 } = args;
+    const { authUserId, limit = 50 } = args;
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return [];
 
     // Get matches where user is either user1 or user2
     const [matchesAsUser1, matchesAsUser2] = await Promise.all([
@@ -31,7 +117,7 @@ export const getMatches = query({
     if (allMatches.length === 0) return [];
 
     // FIX: Batch fetch blocked users (bidirectional)
-    const [myBlocks, blocksOnMe] = await Promise.all([
+    const [myBlocks, blocksOnMe, myReports, reportsOnMe] = await Promise.all([
       // Users I have blocked
       ctx.db
         .query('blocks')
@@ -42,10 +128,20 @@ export const getMatches = query({
         .query('blocks')
         .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
         .collect(),
+      ctx.db
+        .query('reports')
+        .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
+        .collect(),
+      ctx.db
+        .query('reports')
+        .withIndex('by_reported_user', (q) => q.eq('reportedUserId', userId))
+        .collect(),
     ]);
-    const blockedUserIds = new Set([
+    const blockedOrReportedUserIds = new Set([
       ...myBlocks.map((b) => b.blockedUserId as string),
       ...blocksOnMe.map((b) => b.blockerId as string),
+      ...myReports.map((r) => r.reportedUserId as string),
+      ...reportsOnMe.map((r) => r.reporterId as string),
     ]);
 
     // PERF #6: Batch-fetch all other users and conversations in parallel
@@ -137,7 +233,7 @@ export const getMatches = query({
       const otherUserId = match.user1Id === userId ? match.user2Id : match.user1Id;
 
       // FIX: Skip matches with blocked users (either direction)
-      if (blockedUserIds.has(otherUserId as string)) continue;
+      if (blockedOrReportedUserIds.has(otherUserId as string)) continue;
 
       const otherUser = userMap.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
@@ -289,7 +385,9 @@ export const unmatch = mutation({
       throw new Error('Not authorized');
     }
 
-    // Mark unmatch time for this user
+    // Mark unmatch time for this user. Messages/Discover treat this
+    // `isActive=false` row as the backend source of truth for hiding normal
+    // Phase-1 chat rows and rejecting stale sends without deleting history.
     const updateField = match.user1Id === userId ? 'user1UnmatchedAt' : 'user2UnmatchedAt';
     await ctx.db.patch(matchId, {
       [updateField]: Date.now(),

@@ -48,8 +48,53 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+async function hasReportBetween(
+  ctx: QueryCtx | MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  const report1 = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userId1).eq('reportedUserId', userId2)
+    )
+    .first();
+  if (report1) return true;
+
+  const report2 = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userId2).eq('reportedUserId', userId1)
+    )
+    .first();
+  return !!report2;
+}
+
 function isUnavailableDmUser(user: Doc<'users'> | null): boolean {
   return !user || !user.isActive || user.isBanned === true || !!user.deletedAt;
+}
+
+function hasActiveLinkedMatch(
+  conversation: Doc<'conversations'>,
+  match: Doc<'matches'> | null
+): boolean {
+  if (!conversation.matchId) return true;
+  if (!match || match.isActive === false) return false;
+
+  const participantIds = new Set(conversation.participants.map((id) => id as string));
+  return participantIds.has(match.user1Id as string) && participantIds.has(match.user2Id as string);
+}
+
+function isPreMutualConfessionConversation(
+  conversation: Doc<'conversations'>,
+  hasActiveMatch: boolean
+): boolean {
+  if (!conversation.confessionId || hasActiveMatch) return false;
+  return (
+    conversation.isPreMatch === true ||
+    !!conversation.anonymousParticipantId ||
+    !!conversation.expiresAt
+  );
 }
 
 async function getPhase1PrimaryPhoto(
@@ -372,6 +417,9 @@ export const sendMessage = mutation({
     if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
       throw new Error('Cannot send message');
     }
+    if (recipientId && await hasReportBetween(ctx, senderId, recipientId)) {
+      throw new Error('Cannot send message');
+    }
 
     // Phase-2 Chat Rooms: if recipient muted sender in the originating room,
     // block the private DM. One-way (recipient is muter, sender is target).
@@ -396,6 +444,13 @@ export const sendMessage = mutation({
       const recipient = await ctx.db.get(recipientId);
       if (isUnavailableDmUser(recipient)) {
         throw new Error('Recipient unavailable');
+      }
+    }
+
+    if (conversation.matchId) {
+      const match = await ctx.db.get(conversation.matchId);
+      if (!hasActiveLinkedMatch(conversation, match)) {
+        throw new Error('This chat is no longer active.');
       }
     }
 
@@ -1476,27 +1531,37 @@ export const getConversation = query({
     if (await isBlockedBidirectional(ctx, userId, otherUserId)) {
       return null;
     }
+    if (await hasReportBetween(ctx, userId, otherUserId)) {
+      return null;
+    }
 
     const otherUser = await ctx.db.get(otherUserId);
 
-    // P1-RESTORE: Terminal state — degrade gracefully instead of returning null
-    let terminalState: 'unmatched' | 'user_removed' | null = null;
-
-    // Check unmatched (only relevant if conversation has a matchId)
+    let hasLinkedActiveMatch = false;
     if (conversation.matchId) {
       const match = await ctx.db.get(conversation.matchId);
-      if (!match || match.isActive === false) {
-        terminalState = 'unmatched';
+      if (!hasActiveLinkedMatch(conversation, match)) {
+        return null;
       }
+      hasLinkedActiveMatch = true;
     }
+
+    let terminalState: 'user_removed' | null = null;
     // user_removed takes precedence (user gone or deactivated)
     if (!otherUser || otherUser.isActive === false) {
       terminalState = 'user_removed';
     }
 
-    // PRIVACY FIX: Check if the other user should be shown anonymously
-    // This happens when they're the confession author on an anonymous confession
-    const isOtherUserAnonymous = conversation.anonymousParticipantId === otherUserId;
+    const isPreMutualConfessionChat = isPreMutualConfessionConversation(
+      conversation,
+      hasLinkedActiveMatch
+    );
+
+    // PRIVACY FIX: Check if the other user should be shown anonymously.
+    // Confession metadata can remain after mutual connect; only pre-mutual
+    // confession chats should keep anonymous rendering.
+    const isOtherUserAnonymous =
+      isPreMutualConfessionChat && conversation.anonymousParticipantId === otherUserId;
 
     // Get primary photo (only if not anonymous and user still exists)
     let photo = null;
@@ -1511,10 +1576,10 @@ export const getConversation = query({
       resolvedPhotoUrl = await ctx.storage.getUrl(photo.storageId);
     }
 
-    // Check if this is an expired confession-based conversation
-    const isConfessionChat = !!conversation.confessionId;
+    // Confession mode is UI state, not merely stored confession metadata.
+    const isConfessionChat = isPreMutualConfessionChat;
     const isChatRoomPrivateDm = isChatRoomPrivateDmConversation(conversation);
-    const isExpired = (isConfessionChat && conversation.expiresAt
+    const isExpired = (isPreMutualConfessionChat && conversation.expiresAt
       ? conversation.expiresAt <= now
       : false) || isChatRoomPrivateDmExpired(conversation, now);
 
@@ -1524,6 +1589,7 @@ export const getConversation = query({
       isPreMatch: conversation.isPreMatch,
       createdAt: conversation.createdAt,
       isConfessionChat,
+      isPreMutualConfessionChat,
       isChatRoomPrivateDm,
       expiresAt: conversation.expiresAt,
       isExpired,
@@ -1570,7 +1636,7 @@ export const getConversations = query({
     // PERF #7: Batch-fetch all related data in parallel instead of N+1 queries
     // M2 FIX: Batch-fetch ALL blocks for current user in just 2 queries (not 2*N)
     // Uses same efficient pattern as privateDiscover.ts
-    const [blocksOut, blocksIn] = await Promise.all([
+    const [blocksOut, blocksIn, reportsOut, reportsIn] = await Promise.all([
       // All users I have blocked
       ctx.db
         .query('blocks')
@@ -1581,12 +1647,22 @@ export const getConversations = query({
         .query('blocks')
         .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
         .collect(),
+      ctx.db
+        .query('reports')
+        .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
+        .collect(),
+      ctx.db
+        .query('reports')
+        .withIndex('by_reported_user', (q) => q.eq('reportedUserId', userId))
+        .collect(),
     ]);
 
     // Build set of blocked user IDs (either direction)
-    const blockedUserIds = new Set([
+    const blockedOrReportedUserIds = new Set([
       ...blocksOut.map((b) => b.blockedUserId as string),
       ...blocksIn.map((b) => b.blockerId as string),
+      ...reportsOut.map((r) => r.reportedUserId as string),
+      ...reportsIn.map((r) => r.reporterId as string),
     ]);
 
     type ConversationCandidate = {
@@ -1649,6 +1725,19 @@ export const getConversations = query({
       const participantUserMap = new Map(
         participantOtherUserIds.map((id, index) => [id, participantUsers[index]])
       );
+      const participantMatchIds = Array.from(
+        new Set(
+          participantConversations
+            .map((conversation) => conversation?.matchId as string | undefined)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+      const participantMatches = await Promise.all(
+        participantMatchIds.map((id) => ctx.db.get(id as Id<'matches'>))
+      );
+      const participantMatchMap = new Map(
+        participantMatchIds.map((id, index) => [id, participantMatches[index]])
+      );
 
       for (let index = 0; index < participantRows.length; index++) {
         const row = participantRows[index];
@@ -1665,13 +1754,20 @@ export const getConversations = query({
         if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
           continue;
         }
+        if (
+          conversation.matchId &&
+          !hasActiveLinkedMatch(
+            conversation,
+            participantMatchMap.get(conversation.matchId as string) ?? null
+          )
+        ) {
+          continue;
+        }
 
         const otherUserId = conversation.participants.find((id: Id<'users'>) => id !== userId);
         if (!otherUserId) continue;
-        if (blockedUserIds.has(otherUserId as string)) continue;
+        if (blockedOrReportedUserIds.has(otherUserId as string)) continue;
 
-        // P1-RESTORE: terminal state — keep candidate even if user removed/inactive,
-        // so the inbox row degrades gracefully to "User unavailable" instead of vanishing.
         pushCandidate({
           conversation,
           otherUserId,
@@ -1711,6 +1807,19 @@ export const getConversations = query({
       const fallbackUserMap = new Map(
         fallbackOtherUserIds.map((id, index) => [id, fallbackUsers[index]])
       );
+      const fallbackMatchIds = Array.from(
+        new Set(
+          fallbackConversations
+            .map((conversation) => conversation.matchId as string | undefined)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+      const fallbackMatches = await Promise.all(
+        fallbackMatchIds.map((id) => ctx.db.get(id as Id<'matches'>))
+      );
+      const fallbackMatchMap = new Map(
+        fallbackMatchIds.map((id, index) => [id, fallbackMatches[index]])
+      );
 
       for (const conversation of fallbackConversations) {
         if (seenConversationIds.has(conversation._id as string)) continue;
@@ -1722,13 +1831,20 @@ export const getConversations = query({
         if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
           continue;
         }
+        if (
+          conversation.matchId &&
+          !hasActiveLinkedMatch(
+            conversation,
+            fallbackMatchMap.get(conversation.matchId as string) ?? null
+          )
+        ) {
+          continue;
+        }
 
         const otherUserId = conversation.participants.find((id) => id !== userId);
         if (!otherUserId) continue;
-        if (blockedUserIds.has(otherUserId as string)) continue;
+        if (blockedOrReportedUserIds.has(otherUserId as string)) continue;
 
-        // P1-RESTORE: terminal state — keep candidate even if user removed/inactive
-        // so the row can render as "User unavailable" instead of being dropped silently.
         const unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
         pushCandidate({
           conversation,
@@ -1765,7 +1881,7 @@ export const getConversations = query({
 
     const otherUserIds = finalCandidates.map((candidate) => candidate.otherUserId);
 
-    // Parallel batch: users, photos, last messages, AND matches (for terminal-state detection).
+    // Parallel batch: users, photos, last messages, AND matches (for active-match validation).
     const [users, photos, lastMessages, matches] = await Promise.all([
       Promise.all(otherUserIds.map((id) => ctx.db.get(id))),
       Promise.all(
@@ -1782,7 +1898,7 @@ export const getConversations = query({
             .first()
         )
       ),
-      // P1-RESTORE: fetch matches per-row for unmatched terminal-state detection.
+      // Fetch matches per-row so inactive/orphan match conversations stay out of Recent Chats.
       Promise.all(
         finalCandidates.map((candidate) =>
           candidate.conversation.matchId ? ctx.db.get(candidate.conversation.matchId) : Promise.resolve(null)
@@ -1812,13 +1928,11 @@ export const getConversations = query({
       const otherUser = users[i];
       const match = matches[i];
 
-      // P1-RESTORE: terminal state — degrade UI gracefully instead of dropping rows.
-      let terminalState: 'unmatched' | 'user_removed' | null = null;
-      if (conversation.matchId) {
-        if (!match || match.isActive === false) {
-          terminalState = 'unmatched';
-        }
+      if (conversation.matchId && !hasActiveLinkedMatch(conversation, match)) {
+        continue;
       }
+
+      let terminalState: 'user_removed' | null = null;
       if (!otherUser || otherUser.isActive === false) {
         terminalState = 'user_removed';
       }
@@ -1826,14 +1940,27 @@ export const getConversations = query({
       const resolvedPhotoUrl = photoUrlMap.get(otherUserId as string) ?? null;
       const lastMessage = lastMessages[i];
 
-      // PRIVACY FIX: Check if the other user should be shown anonymously
-      // This happens when they're the confession author on an anonymous confession
-      const isOtherUserAnonymous = conversation.anonymousParticipantId === otherUserId;
+      const hasLinkedActiveMatch =
+        !!conversation.matchId &&
+        !!match &&
+        hasActiveLinkedMatch(conversation, match);
+      const isPreMutualConfessionChat = isPreMutualConfessionConversation(
+        conversation,
+        hasLinkedActiveMatch
+      );
+
+      // PRIVACY FIX: Check if the other user should be shown anonymously.
+      // Promoted Confess Connect chats keep confessionId as metadata but render
+      // like normal matched chats once they have an active match.
+      const isOtherUserAnonymous =
+        isPreMutualConfessionChat && conversation.anonymousParticipantId === otherUserId;
 
       result.push({
         id: conversation._id,
         matchId: conversation.matchId,
         isPreMatch: conversation.isPreMatch,
+        isConfessionChat: isPreMutualConfessionChat,
+        isPreMutualConfessionChat,
         lastMessageAt: conversation.lastMessageAt,
         terminalState,
         otherUser: {

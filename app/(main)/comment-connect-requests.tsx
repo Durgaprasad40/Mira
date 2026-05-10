@@ -60,16 +60,25 @@ export default function CommentConnectRequestsScreen() {
   const respondToConfessionConnect = useMutation(api.confessions.respondToConfessionConnect);
   const [busyConnectId, setBusyConnectId] = useState<string | null>(null);
 
-  const openMessagesConversation = useCallback((conversationId?: string | null) => {
+  const openConnectCelebration = useCallback((conversationId?: string | null, matchId?: string | null) => {
     const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
     if (!normalized) {
-      Toast.show('The chat is not ready yet.');
+      Toast.show('Connected. Chat is being prepared.');
       return;
+    }
+    const params = new URLSearchParams({
+      conversationId: normalized,
+      source: 'confession',
+      phase: 'phase1',
+    });
+    const normalizedMatchId = typeof matchId === 'string' ? matchId.trim() : '';
+    if (normalizedMatchId) {
+      params.set('matchId', normalizedMatchId);
     }
     safePush(
       router,
-      `/(main)/(tabs)/messages/chat/${normalized}?source=confession` as any,
-      'connectRequests->messages'
+      `/(main)/match-celebration?${params.toString()}` as any,
+      'connectRequests->connectCelebration'
     );
   }, [router]);
 
@@ -84,11 +93,11 @@ export default function CommentConnectRequestsScreen() {
         token,
         connectId: connectId as any,
         decision,
-      }) as { status?: string; conversationId?: string };
+      }) as { status?: string; conversationId?: string; matchId?: string };
 
       if (decision === 'connect') {
         if (result?.conversationId) {
-          openMessagesConversation(result.conversationId);
+          openConnectCelebration(result.conversationId, result.matchId);
         } else {
           Alert.alert('Connected', 'The chat is being prepared. Please try opening it again.');
         }
@@ -100,7 +109,7 @@ export default function CommentConnectRequestsScreen() {
     } finally {
       setBusyConnectId(null);
     }
-  }, [busyConnectId, openMessagesConversation, respondToConfessionConnect, token]);
+  }, [busyConnectId, openConnectCelebration, respondToConfessionConnect, token]);
 
   const renderRequest = useCallback(({ item }: { item: PendingConfessionConnect }) => {
     const isBusy = busyConnectId === item.connectId;

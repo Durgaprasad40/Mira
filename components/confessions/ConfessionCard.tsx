@@ -68,7 +68,6 @@ interface ConfessionCardProps {
   reactionsReadOnly?: boolean; // show counts only; no picker/toggle affordance
   isTaggedForMe?: boolean; // true if current user is tagged in this confession
   previewUsed?: boolean; // true if one-time profile preview has been used
-  isConnected?: boolean; // true if tagged user has connected (chat created)
   // Tagged user display (privacy-safe)
   taggedUserId?: string;
   authorId?: string;
@@ -94,7 +93,6 @@ interface ConfessionCardProps {
   onToggleEmoji?: (emoji: string) => void; // directly toggle a specific emoji
   onViewProfile?: () => void; // one-time profile preview for tagged receivers
   onTagPress?: () => void; // tap @tag to open profile preview
-  onConnect?: () => void; // tagged user connects to start chat
   onAuthorPress?: () => void; // tap author identity to open full profile preview
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -141,7 +139,6 @@ export default function ConfessionCard({
   reactionsReadOnly = false,
   isTaggedForMe,
   previewUsed,
-  isConnected,
   taggedUserId,
   authorId,
   viewerId,
@@ -159,7 +156,6 @@ export default function ConfessionCard({
   onToggleEmoji,
   onViewProfile,
   onTagPress,
-  onConnect,
   onAuthorPress,
   // Inline edit mode
   isEditing = false,
@@ -732,28 +728,6 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   viewProfileTextUsed: {
-    color: COLORS.textMuted,
-  },
-  connectButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs + 2,
-    alignSelf: 'flex-start',
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: SPACING.md + 2,
-    paddingVertical: SPACING.sm,
-    borderRadius: SIZES.radius.sm,
-    marginBottom: SPACING.sm,
-  },
-  connectButtonConnected: {
-    backgroundColor: 'rgba(153,153,153,0.1)',
-  },
-  connectButtonText: {
-    fontSize: FONT_SIZE.caption,
-    fontWeight: FONT_WEIGHT.semibold,
-    color: COLORS.white,
-  },
-  connectButtonTextConnected: {
     color: COLORS.textMuted,
   },
   reactionBarWrap: {

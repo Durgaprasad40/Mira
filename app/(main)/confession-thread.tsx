@@ -406,8 +406,30 @@ export default function ConfessionThreadScreen() {
     }
     safePush(
       router,
-      `/(main)/(tabs)/messages/chat/${normalized}?source=confession` as any,
+      `/(main)/(tabs)/messages/chat/${normalized}` as any,
       'thread->confessConnectChat'
+    );
+  }, [router]);
+
+  const openConnectCelebration = useCallback((conversationId?: string | null, matchId?: string | null) => {
+    const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
+    if (!normalized) {
+      Alert.alert('Connected', 'The chat is being prepared. Please try opening it again.');
+      return;
+    }
+    const params = new URLSearchParams({
+      conversationId: normalized,
+      source: 'confession',
+      phase: 'phase1',
+    });
+    const normalizedMatchId = typeof matchId === 'string' ? matchId.trim() : '';
+    if (normalizedMatchId) {
+      params.set('matchId', normalizedMatchId);
+    }
+    safePush(
+      router,
+      `/(main)/match-celebration?${params.toString()}` as any,
+      'thread->confessConnectCelebration'
     );
   }, [router]);
 
@@ -423,10 +445,10 @@ export default function ConfessionThreadScreen() {
       const result = await requestConfessionConnectMutation({
         token,
         confessionId: confessionId as any,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
       setConnectDismissed(false);
       if (result?.status === 'mutual' && result.conversationId) {
-        openMessagesConversation(result.conversationId);
+        openConnectCelebration(result.conversationId, result.matchId);
       } else {
         Alert.alert('Request sent', 'If they connect too, Mira will open a chat in Messages.');
       }
@@ -439,7 +461,7 @@ export default function ConfessionThreadScreen() {
     confessionId,
     connectAction,
     isDemoMode,
-    openMessagesConversation,
+    openConnectCelebration,
     requestConfessionConnectMutation,
     token,
   ]);
@@ -473,11 +495,11 @@ export default function ConfessionThreadScreen() {
         token,
         connectId: connectStatus.connectId as any,
         decision,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
 
       if (decision === 'connect') {
         if (result?.conversationId) {
-          openMessagesConversation(result.conversationId);
+          openConnectCelebration(result.conversationId, result.matchId);
         } else {
           Alert.alert('Connected', 'The chat is being prepared. Please try opening it again.');
         }
@@ -492,7 +514,7 @@ export default function ConfessionThreadScreen() {
   }, [
     connectAction,
     connectStatus,
-    openMessagesConversation,
+    openConnectCelebration,
     respondToConfessionConnectMutation,
     token,
   ]);

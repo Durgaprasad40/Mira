@@ -1,7 +1,28 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 import { recordBgCrossedPathsBreadcrumb } from '@/lib/backgroundCrossedPathsTelemetry';
+
+/**
+ * Lazy-load the native `expo-background-task` module. Phase-2/dev builds may
+ * not bundle the native binding, so a top-level `import` would crash app
+ * startup with "Cannot find native module 'ExpoBackgroundTask'". Each helper
+ * below calls this only after `BG_CROSSED_PATHS_FEATURE_READY` is verified.
+ * If the require throws (module missing), we fail-soft and return null.
+ */
+function loadBackgroundTaskModule(): typeof import('expo-background-task') | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('expo-background-task') as typeof import('expo-background-task');
+  } catch (err) {
+    if (__DEV__) {
+      console.warn(
+        '[BG_FLUSH_TASK] expo-background-task native module unavailable.',
+        (err as Error)?.message,
+      );
+    }
+    return null;
+  }
+}
 
 /**
  * Background Crossed Paths — Phase-2 client foundation
@@ -180,6 +201,17 @@ export async function registerBackgroundCrossedPathsFlushTask(): Promise<{
     return { registered: false, reason: 'locally_disabled' };
   }
 
+  // Phase-3 ON path only: resolve the native module here so Phase-2/dev
+  // builds without `expo-background-task` never crash module evaluation.
+  const BackgroundTask = loadBackgroundTaskModule();
+  if (!BackgroundTask) {
+    recordBgCrossedPathsBreadcrumb('deferred_flush_register_skipped', {
+      reason: 'native_module_unavailable',
+    });
+    if (__DEV__) console.warn('[BG_FLUSH_TASK] skipped reason=native_module_unavailable');
+    return { registered: false, reason: 'native_module_unavailable' };
+  }
+
   try {
     if (!TaskManager.isTaskDefined(BACKGROUND_FLUSH_TASK_NAME)) {
       recordBgCrossedPathsBreadcrumb('deferred_flush_register_skipped', {
@@ -219,6 +251,19 @@ export async function registerBackgroundCrossedPathsFlushTask(): Promise<{
 }
 
 export async function unregisterBackgroundCrossedPathsFlushTask(): Promise<void> {
+  // Lazy-load: if the native module isn't bundled (Phase-2/dev), there is
+  // nothing to unregister at the OS level — clear the local opt-in flag and
+  // exit cleanly so consent revocation paths still work.
+  const BackgroundTask = loadBackgroundTaskModule();
+  if (!BackgroundTask) {
+    recordBgCrossedPathsBreadcrumb('deferred_flush_unregister_skipped', {
+      reason: 'native_module_unavailable',
+    });
+    if (__DEV__) console.log('[BG_FLUSH_TASK] unregister skipped reason=native_module_unavailable');
+    await setLocalBackgroundCrossedPathsEnabled(false);
+    return;
+  }
+
   try {
     await BackgroundTask.unregisterTaskAsync(BACKGROUND_FLUSH_TASK_NAME);
     recordBgCrossedPathsBreadcrumb('deferred_flush_task_unregistered');

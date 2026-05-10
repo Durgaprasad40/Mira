@@ -215,6 +215,43 @@ export default function NotificationsScreen() {
       case 'comment_connect':
         router.push(`/(main)/comment-connect-requests?${notifParams}${dedupeParam}` as any);
         break;
+      case 'confession_connect_requested':
+        router.push({
+          pathname: '/(main)/comment-connect-requests',
+          params: {
+            source: 'notification',
+            notificationId: notification._id,
+            ...(notification.dedupeKey && { dedupeKey: notification.dedupeKey }),
+            ...(notification.data?.connectId && { connectId: notification.data.connectId }),
+            ...(notification.data?.confessionId && { confessionId: notification.data.confessionId }),
+          },
+        } as any);
+        break;
+      case 'confession_connect_accepted':
+        if (notification.data?.conversationId) {
+          const params: Record<string, string> = {
+            conversationId: notification.data.conversationId,
+            source: 'confession',
+            phase: 'phase1',
+            notificationId: notification._id,
+          };
+          if (notification.dedupeKey) {
+            params.dedupeKey = notification.dedupeKey;
+          }
+          if (notification.data.matchId) {
+            params.matchId = notification.data.matchId;
+          }
+          router.push({
+            pathname: '/(main)/match-celebration',
+            params,
+          } as any);
+        } else {
+          Alert.alert(
+            'Chat unavailable',
+            'This connection is not ready yet. Please try again in a moment.'
+          );
+        }
+        break;
       case 'confession_reaction':
       case 'confession_reply':
       case 'tagged_confession':
@@ -294,6 +331,10 @@ export default function NotificationsScreen() {
         return 'chatbubble-ellipses';
       case 'tagged_confession':
         return 'at';
+      case 'confession_connect_requested':
+        return 'person-add';
+      case 'confession_connect_accepted':
+        return 'chatbubbles';
       default:
         return 'notifications';
     }
@@ -326,6 +367,8 @@ export default function NotificationsScreen() {
       case 'confession_reaction':
       case 'confession_reply':
       case 'tagged_confession':
+      case 'confession_connect_requested':
+      case 'confession_connect_accepted':
         return '#9C27B0';
       default:
         return COLORS.textLight;

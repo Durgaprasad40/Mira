@@ -27,7 +27,6 @@ import {
 } from '@/lib/demoData';
 import { isProbablyEmoji } from '@/lib/utils';
 import { useDemoDmStore } from '@/stores/demoDmStore';
-import { useDemoStore, DemoMatch } from '@/stores/demoStore';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { useBlockStore } from './blockStore';
 
@@ -67,20 +66,11 @@ function migrateConfessionReactions(c: Confession): Confession {
   return c;
 }
 
-function getTaggedUserId(confession: Confession | undefined | null): string | undefined {
-  return confession?.taggedUserId ?? (confession as any)?.targetUserId;
-}
-
-// Demo-only legacy reaction-created threads (confessionId -> conversationId).
-// Live Confess Connect / Reject no longer reads this local map.
+// Demo-only legacy thread tracking kept for cleanup of existing data.
+// Emoji reactions no longer add to this map; Connect / Reject owns chat creation.
 interface ConfessionThreads {
   [confessionId: string]: string; // conversationId
 }
-
-// CONSISTENCY FIX B4: Module-level guard to prevent concurrent thread creation race
-// This ensures that even if two toggleReaction calls pass the stale state check,
-// only one will proceed to create a thread
-const threadCreationInProgress = new Set<string>();
 
 // Rate limiting constants
 const CONFESSION_RATE_LIMIT = 1; // Max confessions per 24 hours
@@ -96,7 +86,7 @@ interface ConfessionState {
   reportedIds: string[];
   blockedIds: string[];
   seeded: boolean;
-  confessionThreads: ConfessionThreads; // Demo-only legacy reaction-created threads
+  confessionThreads: ConfessionThreads; // Demo-only legacy threads kept for cleanup
 
   // Seen tracking for demo mode (tagged confessions)
   seenTaggedConfessionIds: string[];
@@ -268,14 +258,13 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     }));
   },
 
-  toggleReaction: (confessionId, emoji, userId) => {
+  toggleReaction: (confessionId, emoji, _userId) => {
     const state = get();
     const currentEmoji = state.userReactions[confessionId];
     const newUserReactions = { ...state.userReactions };
 
     let countDelta = 0;
     let oldEmoji: string | null = null;
-    let isNewReaction = false;
 
     if (currentEmoji === emoji) {
       // Same emoji → toggle off
@@ -290,7 +279,6 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       // No existing → add
       newUserReactions[confessionId] = emoji;
       countDelta = 1;
-      isNewReaction = true;
     }
 
     const confessions = state.confessions.map((c) => {
@@ -317,104 +305,9 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       return { ...c, reactions, topEmojis, reactionCount };
     });
 
-    // Demo-only legacy behavior: emoji reactions can create a pre-match thread.
-    // Live Confess Connect / Reject uses Convex confessionConnects instead.
-    // Check if we should create a confession-based thread
-    // Only when: 1) new reaction 2) tagged confession 3) liker is the tagged user
-    let chatUnlocked = false;
-    const confession = state.confessions.find((c) => c.id === confessionId);
-    const taggedUserId = getTaggedUserId(confession);
-    if (
-      isNewReaction &&
-      userId &&
-      confession &&
-      taggedUserId &&
-      userId === taggedUserId &&
-      !state.confessionThreads[confessionId] // idempotency check
-    ) {
-      // CONSISTENCY FIX B4: Prevent concurrent thread creation race
-      // If another call is already creating a thread for this confession, skip
-      if (threadCreationInProgress.has(confessionId)) {
-        set({ userReactions: newUserReactions, confessions });
-        return { chatUnlocked: false };
-      }
-      threadCreationInProgress.add(confessionId);
+    set({ userReactions: newUserReactions, confessions });
 
-      try {
-        // Create a confession-based thread
-        const convoId = `demo_convo_confession_${confessionId}`;
-        const matchId = `match_confession_${confessionId}`;
-        const dmStore = useDemoDmStore?.getState?.();
-        const demoStore = useDemoStore?.getState?.();
-        if (!dmStore || !demoStore) {
-          if (__DEV__) console.warn('[CONFESS] toggleReaction: stores not ready');
-          set({ userReactions: newUserReactions, confessions });
-          return { chatUnlocked: false };
-        }
-
-        const otherUserName = confession.isAnonymous
-          ? 'Anonymous Confessor'
-          : (confession.authorName || 'Someone');
-
-        // Seed conversation with initial system message so it shows in Messages
-        const now = Date.now();
-        const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-        dmStore.seedConversation(convoId, [{
-          _id: `sys_${confessionId}`,
-          content: `💌 You liked their confession: "${confession.text.slice(0, 50)}${confession.text.length > 50 ? '...' : ''}"`,
-          type: 'system',
-          senderId: 'system',
-          createdAt: now,
-        }]);
-        dmStore.setMeta(convoId, {
-          otherUser: {
-            id: confession.userId,
-            name: otherUserName,
-            lastActive: now,
-            isVerified: false,
-          },
-          isPreMatch: true,
-          isConfessionChat: true, // Confession-based thread
-          expiresAt: now + TWENTY_FOUR_HOURS, // Expires in 24h
-        });
-
-        // Add to matches so it appears in Messages list
-        const newMatch: DemoMatch = {
-          id: matchId,
-          conversationId: convoId,
-          otherUser: {
-            id: confession.userId,
-            name: otherUserName,
-            photoUrl: confession.authorPhotoUrl || '',
-            lastActive: now,
-            isVerified: false,
-          },
-          lastMessage: {
-            content: `💌 Confession thread`,
-            type: 'system',
-            senderId: 'system',
-            createdAt: now,
-          },
-          unreadCount: 0,
-          isPreMatch: true,
-        };
-        demoStore.addMatch(newMatch);
-
-        // Track this thread to prevent duplicates
-        set({
-          userReactions: newUserReactions,
-          confessions,
-          confessionThreads: { ...state.confessionThreads, [confessionId]: convoId },
-        });
-        chatUnlocked = true;
-      } finally {
-        threadCreationInProgress.delete(confessionId);
-      }
-    } else {
-      set({ userReactions: newUserReactions, confessions });
-    }
-
-    return { chatUnlocked };
+    return { chatUnlocked: false };
   },
 
   addChat: (chat) => {

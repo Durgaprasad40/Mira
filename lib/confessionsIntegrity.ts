@@ -474,10 +474,10 @@ export function buildDemoTaggedConfessions(
   now: number = Date.now(),
 ): TaggedConfessionItem[] {
   return confessions
-    .filter((c) => (c.taggedUserId ?? (c as any).targetUserId) === currentUserId)
+    .filter((c) => c.taggedUserId === currentUserId)
     .map((c) => {
-      const taggedUserId = c.taggedUserId ?? (c as any).targetUserId;
-      const taggedUserName = c.taggedUserName ?? (c as any).targetUserName;
+      const taggedUserId = c.taggedUserId;
+      const taggedUserName = c.taggedUserName;
       return {
         notificationId: `notif_${c.id}`,
         confessionId: c.id,

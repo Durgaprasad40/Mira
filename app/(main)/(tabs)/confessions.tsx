@@ -365,8 +365,8 @@ export default function ConfessionsScreen() {
         authorPhotoUrl: confession.authorPhotoUrl,
         authorAge: confession.authorAge,
         authorGender: confession.authorGender,
-        taggedUserId: confession.taggedUserId ?? confession.targetUserId,
-        taggedUserName: confession.taggedUserName ?? confession.targetUserName,
+        taggedUserId: confession.taggedUserId,
+        taggedUserName: confession.taggedUserName,
         topEmojis: confession.topEmojis ?? [],
         replyPreviews: confession.replyPreviews ?? [],
         replyCount: confession.replyCount ?? 0,
@@ -402,12 +402,12 @@ export default function ConfessionsScreen() {
     }
 
     return demoConfessions
-      .filter((confession: any) => (confession.taggedUserId ?? confession.targetUserId) === currentUserId)
+      .filter((confession: any) => confession.taggedUserId === currentUserId)
       .sort((a: any, b: any) => b.createdAt - a.createdAt)
       .map((confession: any) => {
         const expiresAt = confession.expiresAt ?? confession.createdAt + 24 * 60 * 60 * 1000;
-        const taggedUserId = confession.taggedUserId ?? confession.targetUserId;
-        const taggedUserName = confession.taggedUserName ?? confession.targetUserName;
+        const taggedUserId = confession.taggedUserId;
+        const taggedUserName = confession.taggedUserName;
         return {
           notificationId: confession.id,
           confessionId: confession.id,

@@ -228,8 +228,30 @@ export default function ConfessionChatScreen() {
     }
     safePush(
       router,
-      `/(main)/(tabs)/messages/chat/${normalized}?source=confession` as any,
+      `/(main)/(tabs)/messages/chat/${normalized}` as any,
       'confessionChat->messages'
+    );
+  }, [router]);
+
+  const openConnectCelebration = useCallback((conversationId?: string | null, matchId?: string | null) => {
+    const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
+    if (!normalized) {
+      Toast.show('Connected. Chat is being prepared.');
+      return;
+    }
+    const params = new URLSearchParams({
+      conversationId: normalized,
+      source: 'confession',
+      phase: 'phase1',
+    });
+    const normalizedMatchId = typeof matchId === 'string' ? matchId.trim() : '';
+    if (normalizedMatchId) {
+      params.set('matchId', normalizedMatchId);
+    }
+    safePush(
+      router,
+      `/(main)/match-celebration?${params.toString()}` as any,
+      'confessionChat->connectCelebration'
     );
   }, [router]);
 
@@ -247,10 +269,10 @@ export default function ConfessionChatScreen() {
       const result = await requestConfessionConnectMutation({
         token,
         confessionId: liveConfessionId as any,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
       setConnectDismissed(false);
       if (result?.status === 'mutual' && result.conversationId) {
-        openMessagesConversation(result.conversationId);
+        openConnectCelebration(result.conversationId, result.matchId);
       } else {
         Toast.show('Request sent. Waiting for them to connect.');
       }
@@ -262,7 +284,7 @@ export default function ConfessionChatScreen() {
   }, [
     connectAction,
     liveConfessionId,
-    openMessagesConversation,
+    openConnectCelebration,
     requestConfessionConnectMutation,
     showUnavailableToast,
     token,
@@ -313,10 +335,10 @@ export default function ConfessionChatScreen() {
         token,
         connectId: connectStatus.connectId as any,
         decision,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string };
+      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
       if (decision === 'connect') {
         if (result?.conversationId) {
-          openMessagesConversation(result.conversationId);
+          openConnectCelebration(result.conversationId, result.matchId);
         } else {
           Toast.show('Connected. Chat is being prepared.');
         }
@@ -331,7 +353,7 @@ export default function ConfessionChatScreen() {
   }, [
     connectAction,
     connectStatus,
-    openMessagesConversation,
+    openConnectCelebration,
     respondToConfessionConnectMutation,
     showUnavailableToast,
     token,

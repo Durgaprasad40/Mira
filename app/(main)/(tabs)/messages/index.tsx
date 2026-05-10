@@ -157,8 +157,8 @@ type InboxConversationRow = ProcessedThread | {
   isPreMatch?: boolean;
   /**
    * P1-RESTORE: Backend marks rows where the other side became unreachable
-   * (match dissolved or user account deactivated). Frontend keeps the row
-   * visible but degrades the avatar/name rendering gracefully.
+   * (for example, user account deactivated). Normal unmatched rows are now
+   * filtered out by the backend interlock before they reach this list.
    */
   terminalState?: 'unmatched' | 'user_removed' | null;
 };
@@ -641,6 +641,10 @@ export default function MessagesScreen() {
     () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
     [convexUserId, retryKey]
   );
+  const convexMatchesArgs = useMemo(
+    () => (!isDemoMode && userId ? { authUserId: userId } : 'skip' as const),
+    [isDemoMode, retryKey, userId]
+  );
   const standOutQueryArgs = useMemo(
     () => (!isDemoMode && convexUserId ? { userId: convexUserId, refreshKey: retryKey } : 'skip' as const),
     [convexUserId, isDemoMode, retryKey]
@@ -651,7 +655,7 @@ export default function MessagesScreen() {
   const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexUnreadArgs);
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
   const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
-  const convexMatches = useQuery(api.matches.getMatches, convexQueryArgs);
+  const convexMatches = useQuery(api.matches.getMatches, convexMatchesArgs);
   const incomingStandOutsResult = useQuery(api.likes.getIncomingStandOuts, standOutQueryArgs);
   const outgoingStandOutsResult = useQuery(api.likes.getOutgoingStandOuts, standOutQueryArgs);
   const standOutCounts = useQuery(api.likes.getStandOutCounts, standOutQueryArgs);
@@ -763,9 +767,8 @@ export default function MessagesScreen() {
   // FIX: Filter out conversations without messages — those should only appear in
   // Super Likes / New Matches section, not in the Messages list. This prevents
   // the same profile from appearing in both places.
-  // P1-RESTORE: Always keep rows in a terminalState (unmatched / user_removed)
-  // so the user sees the graceful "User unavailable" degraded row instead of
-  // the conversation silently disappearing.
+  // Deleted/deactivated users may still return a terminal user_removed row so
+  // the UI degrades gracefully; unmatched match conversations are hidden server-side.
   const conversations = useMemo(() => {
     if (isDemoMode) return demoThreads;
     if (!convexConversations) return [];
@@ -895,7 +898,7 @@ export default function MessagesScreen() {
       convex.query(api.messages.getUnreadCount, { userId }),
       convex.query(api.users.getCurrentUser, { userId: convexUserId }),
       convex.query(api.likes.getLikesReceived, { userId: convexUserId }),
-      convex.query(api.matches.getMatches, { userId: convexUserId }),
+      convex.query(api.matches.getMatches, { authUserId: userId }),
       convex.query(api.likes.getIncomingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
       convex.query(api.likes.getOutgoingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
       convex.query(api.likes.getStandOutCounts, { userId: convexUserId, refreshKey: retryKey }),

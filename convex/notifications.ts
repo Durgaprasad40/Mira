@@ -292,7 +292,9 @@ export const createNotification = internalMutation({
       v.literal('weekly_refresh'),
       v.literal('profile_nudge'),
       // Phase-1 confession surface — tagged-confession bell item.
-      v.literal('tagged_confession')
+      v.literal('tagged_confession'),
+      v.literal('confession_connect_requested'),
+      v.literal('confession_connect_accepted')
     ),
     title: v.string(),
     body: v.string(),
@@ -303,7 +305,9 @@ export const createNotification = internalMutation({
       // Tagged-confession deep-link payload. Body text never references this
       // id; opening the notification routes to /(main)/confession-thread.
       confessionId: v.optional(v.string()),
+      connectId: v.optional(v.string()),
       fromUserId: v.optional(v.string()),
+      source: v.optional(v.string()),
     })),
     // 4-1: Optional dedupeKey for upsert behavior
     dedupeKey: v.optional(v.string()),
@@ -363,7 +367,17 @@ export const createNotification = internalMutation({
 });
 
 // Compute dedupeKey from notification type and data (matches client-side logic)
-function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string; pairKey?: string }): string {
+function computeDedupeKey(
+  type: string,
+  data?: {
+    matchId?: string;
+    conversationId?: string;
+    userId?: string;
+    pairKey?: string;
+    confessionId?: string;
+    connectId?: string;
+  }
+): string {
   const userId = data?.userId;
   switch (type) {
     case 'match':
@@ -375,6 +389,12 @@ function computeDedupeKey(type: string, data?: { matchId?: string; conversationI
     case 'crossed_paths':
       // Use pairKey if available (deterministic sorted pair format), fallback to userId
       return data?.pairKey ?? `crossed_paths:${userId ?? 'unknown'}`;
+    case 'tagged_confession':
+      return `tagged_confession:${data?.confessionId ?? 'unknown'}`;
+    case 'confession_connect_requested':
+      return `confession_connect_requested:${data?.connectId ?? 'unknown'}`;
+    case 'confession_connect_accepted':
+      return `confession_connect_accepted:${data?.connectId ?? 'unknown'}`;
     default:
       return `${type}:unknown`;
   }

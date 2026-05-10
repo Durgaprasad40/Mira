@@ -38,8 +38,8 @@ export default function MatchCelebrationScreen() {
     source,
     alreadyMatched,
   } = useLocalSearchParams<{
-    matchId: string;
-    userId: string;
+    matchId?: string;
+    userId?: string;
     mode?: string;
     phase?: string;
     conversationId?: string;
@@ -47,6 +47,11 @@ export default function MatchCelebrationScreen() {
     alreadyMatched?: string;
   }>();
   const userId = useAuthStore((s) => s.userId);
+  const isConfessionSource = source === 'confession';
+  const confessionConversationId =
+    typeof conversationId === 'string' && conversationId.trim().length > 0
+      ? conversationId.trim()
+      : null;
   const isPhase2 = mode === 'phase2' || phase === 'phase2';
   const isPhase2AlreadyMatched = isPhase2 && alreadyMatched === '1';
   const phase2Source =
@@ -81,6 +86,12 @@ export default function MatchCelebrationScreen() {
       ? { userId: otherUserIdValue, viewerAuthUserId: userId }
       : "skip",
   );
+  const confessionConversationQuery = useQuery(
+    api.messages.getConversation as any,
+    isConfessionSource && !isDemo && confessionConversationId && userId
+      ? { conversationId: confessionConversationId as any, authUserId: userId }
+      : "skip",
+  );
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
@@ -96,14 +107,37 @@ export default function MatchCelebrationScreen() {
       : { name: "Someone", photos: [{ url: "https://via.placeholder.com/400" }] };
   }, [isDemo, otherUserId]);
 
-  const match = isPhase2 ? { _id: matchId } : isDemo ? { _id: matchId } : matchQuery;
+  const match = isConfessionSource
+    ? {
+        _id: matchId ?? confessionConversationQuery?.matchId ?? `confession_${confessionConversationId ?? 'match'}`,
+        conversationId: confessionConversationId,
+      }
+    : isPhase2
+      ? { _id: matchId }
+      : isDemo
+        ? { _id: matchId }
+        : matchQuery;
   const phase2OtherUser = phase2OtherProfileQuery
     ? {
         name: phase2OtherProfileQuery.name ?? phase2OtherProfileQuery.displayNameInitial ?? 'Someone',
         photos: Array.isArray(phase2OtherProfileQuery.photos) ? phase2OtherProfileQuery.photos : [],
       }
     : null;
-  const otherUser = isPhase2 ? phase2OtherUser : isDemo ? demoOtherUser : otherUserQuery;
+  const confessionOtherUser = confessionConversationQuery?.otherUser
+    ? {
+        name: confessionConversationQuery.otherUser.name ?? 'Someone',
+        photos: confessionConversationQuery.otherUser.photoUrl
+          ? [{ url: confessionConversationQuery.otherUser.photoUrl }]
+          : [],
+      }
+    : null;
+  const otherUser = isConfessionSource
+    ? confessionOtherUser
+    : isPhase2
+      ? phase2OtherUser
+      : isDemo
+        ? demoOtherUser
+        : otherUserQuery;
   const demoCurrentUser = isDemo ? getDemoCurrentUser() : null;
   const currentUser = isDemo
     ? demoCurrentUser
@@ -118,14 +152,18 @@ export default function MatchCelebrationScreen() {
     ? ['#24143E', '#7C6AEF', '#FF7849'] as const
     : ['#101426', INCOGNITO_COLORS.primary, '#E94560'] as const;
   const gradientColors = isPhase2 ? phase2Gradient : [COLORS.primary, COLORS.secondary] as const;
-  const titleText = isPhase2AlreadyMatched
+  const titleText = isConfessionSource
+    ? 'You both connected'
+    : isPhase2AlreadyMatched
     ? "You're already matched"
     : isPhase2
       ? phase2IsTruthDare
         ? 'Truth or Dare connection'
         : "It's a Deep Connect match"
       : "🎉 It's a Match! 🎉";
-  const subtitleText = isPhase2AlreadyMatched
+  const subtitleText = isConfessionSource
+    ? "Start a conversation whenever you're ready."
+    : isPhase2AlreadyMatched
     ? `You and ${otherUser?.name ?? 'this person'} already have a conversation.`
     : isPhase2
       ? phase2IsTruthDare
@@ -333,6 +371,25 @@ export default function MatchCelebrationScreen() {
       return;
     }
 
+    if (isConfessionSource) {
+      if (!confessionConversationId) {
+        Toast.show("Couldn't open chat. Please try from Messages.");
+        sendingRef.current = false;
+        return;
+      }
+      if (hasNavigatedRef.current) {
+        sendingRef.current = false;
+        return;
+      }
+      hasNavigatedRef.current = true;
+      router.replace({
+        pathname: '/(main)/(tabs)/messages/chat/[conversationId]',
+        params: { conversationId: confessionConversationId },
+      } as any);
+      sendingRef.current = false;
+      return;
+    }
+
     if (!matchIdValue || !userId) {
       Toast.show("Something went wrong. Please go back and try again.");
       sendingRef.current = false;
@@ -403,6 +460,14 @@ export default function MatchCelebrationScreen() {
     }
     if (isPhase2) {
       router.replace('/(main)/(private)/(tabs)/deep-connect' as any);
+      return;
+    }
+    if (isConfessionSource) {
+      if (router.canGoBack()) {
+        router.back();
+      } else {
+        router.replace('/(main)/(tabs)/confessions' as any);
+      }
       return;
     }
     router.back();
@@ -504,7 +569,7 @@ export default function MatchCelebrationScreen() {
 
         <View style={styles.actions}>
           <Button
-            title={isPhase2 ? (isPhase2AlreadyMatched ? "Continue Chat" : "Open Chat") : sending ? "Sending…" : "Say Hi 👋"}
+            title={isPhase2 ? (isPhase2AlreadyMatched ? "Continue Chat" : "Open Chat") : sending ? "Sending…" : isConfessionSource ? "Say Hi" : "Say Hi 👋"}
             variant="primary"
             onPress={handleSendMessage}
             loading={sending}

@@ -50,8 +50,8 @@ export interface DemoDmMessage {
 export interface DemoConversationMeta {
   otherUser: { id?: string; name: string; lastActive: number; isVerified?: boolean; photoUrl?: string };
   isPreMatch: boolean;
-  isConfessionChat?: boolean; // True if created from confession (tagged user liked)
-  expiresAt?: number; // Only set for confession-based threads (24h after creation)
+  isConfessionChat?: boolean; // True for legacy/demo pre-mutual confession threads.
+  expiresAt?: number; // Only set for temporary confession-based threads.
   /** Phase-2: Room this DM originated from (for per-room unread badge) */
   sourceRoomId?: string;
 }

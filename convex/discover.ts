@@ -20,7 +20,7 @@
  */
 import { v } from 'convex/values';
 import { mutation, query, QueryCtx } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { Id, Doc } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import {
   FRONTEND_EXPLORE_CATEGORY_IDS,
@@ -81,6 +81,27 @@ const MAX_EXPLORE_SUPPRESSION_READS = 500;
 // mutation will accept in a single batch. Keeps mutation cost predictable
 // and matches the maximum page size the client typically requests.
 const MAX_EXPLORE_IMPRESSION_BATCH = 100;
+
+function isActiveDiscoverConversationPartner(
+  conversation: Doc<'conversations'>,
+  match: Doc<'matches'> | null,
+  now: number
+): boolean {
+  if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
+    return false;
+  }
+
+  if (!conversation.matchId) {
+    return true;
+  }
+
+  if (!match || match.isActive === false) {
+    return false;
+  }
+
+  const participantIds = new Set(conversation.participants.map((id) => id as string));
+  return participantIds.has(match.user1Id as string) && participantIds.has(match.user2Id as string);
+}
 
 // ---------------------------------------------------------------------------
 // Phase-1 Discover: structured empty result (Step 8 — distinguish empty reasons)
@@ -427,6 +448,7 @@ export const getDiscoverProfiles = query({
       blocksAgainstMe,
       likesToMe,
       myReports,
+      reportsAgainstMe,
       myConversationParticipations,
     ] = await Promise.all([
       // All my swipes (likes/passes)
@@ -468,6 +490,11 @@ export const getDiscoverProfiles = query({
         .query('reports')
         .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
         .collect(),
+      // Reports in either direction should remove the pair from Discover.
+      ctx.db
+        .query('reports')
+        .withIndex('by_reported_user', (q) => q.eq('reportedUserId', userId))
+        .collect(),
       // CONVERSATION PARTNER EXCLUSION: All my conversation participations
       // Users with existing message threads must not reappear in Discover
       ctx.db
@@ -498,6 +525,7 @@ export const getDiscoverProfiles = query({
     // TRUST SIGNALS: Viewer-specific reports (hard exclusion)
     const viewerReportedIds = new Set<string>();
     for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
+    for (const report of reportsAgainstMe) viewerReportedIds.add(report.reporterId as string);
 
     // CONVERSATION PARTNER EXCLUSION: Build set of users with existing message threads
     // This ensures users who already have a chat connection don't reappear in Discover
@@ -507,8 +535,31 @@ export const getDiscoverProfiles = query({
       const conversations = await Promise.all(
         myConversationParticipations.map((p) => ctx.db.get(p.conversationId))
       );
+      const conversationMatchIds = Array.from(
+        new Set(
+          conversations
+            .map((conversation) => conversation?.matchId as string | undefined)
+            .filter((id): id is string => Boolean(id))
+        )
+      );
+      const conversationMatches = await Promise.all(
+        conversationMatchIds.map((id) => ctx.db.get(id as Id<'matches'>))
+      );
+      const conversationMatchMap = new Map(
+        conversationMatchIds.map((id, index) => [id, conversationMatches[index]])
+      );
+
       for (const conv of conversations) {
         if (!conv) continue;
+        if (
+          !isActiveDiscoverConversationPartner(
+            conv,
+            conv.matchId ? (conversationMatchMap.get(conv.matchId as string) ?? null) : null,
+            now
+          )
+        ) {
+          continue;
+        }
         // Extract partner IDs from participants array (excluding self)
         for (const participantId of conv.participants) {
           if (participantId !== userId) {
@@ -805,14 +856,16 @@ export const getDiscoverProfiles = query({
         }
         continue;
       }
-      // CONVERSATION PARTNER EXCLUSION — DISABLED:
-      // Users with an existing conversation are no longer hidden from Discover.
-      // Rationale: the exclusion caused matched / mid-chat / previously-messaged
-      // users to disappear from the primary feed while remaining visible on
-      // Nearby, which was surprising to users. Blocking / unmatching / reporting
-      // still exclude (handled above). conversationPartnerIds is still computed
-      // for debugging/analytics; the filter is intentionally a no-op here.
-      // (Deep Connect and Explore have the same change.)
+      if (conversationPartnerIds.has(user._id as string)) {
+        historyFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][limits] active_conversation_partner', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
+        continue;
+      }
 
       // Enforcement
       if (user.verificationEnforcementLevel === 'security_only') {
