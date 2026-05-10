@@ -37,6 +37,13 @@ type ConfessionConnectStatusValue =
   | 'expired';
 
 type ConfessionConnectViewerRole = 'requester' | 'owner' | null;
+type ConfessionConnectIneligibleReason =
+  | 'self'
+  | 'user_ineligible'
+  | 'blocked'
+  | 'reported'
+  | 'already_matched'
+  | 'already_conversing';
 
 type ConfessionConnectStatusResult = {
   exists: boolean;
@@ -49,6 +56,9 @@ type ConfessionConnectStatusResult = {
   expiresAt?: number;
   respondedAt?: number;
   conversationId?: string;
+  ineligibleReason?: ConfessionConnectIneligibleReason;
+  existingConversationId?: string;
+  existingMatchId?: string;
 };
 
 type ConfessionConnectMutationResult = {
@@ -57,6 +67,9 @@ type ConfessionConnectMutationResult = {
   matchId?: string;
   otherUserId?: string;
   partnerUserId?: string;
+  ineligibleReason?: ConfessionConnectIneligibleReason;
+  existingConversationId?: string;
+  existingMatchId?: string;
 };
 
 function formatTimeLeft(expiresAt: number): string {
@@ -450,8 +463,39 @@ export default function ConfessionChatScreen() {
     const status = connectStatus.status;
     const actionBusy = connectAction !== null;
     const disabled = actionBusy || isChatExpired;
+    const alreadyConnected =
+      connectStatus.ineligibleReason === 'already_matched' ||
+      connectStatus.ineligibleReason === 'already_conversing';
+    const alreadyConnectedConversationId =
+      connectStatus.existingConversationId ?? connectStatus.conversationId;
 
     if (!connectStatus.viewerRole) return null;
+
+    if (alreadyConnected) {
+      return (
+        <>
+          <View style={[styles.connectBanner, styles.connectBannerSuccess]}>
+            <Ionicons name="checkmark-circle" size={16} color="#34C759" />
+            <Text style={[styles.connectBannerText, styles.connectBannerTextSuccess]}>
+              Already connected.
+            </Text>
+          </View>
+          {alreadyConnectedConversationId ? (
+            <View style={styles.connectActions}>
+              <TouchableOpacity
+                style={styles.openChatButton}
+                onPress={() => openMessagesConversation(alreadyConnectedConversationId)}
+              >
+                <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.white} />
+                <Text style={styles.openChatButtonText}>
+                  Already connected · Open chat
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+        </>
+      );
+    }
 
     if (status === 'mutual') {
       return (

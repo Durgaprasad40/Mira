@@ -62,6 +62,21 @@ type ConfessionConnectNotificationType =
   | 'confession_connect_requested'
   | 'confession_connect_accepted'
   | 'confession_connect_rejected';
+type ConfessionConnectIneligibleReason =
+  | 'self'
+  | 'user_ineligible'
+  | 'blocked'
+  | 'reported'
+  | 'already_matched'
+  | 'already_conversing';
+type ConfessionConnectEligibility =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: ConfessionConnectIneligibleReason;
+      matchId?: Id<'matches'>;
+      conversationId?: Id<'conversations'>;
+    };
 
 // Canonical reply identity mode used by the current product contract.
 // Legacy 'blur' literal maps to 'blur_photo'; unknown/missing maps using isAnonymous.
@@ -348,6 +363,9 @@ function emptyConfessionConnectStatus() {
     expiresAt: undefined as number | undefined,
     respondedAt: undefined as number | undefined,
     conversationId: undefined as Id<'conversations'> | undefined,
+    ineligibleReason: undefined as ConfessionConnectIneligibleReason | undefined,
+    existingConversationId: undefined as Id<'conversations'> | undefined,
+    existingMatchId: undefined as Id<'matches'> | undefined,
   };
 }
 
@@ -431,6 +449,88 @@ function userIsConnectEligible(user: Doc<'users'> | null): boolean {
   return !!user && user.isActive !== false && !user.deletedAt && !user.isBanned;
 }
 
+async function findActivePhase1MatchForPair(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  userAId: Id<'users'>,
+  userBId: Id<'users'>
+): Promise<Doc<'matches'> | null> {
+  const [forward, reverse] = await Promise.all([
+    ctx.db
+      .query('matches')
+      .withIndex('by_users', (q) =>
+        q.eq('user1Id', userAId).eq('user2Id', userBId)
+      )
+      .collect(),
+    ctx.db
+      .query('matches')
+      .withIndex('by_users', (q) =>
+        q.eq('user1Id', userBId).eq('user2Id', userAId)
+      )
+      .collect(),
+  ]);
+
+  const seen = new Set<string>();
+  const activeMatches = [...forward, ...reverse].filter((match) => {
+    const key = String(match._id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return match.isActive === true;
+  });
+  activeMatches.sort((a, b) => a._id.localeCompare(b._id));
+  return activeMatches[0] ?? null;
+}
+
+function isActivePhase1ConversationForPair(
+  conversation: Doc<'conversations'>,
+  userAId: Id<'users'>,
+  userBId: Id<'users'>,
+  now: number
+): boolean {
+  if (conversation.isPreMatch === true) return false;
+  if (conversation.expiresAt !== undefined && conversation.expiresAt <= now) {
+    return false;
+  }
+  if (conversation.participants.length !== 2) return false;
+  const participants = new Set(conversation.participants.map(String));
+  return participants.has(String(userAId)) && participants.has(String(userBId));
+}
+
+async function findActivePhase1ConversationForPair(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  userAId: Id<'users'>,
+  userBId: Id<'users'>,
+  now: number
+): Promise<Doc<'conversations'> | null> {
+  const participantRows = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user', (q) => q.eq('userId', userAId))
+    .collect();
+
+  const conversations: Doc<'conversations'>[] = [];
+  for (const participantRow of participantRows) {
+    const conversation = await ctx.db.get(participantRow.conversationId);
+    if (
+      conversation &&
+      isActivePhase1ConversationForPair(conversation, userAId, userBId, now)
+    ) {
+      if (conversation.matchId) {
+        const match = await ctx.db.get(conversation.matchId);
+        if (!match || match.isActive !== true) {
+          continue;
+        }
+      }
+      conversations.push(conversation);
+    }
+  }
+
+  conversations.sort((a, b) => {
+    const aTime = a.lastMessageAt ?? a.createdAt;
+    const bTime = b.lastMessageAt ?? b.createdAt;
+    return bTime - aTime;
+  });
+  return conversations[0] ?? null;
+}
+
 async function ensureConversationParticipantRow(
   ctx: MutationCtx,
   conversationId: Id<'conversations'>,
@@ -503,21 +603,82 @@ function confessionIsConnectable(confession: Doc<'confessions'>, now: number): b
   );
 }
 
-async function pairCanUseConfessionConnect(
+async function evaluateConfessionConnectEligibility(
   ctx: Parameters<typeof validateSessionToken>[0],
   requesterId: Id<'users'>,
-  ownerId: Id<'users'>
-): Promise<boolean> {
-  if (requesterId === ownerId) return false;
+  ownerId: Id<'users'>,
+  options?: { skipConnectedCheck?: boolean }
+): Promise<ConfessionConnectEligibility> {
+  if (requesterId === ownerId) return { ok: false, reason: 'self' };
 
   const requester = await ctx.db.get(requesterId);
   const owner = await ctx.db.get(ownerId);
-  if (!userIsConnectEligible(requester) || !userIsConnectEligible(owner)) return false;
+  if (!userIsConnectEligible(requester) || !userIsConnectEligible(owner)) {
+    return { ok: false, reason: 'user_ineligible' };
+  }
 
-  if (await hasBlockBetweenUsers(ctx, requesterId, ownerId)) return false;
-  if (await hasReportBetweenUsers(ctx, requesterId, ownerId)) return false;
+  if (await hasBlockBetweenUsers(ctx, requesterId, ownerId)) {
+    return { ok: false, reason: 'blocked' };
+  }
+  if (await hasReportBetweenUsers(ctx, requesterId, ownerId)) {
+    return { ok: false, reason: 'reported' };
+  }
 
-  return true;
+  if (options?.skipConnectedCheck === true) {
+    return { ok: true };
+  }
+
+  const existingMatch = await findActivePhase1MatchForPair(
+    ctx,
+    requesterId,
+    ownerId
+  );
+  if (existingMatch) {
+    const existingConversation = await findActivePhase1ConversationForPair(
+      ctx,
+      requesterId,
+      ownerId,
+      Date.now()
+    );
+    return {
+      ok: false,
+      reason: 'already_matched',
+      matchId: existingMatch._id,
+      conversationId: existingConversation?._id,
+    };
+  }
+
+  const existingConversation = await findActivePhase1ConversationForPair(
+    ctx,
+    requesterId,
+    ownerId,
+    Date.now()
+  );
+  if (existingConversation) {
+    return {
+      ok: false,
+      reason: 'already_conversing',
+      conversationId: existingConversation._id,
+      matchId: existingConversation.matchId,
+    };
+  }
+
+  return { ok: true };
+}
+
+async function pairCanUseConfessionConnect(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  requesterId: Id<'users'>,
+  ownerId: Id<'users'>,
+  options?: { skipConnectedCheck?: boolean }
+): Promise<boolean> {
+  const eligibility = await evaluateConfessionConnectEligibility(
+    ctx,
+    requesterId,
+    ownerId,
+    options
+  );
+  return eligibility.ok;
 }
 
 async function countTaggedConfessionBadgeForViewer(
@@ -655,6 +816,35 @@ async function markConfessionConnectRequestNotificationRead(
     readAt: notification.readAt ?? args.now,
     ...(args.expire ? { expiresAt: args.now } : {}),
   });
+}
+
+async function closeRedundantConfessionConnect(
+  ctx: MutationCtx,
+  connect: Doc<'confessionConnects'>,
+  now: number
+): Promise<Doc<'confessionConnects'>> {
+  if (connect.status !== 'pending') {
+    return connect;
+  }
+
+  await ctx.db.patch(connect._id, {
+    status: 'expired',
+    updatedAt: now,
+    respondedAt: now,
+  });
+  await markConfessionConnectRequestNotificationRead(ctx, {
+    ownerUserId: connect.toUserId,
+    connectId: connect._id,
+    now,
+    expire: true,
+  });
+
+  return {
+    ...connect,
+    status: 'expired',
+    updatedAt: now,
+    respondedAt: now,
+  };
 }
 
 async function notifyConfessionConnectRequested(
@@ -803,7 +993,25 @@ async function ensureMutualConfessionConversation(
   if (!confessionAllowsConnectPromotion(confession, connect, now, beingMarkedMutual)) {
     throw new Error('Connect request unavailable');
   }
-  if (!(await pairCanUseConfessionConnect(ctx, connect.fromUserId, connect.toUserId))) {
+  const eligibility = await evaluateConfessionConnectEligibility(
+    ctx,
+    connect.fromUserId,
+    connect.toUserId
+  );
+  if (!eligibility.ok) {
+    if (
+      !beingMarkedMutual &&
+      connect.status === 'mutual' &&
+      (eligibility.reason === 'already_matched' ||
+        eligibility.reason === 'already_conversing') &&
+      eligibility.conversationId &&
+      eligibility.matchId
+    ) {
+      return {
+        conversationId: eligibility.conversationId,
+        matchId: eligibility.matchId,
+      };
+    }
     throw new Error('Connect request unavailable');
   }
 
@@ -2419,7 +2627,34 @@ export const requestConfessionConnect = mutation({
       throw new Error('Connect unavailable');
     }
 
-    if (!(await pairCanUseConfessionConnect(ctx, viewerId, confession.userId))) {
+    const eligibility = await evaluateConfessionConnectEligibility(
+      ctx,
+      viewerId,
+      confession.userId
+    );
+    if (!eligibility.ok) {
+      if (
+        eligibility.reason === 'already_matched' ||
+        eligibility.reason === 'already_conversing'
+      ) {
+        return {
+          connectId: undefined as Id<'confessionConnects'> | undefined,
+          confessionId,
+          status: undefined as ConfessionConnectStatus | undefined,
+          expiresAt: undefined as number | undefined,
+          respondedAt: undefined as number | undefined,
+          conversationId: undefined as Id<'conversations'> | undefined,
+          matchId: undefined as Id<'matches'> | undefined,
+          otherUserId: undefined as Id<'users'> | undefined,
+          partnerUserId: undefined as Id<'users'> | undefined,
+          promoted: false,
+          promotionPending: false,
+          canRequest: false as const,
+          ineligibleReason: eligibility.reason,
+          existingConversationId: eligibility.conversationId,
+          existingMatchId: eligibility.matchId,
+        };
+      }
       throw new Error('Connect unavailable');
     }
 
@@ -2547,7 +2782,25 @@ export const respondToConfessionConnect = mutation({
       if (!confessionIsConnectable(confession, now)) {
         throw new Error('Connect request unavailable');
       }
-      if (!(await pairCanUseConfessionConnect(ctx, connect.fromUserId, connect.toUserId))) {
+      const eligibility = await evaluateConfessionConnectEligibility(
+        ctx,
+        connect.fromUserId,
+        connect.toUserId
+      );
+      if (
+        !eligibility.ok &&
+        (eligibility.reason === 'already_matched' ||
+          eligibility.reason === 'already_conversing')
+      ) {
+        const closed = await closeRedundantConfessionConnect(ctx, connect, now);
+        return {
+          ...serializeConfessionConnect(closed),
+          ineligibleReason: eligibility.reason,
+          existingConversationId: eligibility.conversationId,
+          existingMatchId: eligibility.matchId,
+        };
+      }
+      if (!eligibility.ok) {
         throw new Error('Connect request unavailable');
       }
       await ctx.db.patch(connectId, {
@@ -2566,6 +2819,29 @@ export const respondToConfessionConnect = mutation({
         throw new Error('Connect request unavailable');
       }
       return serializeConfessionConnect(updated);
+    }
+
+    const eligibility = await evaluateConfessionConnectEligibility(
+      ctx,
+      connect.fromUserId,
+      connect.toUserId
+    );
+    if (
+      !eligibility.ok &&
+      (eligibility.reason === 'already_matched' ||
+        eligibility.reason === 'already_conversing')
+    ) {
+      const closed = await closeRedundantConfessionConnect(ctx, connect, now);
+      return {
+        ...serializeConfessionConnect(closed, { viewerId }),
+        conversationId: undefined,
+        ineligibleReason: eligibility.reason,
+        existingConversationId: eligibility.conversationId,
+        existingMatchId: eligibility.matchId,
+      };
+    }
+    if (!eligibility.ok) {
+      throw new Error('Connect request unavailable');
     }
 
     const { conversationId, matchId } = await ensureMutualConfessionConversation(
@@ -2819,14 +3095,23 @@ export const getConfessionConnectStatus = query({
     let canRequest = false;
     let canRespond = false;
     let canCancel = false;
+    let ineligibleReason: ConfessionConnectIneligibleReason | undefined;
+    let existingConversationId: Id<'conversations'> | undefined;
+    let existingMatchId: Id<'matches'> | undefined;
 
     if (confession.taggedUserId) {
       const confessionAvailable = confessionIsConnectable(confession, now);
-      const pairSafe = await pairCanUseConfessionConnect(
+      const eligibility = await evaluateConfessionConnectEligibility(
         ctx,
         confession.taggedUserId,
         confession.userId
       );
+      const pairSafe = eligibility.ok;
+      if (!eligibility.ok) {
+        ineligibleReason = eligibility.reason;
+        existingConversationId = eligibility.conversationId;
+        existingMatchId = eligibility.matchId;
+      }
 
       canRequest =
         viewerRole === 'requester' &&
@@ -2849,6 +3134,9 @@ export const getConfessionConnectStatus = query({
         ...emptyConfessionConnectStatus(),
         viewerRole,
         canRequest,
+        ineligibleReason,
+        existingConversationId,
+        existingMatchId,
       };
     }
 
@@ -2863,6 +3151,9 @@ export const getConfessionConnectStatus = query({
       expiresAt: existing.expiresAt,
       respondedAt: existing.respondedAt,
       conversationId: effectiveStatus === 'mutual' ? existing.conversationId : undefined,
+      ineligibleReason,
+      existingConversationId,
+      existingMatchId,
     };
   },
 });

@@ -114,6 +114,13 @@ type ConfessionConnectStatusValue =
   | 'expired';
 
 type ConfessionConnectViewerRole = 'requester' | 'owner' | null;
+type ConfessionConnectIneligibleReason =
+  | 'self'
+  | 'user_ineligible'
+  | 'blocked'
+  | 'reported'
+  | 'already_matched'
+  | 'already_conversing';
 
 type ConfessionConnectStatusResult = {
   exists: boolean;
@@ -126,6 +133,9 @@ type ConfessionConnectStatusResult = {
   expiresAt?: number;
   respondedAt?: number;
   conversationId?: string;
+  ineligibleReason?: ConfessionConnectIneligibleReason;
+  existingConversationId?: string;
+  existingMatchId?: string;
 };
 
 type ConfessionConnectMutationResult = {
@@ -134,6 +144,9 @@ type ConfessionConnectMutationResult = {
   matchId?: string;
   otherUserId?: string;
   partnerUserId?: string;
+  ineligibleReason?: ConfessionConnectIneligibleReason;
+  existingConversationId?: string;
+  existingMatchId?: string;
 };
 
 // Match homepage avatar size
@@ -1091,8 +1104,40 @@ export default function ConfessionThreadScreen() {
     const role = connectStatus.viewerRole;
     const actionBusy = connectAction !== null;
     const disabled = actionBusy || isThreadClosed;
+    const alreadyConnected =
+      connectStatus.ineligibleReason === 'already_matched' ||
+      connectStatus.ineligibleReason === 'already_conversing';
+    const alreadyConnectedConversationId =
+      connectStatus.existingConversationId ?? connectStatus.conversationId;
 
     if (!role) return null;
+
+    if (alreadyConnected) {
+      return (
+        <View style={[styles.connectPanel, styles.connectPanelSuccess]}>
+          <View style={styles.connectPanelHeader}>
+            <Ionicons name="checkmark-circle" size={16} color="#34C759" />
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Already connected</Text>
+          </View>
+          {alreadyConnectedConversationId ? (
+            <TouchableOpacity
+              style={styles.connectPrimaryButton}
+              onPress={() => openMessagesConversation(alreadyConnectedConversationId)}
+              activeOpacity={0.82}
+            >
+              <Ionicons name="chatbubble-ellipses-outline" size={15} color={COLORS.white} />
+              <Text maxFontSizeMultiplier={1.2} style={styles.connectPrimaryButtonText}>
+                Already connected · Open chat
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
+              Already connected.
+            </Text>
+          )}
+        </View>
+      );
+    }
 
     if (status === 'mutual') {
       return (

@@ -40,6 +40,9 @@ type ConfessionConnectMutationResult = {
   matchId?: string;
   otherUserId?: string;
   partnerUserId?: string;
+  ineligibleReason?: string;
+  existingConversationId?: string;
+  existingMatchId?: string;
 };
 
 function formatTimeLeft(expiresAt: number): string {
@@ -196,6 +199,19 @@ export default function CommentConnectRequestsScreen() {
     );
   }, [router]);
 
+  const openMessagesConversation = useCallback((conversationId?: string | null) => {
+    const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
+    if (!normalized) {
+      Toast.show('Already connected.');
+      return;
+    }
+    safePush(
+      router,
+      `/(main)/(tabs)/messages/chat/${normalized}` as any,
+      'connectRequests->existingChat'
+    );
+  }, [router]);
+
   const handleDecision = useCallback(async (
     connectId: string,
     decision: 'connect' | 'reject'
@@ -218,12 +234,25 @@ export default function CommentConnectRequestsScreen() {
       }) as ConfessionConnectMutationResult;
 
       if (decision === 'connect') {
+        if (
+          result?.existingConversationId &&
+          (result.ineligibleReason === 'already_matched' ||
+            result.ineligibleReason === 'already_conversing')
+        ) {
+          openMessagesConversation(result.existingConversationId);
+          return;
+        }
         if (result?.conversationId) {
           openConnectCelebration(
             result.conversationId,
             result.matchId,
             result.otherUserId ?? result.partnerUserId
           );
+        } else if (
+          result?.ineligibleReason === 'already_matched' ||
+          result?.ineligibleReason === 'already_conversing'
+        ) {
+          Toast.show('Already connected.');
         } else {
           Alert.alert('Connected', 'The chat is being prepared. Please try opening it again.');
         }
@@ -235,7 +264,7 @@ export default function CommentConnectRequestsScreen() {
     } finally {
       setBusyConnectId(null);
     }
-  }, [busyConnectId, openConnectCelebration, respondToConfessionConnect, token]);
+  }, [busyConnectId, openConnectCelebration, openMessagesConversation, respondToConfessionConnect, token]);
 
   const renderRequest = useCallback(({ item }: { item: PendingConfessionConnect }) => {
     const isBusy = busyConnectId === item.connectId;
