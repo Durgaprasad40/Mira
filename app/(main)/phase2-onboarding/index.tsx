@@ -1,10 +1,13 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -18,7 +21,12 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useIncognitoStore } from '@/stores/incognitoStore';
 import { useScreenTrace } from '@/lib/devTrace';
-import { PHASE2_ONBOARDING_ROUTE_MAP } from '@/lib/phase2Onboarding';
+import {
+  isValidNickname,
+  PHASE2_NICKNAME_MAX_LENGTH,
+  PHASE2_ONBOARDING_ROUTE_MAP,
+  sanitizeNickname,
+} from '@/lib/phase2Onboarding';
 
 const C = INCOGNITO_COLORS;
 const PHASE1_DISCOVER_ROUTE = '/(main)/(tabs)/home';
@@ -54,16 +62,26 @@ export default function Phase2OnboardingConsentScreen() {
     api.users.getCurrentUser,
     userId ? { userId } : 'skip'
   );
+  const currentPrivateProfile = useQuery(
+    api.privateProfiles.getByAuthUserId,
+    userId && token ? { token, authUserId: userId } : 'skip'
+  );
 
   // FIX: Use setPrivateWelcomeConfirmed with userId instead of acceptPrivateOnboardingConsent with token
   const acceptConsent = useMutation(api.users.setPrivateWelcomeConfirmed);
+  const updateDisplayName = useMutation(api.privateProfiles.updateDisplayNameByAuthId);
 
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
+  const setStoreDisplayName = usePrivateProfileStore((s) => s.setDisplayName);
+  const storeDisplayName = usePrivateProfileStore((s) => s.displayName);
   const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
 
   const [rulesChecked, setRulesChecked] = useState(false);
   const [noSharingChecked, setNoSharingChecked] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [nicknameDraft, setNicknameDraft] = useState('');
+  const [nicknameError, setNicknameError] = useState<string | null>(null);
+  const nicknamePrefilledRef = useRef(false);
 
   useEffect(() => {
     if (!currentUser) {
@@ -82,19 +100,35 @@ export default function Phase2OnboardingConsentScreen() {
     setAcceptedTermsAt,
   ]);
 
+  useEffect(() => {
+    if (nicknamePrefilledRef.current || currentPrivateProfile === undefined) {
+      return;
+    }
+
+    const nextNickname =
+      typeof currentPrivateProfile?.displayName === 'string' && currentPrivateProfile.displayName.trim()
+        ? currentPrivateProfile.displayName
+        : storeDisplayName;
+
+    if (nextNickname) {
+      setNicknameDraft(sanitizeNickname(nextNickname));
+      nicknamePrefilledRef.current = true;
+    }
+  }, [currentPrivateProfile, storeDisplayName]);
+
   const importedBasics = useMemo(() => {
     if (!currentUser) return null;
     return {
       age: calculateAge(currentUser.dateOfBirth),
       gender: currentUser.gender || 'Not available',
       city: currentUser.city || null,
-      isVerified: !!currentUser.isVerified,
       hobbies: Array.isArray(currentUser.activities) ? currentUser.activities.slice(0, 4) : [],
     };
   }, [currentUser]);
 
-  const isLoading = currentUser === undefined;
-  const canContinue = !!userId && !!token && !!currentUser && rulesChecked && noSharingChecked && !isSubmitting;
+  const isLoading = currentUser === undefined || (!!userId && !!token && currentPrivateProfile === undefined);
+  const nicknameIsValid = isValidNickname(nicknameDraft);
+  const canContinue = !!userId && !!token && !!currentUser && nicknameIsValid && rulesChecked && noSharingChecked && !isSubmitting;
 
   const handleExit = () => {
     router.replace(PHASE1_DISCOVER_ROUTE as any);
@@ -103,8 +137,39 @@ export default function Phase2OnboardingConsentScreen() {
   const handleContinue = async () => {
     if (!canContinue || !userId || !token) return;
 
+    const nextNickname = nicknameDraft.trim();
+    if (!isValidNickname(nextNickname)) {
+      setNicknameError('Nickname must be 3-20 letters or numbers.');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
+      if (currentPrivateProfile) {
+        const existingDisplayName =
+          typeof currentPrivateProfile.displayName === 'string'
+            ? currentPrivateProfile.displayName.trim()
+            : '';
+
+        if (nextNickname !== existingDisplayName) {
+          const updateResult = await updateDisplayName({
+            token,
+            authUserId: userId,
+            displayName: nextNickname,
+          });
+
+          if (!updateResult?.success) {
+            if (updateResult?.error === 'Nickname change limit reached') {
+              Alert.alert('Nickname locked', 'You have already used your Private Mode nickname change.');
+              return;
+            }
+
+            setNicknameError('Choose a 3-20 character nickname using letters and numbers.');
+            return;
+          }
+        }
+      }
+
       // FIX: setPrivateWelcomeConfirmed takes { userId } only
       const result = await acceptConsent({ token, authUserId: userId });
 
@@ -112,9 +177,10 @@ export default function Phase2OnboardingConsentScreen() {
         throw new Error('Consent could not be saved');
       }
 
+      setStoreDisplayName(nextNickname);
       setAcceptedTermsAt(Date.now());
       acceptPrivateTerms();
-      router.push(PHASE2_ONBOARDING_ROUTE_MAP['nickname'] as any);
+      router.push(PHASE2_ONBOARDING_ROUTE_MAP['select-photos'] as any);
     } catch (error) {
       Alert.alert(
         'Unable to continue',
@@ -161,15 +227,23 @@ export default function Phase2OnboardingConsentScreen() {
   }
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <KeyboardAvoidingView
+      style={[styles.container, { paddingTop: insets.top }]}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 12}
+    >
       <View style={styles.topBar}>
         <TouchableOpacity onPress={handleExit} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="close" size={22} color={C.textLight} />
         </TouchableOpacity>
-        <Text style={styles.stepIndicator}>Step 1 of 6</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 5</Text>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={styles.hero}>
           <View style={styles.heroIcon}>
             <Ionicons name="shield-checkmark" size={40} color={C.primary} />
@@ -184,24 +258,42 @@ export default function Phase2OnboardingConsentScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Imported from your main profile</Text>
           <View style={styles.summaryCard}>
+            <View style={styles.nicknameBlock}>
+              <Text style={styles.nicknameTitle}>Choose your Private Mode nickname</Text>
+              <Text style={styles.nicknameHelper}>This is how you'll appear in private mode.</Text>
+              <TextInput
+                value={nicknameDraft}
+                onChangeText={(value) => {
+                  setNicknameDraft(sanitizeNickname(value));
+                  if (nicknameError) {
+                    setNicknameError(null);
+                  }
+                }}
+                placeholder="Choose a nickname"
+                placeholderTextColor={C.textLight}
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={PHASE2_NICKNAME_MAX_LENGTH}
+                returnKeyType="done"
+                style={[styles.nicknameInput, nicknameError ? styles.nicknameInputError : null]}
+                accessibilityLabel="Private Mode nickname"
+              />
+              {nicknameError ? <Text style={styles.nicknameError}>{nicknameError}</Text> : null}
+            </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Age</Text>
               <Text style={styles.summaryValue}>{importedBasics.age > 0 ? importedBasics.age : 'Not available'}</Text>
             </View>
-            <View style={styles.summaryRow}>
+            <View style={[styles.summaryRow, !importedBasics.city ? styles.summaryRowLast : null]}>
               <Text style={styles.summaryLabel}>Gender</Text>
               <Text style={styles.summaryValue}>{importedBasics.gender}</Text>
             </View>
             {importedBasics.city ? (
-              <View style={styles.summaryRow}>
+              <View style={[styles.summaryRow, styles.summaryRowLast]}>
                 <Text style={styles.summaryLabel}>City</Text>
                 <Text style={styles.summaryValue}>{importedBasics.city}</Text>
               </View>
             ) : null}
-            <View style={[styles.summaryRow, styles.summaryRowLast]}>
-              <Text style={styles.summaryLabel}>Verified</Text>
-              <Text style={styles.summaryValue}>{importedBasics.isVerified ? 'Yes' : 'No'}</Text>
-            </View>
           </View>
           {importedBasics.hobbies.length > 0 ? (
             <View style={styles.hobbiesWrap}>
@@ -268,7 +360,7 @@ export default function Phase2OnboardingConsentScreen() {
           )}
         </TouchableOpacity>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -329,6 +421,45 @@ const styles = StyleSheet.create({
     backgroundColor: C.surface,
     borderRadius: 14,
     padding: 16,
+  },
+  nicknameBlock: {
+    paddingBottom: 14,
+    marginBottom: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: C.background,
+  },
+  nicknameTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 4,
+  },
+  nicknameHelper: {
+    fontSize: 13,
+    color: C.textLight,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  nicknameInput: {
+    minHeight: 48,
+    borderRadius: 12,
+    backgroundColor: C.background,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    color: C.text,
+    fontSize: 15,
+    fontWeight: '600',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  nicknameInputError: {
+    borderColor: '#FF6B6B',
+  },
+  nicknameError: {
+    marginTop: 8,
+    fontSize: 12,
+    color: '#FF6B6B',
+    lineHeight: 16,
   },
   summaryRow: {
     flexDirection: 'row',

@@ -270,7 +270,7 @@ export default function Phase2SelectPhotosScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Select Photos</Text>
-        <Text style={styles.stepLabel}>Step 3 of 6</Text>
+        <Text style={styles.stepLabel}>Step 2 of 5</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>

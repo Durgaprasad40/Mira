@@ -2,7 +2,6 @@ import type { Phase1ProfileData } from '@/stores/privateProfileStore';
 
 export type Phase2OnboardingStep =
   | 'index'
-  | 'nickname'
   | 'select-photos'
   | 'profile-edit'
   | 'prompts'
@@ -11,7 +10,6 @@ export type Phase2OnboardingStep =
 
 export const PHASE2_ONBOARDING_ROUTE_MAP: Record<Exclude<Phase2OnboardingStep, 'complete'>, string> = {
   index: '/(main)/phase2-onboarding',
-  nickname: '/(main)/phase2-onboarding/nickname',
   'select-photos': '/(main)/phase2-onboarding/select-photos',
   'profile-edit': '/(main)/phase2-onboarding/profile-edit',
   prompts: '/(main)/phase2-onboarding/prompts',
@@ -20,11 +18,24 @@ export const PHASE2_ONBOARDING_ROUTE_MAP: Record<Exclude<Phase2OnboardingStep, '
 
 export const PHASE2_ONBOARDING_STEP_ORDER: Record<Exclude<Phase2OnboardingStep, 'complete'>, number> = {
   index: 1,
-  nickname: 2,
-  'select-photos': 3,
-  'profile-edit': 4,
-  prompts: 5,
-  'profile-setup': 6,
+  'select-photos': 2,
+  'profile-edit': 3,
+  prompts: 4,
+  'profile-setup': 5,
+};
+
+export const PHASE2_NICKNAME_MIN_LENGTH = 3;
+export const PHASE2_NICKNAME_MAX_LENGTH = 20;
+
+export const sanitizeNickname = (value: string): string => value.replace(/[^a-zA-Z0-9]/g, '');
+
+export const isValidNickname = (value: string): boolean => {
+  const trimmed = value.trim();
+  return (
+    trimmed.length >= PHASE2_NICKNAME_MIN_LENGTH &&
+    trimmed.length <= PHASE2_NICKNAME_MAX_LENGTH &&
+    /^[a-zA-Z0-9]+$/.test(trimmed)
+  );
 };
 
 type Phase1Photo = {

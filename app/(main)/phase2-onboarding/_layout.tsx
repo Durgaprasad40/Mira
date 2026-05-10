@@ -5,12 +5,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
-import {
-  buildPhase1ImportData,
-  PHASE2_ONBOARDING_ROUTE_MAP,
-  PHASE2_ONBOARDING_STEP_ORDER,
-  type Phase2OnboardingStep,
-} from '@/lib/phase2Onboarding';
+import { buildPhase1ImportData } from '@/lib/phase2Onboarding';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
@@ -27,15 +22,6 @@ function isSessionInvalidationError(msg: string) {
          l.includes('session has expired') ||
          l.includes('token has expired') ||
          l.includes('auth token invalid');
-}
-
-function getStepFromPathname(pathname: string): Exclude<Phase2OnboardingStep, 'complete'> {
-  if (pathname.endsWith('/nickname')) return 'nickname';
-  if (pathname.endsWith('/select-photos')) return 'select-photos';
-  if (pathname.endsWith('/profile-edit')) return 'profile-edit';
-  if (pathname.endsWith('/prompts')) return 'prompts';
-  if (pathname.endsWith('/profile-setup')) return 'profile-setup';
-  return 'index';
 }
 
 class Phase2ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -130,11 +116,6 @@ function Phase2OnboardingNavigator() {
     hydrationKeyRef.current = hydrationKey;
   }, [currentPrivateProfile, currentUser, hydrateFromConvex, importPhase1Data, setAcceptedTermsAt]);
 
-  const currentStep = useMemo(
-    () => getStepFromPathname(pathname),
-    [pathname]
-  );
-
   const pendingRoute = useMemo(() => {
     if (!onboardingState) {
       return null;
@@ -185,7 +166,6 @@ function Phase2OnboardingNavigator() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
-      <Stack.Screen name="nickname" />
       <Stack.Screen name="select-photos" />
       <Stack.Screen name="profile-edit" />
       <Stack.Screen name="prompts" />

@@ -285,7 +285,7 @@ export default function Phase2ReviewScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Review & create</Text>
-        <Text style={styles.stepLabel}>Step 6 of 6</Text>
+        <Text style={styles.stepLabel}>Step 5 of 5</Text>
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
