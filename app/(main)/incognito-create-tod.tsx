@@ -1227,6 +1227,132 @@ export default function CreateTodScreen() {
             )}
           </TouchableOpacity>
         </View>
+
+        {/* Premium guidance block — explains the Truth or Dare loop and
+            shows friendly behavior rules. Always visible, illustrative only.
+            Sibling of visibilityContainer; lives inside the ScrollView so
+            keyboard behavior and POST button position stay untouched. */}
+        <View
+          style={[
+            styles.guidanceBlock,
+            isCompact && { paddingTop: 8, paddingBottom: 8 },
+          ]}
+        >
+          <Text
+            style={[
+              styles.guidanceLabel,
+              isCompact && { marginBottom: 6 },
+            ]}
+            accessibilityRole="header"
+            maxFontSizeMultiplier={1.2}
+          >
+            HOW TRUTH OR DARE WORKS
+          </Text>
+
+          <View style={styles.guidanceFlow}>
+            <View style={styles.guidanceChip}>
+              <Ionicons name="pencil-outline" size={13} color={C.text} />
+              <Text
+                style={styles.guidanceChipLabel}
+                numberOfLines={1}
+                maxFontSizeMultiplier={1.15}
+              >
+                Post
+              </Text>
+            </View>
+            <View style={styles.guidanceConnector}>
+              <View style={styles.guidanceConnectorLine} />
+              <Ionicons
+                name="chevron-forward"
+                size={14}
+                color={C.textLight}
+                style={styles.guidanceConnectorHead}
+              />
+            </View>
+            <View style={styles.guidanceChip}>
+              <Ionicons name="chatbubble-ellipses-outline" size={13} color={C.text} />
+              <Text
+                style={styles.guidanceChipLabel}
+                numberOfLines={1}
+                maxFontSizeMultiplier={1.15}
+              >
+                Get reply
+              </Text>
+            </View>
+            <View style={styles.guidanceConnector}>
+              <View style={styles.guidanceConnectorLine} />
+              <Ionicons
+                name="chevron-forward"
+                size={14}
+                color={C.textLight}
+                style={styles.guidanceConnectorHead}
+              />
+            </View>
+            <View style={styles.guidanceChip}>
+              <Ionicons name="heart-outline" size={13} color={C.text} />
+              <Text
+                style={styles.guidanceChipLabel}
+                numberOfLines={1}
+                maxFontSizeMultiplier={1.15}
+              >
+                Tap to connect
+              </Text>
+            </View>
+          </View>
+
+          <Text
+            style={[
+              styles.guidanceFlowSub,
+              isCompact && { marginTop: 6 },
+            ]}
+            maxFontSizeMultiplier={1.15}
+          >
+            Drop a prompt, see who answers, tap a reply to connect.
+          </Text>
+
+          <View
+            style={[
+              styles.guidanceDivider,
+              isCompact && { marginVertical: 10 },
+            ]}
+          />
+
+          <Text
+            style={[
+              styles.guidanceLabel,
+              isCompact && { marginBottom: 6 },
+            ]}
+            accessibilityRole="header"
+            maxFontSizeMultiplier={1.2}
+          >
+            KEEP IT RESPECTFUL
+          </Text>
+
+          <View style={styles.guidanceRule}>
+            <View style={styles.guidanceBullet} />
+            <Text style={styles.guidanceRuleText} maxFontSizeMultiplier={1.15}>
+              Be playful — no pressure to share, meet, or reply.
+            </Text>
+          </View>
+          <View style={styles.guidanceRule}>
+            <View style={styles.guidanceBullet} />
+            <Text style={styles.guidanceRuleText} maxFontSizeMultiplier={1.15}>
+              No abusive, hateful, explicit, or violent content.
+            </Text>
+          </View>
+          <View style={styles.guidanceRule}>
+            <View style={styles.guidanceBullet} />
+            <Text style={styles.guidanceRuleText} maxFontSizeMultiplier={1.15}>
+              Don&apos;t share anyone&apos;s personal info, and no spam.
+            </Text>
+          </View>
+          <View style={styles.guidanceRule}>
+            <View style={styles.guidanceBullet} />
+            <Text style={styles.guidanceRuleText} maxFontSizeMultiplier={1.15}>
+              See something off? Tap ⋯ on any reply to report.
+            </Text>
+          </View>
+        </View>
       </ScrollView>
 
       <Modal
@@ -1620,5 +1746,111 @@ const styles = StyleSheet.create({
     borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // ─── Premium guidance block (under POST button) ───
+  // Two stacked sub-sections: how the loop works + friendly rules.
+  // Quiet styling on purpose; matches `visibilityLabel` typography for
+  // visual family.
+  guidanceBlock: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 20,
+  },
+  guidanceLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.text,
+    marginBottom: 10,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    opacity: 0.85,
+  },
+  guidanceFlow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  guidanceChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: PREMIUM.surfaceElevated,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: PREMIUM.hairlineStrong,
+    flexShrink: 0,
+  },
+  guidanceChipLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: 0.3,
+  },
+  // Arrow connector between chips: a horizontal hairline that fills any
+  // remaining row width, terminated with a chevron arrowhead. The line
+  // grows/shrinks via `flex: 1` while the chips stay at content width, so
+  // the flow visually reads as `Post ───› Get reply ───› Tap to connect`.
+  guidanceConnector: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    minWidth: 16,
+    marginHorizontal: 6,
+  },
+  guidanceConnectorLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: PREMIUM.hairlineStrong,
+  },
+  guidanceConnectorHead: {
+    marginLeft: -2,
+    opacity: 0.85,
+  },
+  guidanceFlowSub: {
+    marginTop: 10,
+    fontSize: 13,
+    lineHeight: 18,
+    color: C.textLight,
+    letterSpacing: 0.1,
+  },
+  guidanceDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: PREMIUM.hairline,
+    marginVertical: 14,
+  },
+  // Each rule row: marker + text. Gap between rows is intentionally generous
+  // so the rules read as scannable bullets instead of a paragraph.
+  guidanceRule: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginTop: 10,
+  },
+  // Premium bullet: a 7px coral dot with a soft coral halo ring. The ring
+  // gives just enough lift on the dark surface to make the marker visible
+  // without competing with the POST button accent. `marginTop` aligns the
+  // dot's optical center with the first text line's baseline.
+  guidanceBullet: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: C.primary,
+    marginTop: 6,
+    marginLeft: 2,
+    shadowColor: C.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.55,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  guidanceRuleText: {
+    flex: 1,
+    flexShrink: 1,
+    fontSize: 12,
+    lineHeight: 18,
+    color: C.textLight,
+    letterSpacing: 0.1,
   },
 });

@@ -2119,23 +2119,86 @@ export default function TruthOrDareScreen() {
             <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
           </TouchableOpacity>
         </View>
-        <View style={styles.emptyState}>
-          <View style={styles.emptyIconContainer}>
-            <Ionicons name="help-circle-outline" size={52} color={PREMIUM.textMuted} />
-          </View>
-          <Text style={styles.emptyTitle}>No active prompts</Text>
-          <Text style={styles.emptySubtitle}>Be the first to create a Truth or Dare!</Text>
-          <TouchableOpacity style={styles.createFirstBtn} onPress={openCreateTod} activeOpacity={0.85}>
-            <LinearGradient
-              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.createFirstBtnGradient}
+        <View style={styles.emptyHero}>
+          <View style={styles.emptyHeroContent}>
+            <View style={styles.emptyHeroIconRing}>
+              <Ionicons name="sparkles" size={56} color={PREMIUM.coralSoft} />
+            </View>
+            <Text style={styles.emptyHeroTitle} maxFontSizeMultiplier={1.2}>
+              Start a Truth or Dare
+            </Text>
+            <Text style={styles.emptyHeroSubtitle} maxFontSizeMultiplier={1.2}>
+              Drop a playful prompt and see who answers. If their reply clicks, tap to connect.
+            </Text>
+
+            <View style={styles.emptyHeroSteps}>
+              <View style={styles.emptyHeroStepRow}>
+                <View style={styles.emptyHeroStepIconWrap}>
+                  <Ionicons name="pencil-outline" size={16} color={PREMIUM.coralSoft} />
+                </View>
+                <View style={styles.emptyHeroStepText}>
+                  <Text style={styles.emptyHeroStepLabel} maxFontSizeMultiplier={1.2}>
+                    Post a prompt
+                  </Text>
+                  <Text style={styles.emptyHeroStepDesc} maxFontSizeMultiplier={1.2}>
+                    A truth question or a fun dare.
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.emptyHeroStepRow}>
+                <View style={styles.emptyHeroStepIconWrap}>
+                  <Ionicons name="chatbubbles-outline" size={16} color={PREMIUM.coralSoft} />
+                </View>
+                <View style={styles.emptyHeroStepText}>
+                  <Text style={styles.emptyHeroStepLabel} maxFontSizeMultiplier={1.2}>
+                    Get playful answers
+                  </Text>
+                  <Text style={styles.emptyHeroStepDesc} maxFontSizeMultiplier={1.2}>
+                    People reply in the thread.
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.emptyHeroStepRow}>
+                <View style={styles.emptyHeroStepIconWrap}>
+                  <Ionicons name="heart-outline" size={16} color={PREMIUM.coralSoft} />
+                </View>
+                <View style={styles.emptyHeroStepText}>
+                  <Text style={styles.emptyHeroStepLabel} maxFontSizeMultiplier={1.2}>
+                    Tap to connect
+                  </Text>
+                  <Text style={styles.emptyHeroStepDesc} maxFontSizeMultiplier={1.2}>
+                    Like an answer? Send a request.
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            <View style={styles.emptyHeroExampleChip}>
+              <Text style={styles.emptyHeroExampleChipText} maxFontSizeMultiplier={1.15}>
+                Try: “Confess your worst dance move.”
+              </Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.emptyHeroCta}
+              onPress={openCreateTod}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel="Create Truth or Dare post"
             >
-              <Ionicons name="add" size={18} color="#FFF" />
-              <Text style={styles.createFirstBtnText}>Create Post</Text>
-            </LinearGradient>
-          </TouchableOpacity>
+              <LinearGradient
+                colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.emptyHeroCtaGradient}
+              >
+                <Ionicons name="sparkles" size={18} color="#FFF" />
+                <Text style={styles.emptyHeroCtaText} maxFontSizeMultiplier={1.15}>
+                  Create Truth or Dare
+                </Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </View>
         </View>
       </LinearGradient>
     );
@@ -2725,6 +2788,127 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFF',
     letterSpacing: 0.3,
+  },
+
+  // ─── Redesigned empty-state hero (no-prompts branch only) ───
+  // Uses brand-new style names so the error branch above keeps reusing
+  // `emptyState` / `emptyIconContainer` / `emptyTitle` / `emptySubtitle` /
+  // `createFirstBtn` / `createFirstBtnGradient` / `createFirstBtnText`
+  // unchanged.
+  emptyHero: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 32,
+  },
+  emptyHeroContent: {
+    width: '100%',
+    maxWidth: 420,
+    alignItems: 'center',
+  },
+  emptyHeroIconRing: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: PREMIUM.bgElevated,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderAccent,
+    marginBottom: 20,
+    shadowColor: PREMIUM.coral,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    elevation: 6,
+  },
+  emptyHeroTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+  emptyHeroSubtitle: {
+    marginTop: 8,
+    fontSize: 14,
+    lineHeight: 20,
+    color: PREMIUM.textSecondary,
+    textAlign: 'center',
+  },
+  emptyHeroSteps: {
+    alignSelf: 'stretch',
+    marginTop: 22,
+    gap: 12,
+  },
+  emptyHeroStepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  emptyHeroStepIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(233, 69, 96, 0.10)',
+    marginTop: 1,
+  },
+  emptyHeroStepText: {
+    flex: 1,
+    flexShrink: 1,
+  },
+  emptyHeroStepLabel: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+  },
+  emptyHeroStepDesc: {
+    marginTop: 2,
+    fontSize: 13,
+    lineHeight: 18,
+    color: PREMIUM.textSecondary,
+  },
+  emptyHeroExampleChip: {
+    marginTop: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+    backgroundColor: PREMIUM.bgElevated,
+  },
+  emptyHeroExampleChipText: {
+    fontSize: 12,
+    color: PREMIUM.textMuted,
+    letterSpacing: 0.1,
+  },
+  emptyHeroCta: {
+    alignSelf: 'stretch',
+    marginTop: 22,
+    borderRadius: 28,
+    overflow: 'hidden',
+    shadowColor: PREMIUM.coral,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    elevation: 6,
+  },
+  emptyHeroCtaGradient: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 24,
+    paddingVertical: 16,
+  },
+  emptyHeroCtaText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFF',
+    letterSpacing: 0.4,
   },
 
   // ─── FAB - Premium floating action button ───
