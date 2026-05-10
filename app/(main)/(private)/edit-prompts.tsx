@@ -23,7 +23,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation, usePreventRemove } from '@react-navigation/native';
 import { useMutation } from 'convex/react';
@@ -45,10 +45,23 @@ const C = INCOGNITO_COLORS;
 
 type SectionKey = 'section1' | 'section2' | 'section3';
 
+// Map deep-link `section` query param onto our internal SectionKey. Anything
+// outside the known set falls back to Section 1 (the original default), so
+// stale or malformed links never produce a blank screen.
+function resolveInitialSection(
+  raw: string | string[] | undefined,
+): SectionKey {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (value === 'values') return 'section2';
+  if (value === 'personality') return 'section3';
+  return 'section1';
+}
+
 export default function EditPromptsScreen() {
   const router = useRouter();
   const navigation = useNavigation();
   const scrollViewRef = useRef<ScrollView>(null);
+  const params = useLocalSearchParams<{ section?: 'quick' | 'values' | 'personality' }>();
 
   // Auth
   const { userId, token } = useAuthStore();
@@ -58,8 +71,11 @@ export default function EditPromptsScreen() {
   const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
   const setPromptAnswers = usePrivateProfileStore((s) => s.setPromptAnswers);
 
-  // Local state
-  const [expandedSection, setExpandedSection] = useState<SectionKey | null>('section1');
+  // Local state — initial expanded section honours the optional `section`
+  // deep-link param, but default behaviour (no param) remains unchanged.
+  const [expandedSection, setExpandedSection] = useState<SectionKey | null>(
+    () => resolveInitialSection(params.section),
+  );
   const [editingPrompt, setEditingPrompt] = useState<string | null>(null);
   const [draftAnswer, setDraftAnswer] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -111,37 +127,83 @@ export default function EditPromptsScreen() {
     [getAnswer]
   );
 
+  // Lookup table for the typed sections (2 + 3) so we can rehydrate the
+  // question label when committing a draft answer.
+  const ALL_TEXT_PROMPTS = useMemo(
+    () => [...PHASE2_SECTION2_PROMPTS, ...PHASE2_SECTION3_PROMPTS],
+    [],
+  );
+
   // Toggle section expansion
   const toggleSection = (section: SectionKey) => {
     setExpandedSection(expandedSection === section ? null : section);
   };
 
-  // Start editing a prompt
-  const startEditing = (promptId: string, question: string) => {
+  /**
+   * Synchronously fold any in-progress inline edit into a fresh answers list.
+   *
+   * - Returns `{ ok: false }` and shows a single premium alert when the
+   *   in-progress text is non-empty but shorter than the minimum length.
+   * - Returns `{ ok: true, answers }` otherwise; `answers` is the merged list
+   *   the caller can persist to backend / state without waiting on
+   *   `setDraftPromptAnswers` to flush.
+   */
+  const applyDraftCommit = useCallback((): {
+    answers: Phase2PromptAnswer[];
+    ok: boolean;
+  } => {
+    let answers = draftPromptAnswers;
+    if (!editingPrompt) return { answers, ok: true };
+
+    const promptInfo = ALL_TEXT_PROMPTS.find((p) => p.id === editingPrompt);
+    if (!promptInfo) {
+      // Defensive: only typed prompts ever enter `editingPrompt`.
+      return { answers, ok: true };
+    }
+
+    const trimmed = draftAnswer.trim();
+    if (trimmed.length === 0) {
+      answers = answers.filter((a) => a.promptId !== editingPrompt);
+      return { answers, ok: true };
+    }
+    if (trimmed.length < PHASE2_PROMPT_MIN_TEXT_LENGTH) {
+      Alert.alert(
+        'Answer is too short',
+        `Each answer needs at least ${PHASE2_PROMPT_MIN_TEXT_LENGTH} characters, or leave it empty.`,
+      );
+      return { answers, ok: false };
+    }
+
+    const next: Phase2PromptAnswer = {
+      promptId: editingPrompt,
+      question: promptInfo.question,
+      answer: trimmed,
+    };
+    const idx = answers.findIndex((a) => a.promptId === editingPrompt);
+    if (idx === -1) {
+      answers = [...answers, next];
+    } else {
+      answers = [...answers];
+      answers[idx] = next;
+    }
+    return { answers, ok: true };
+  }, [ALL_TEXT_PROMPTS, draftAnswer, draftPromptAnswers, editingPrompt]);
+
+  // Start editing a prompt. Switching away from another in-progress prompt
+  // commits its draft first; if the previous draft is invalid, we keep the
+  // user on the current prompt instead of silently losing their text.
+  const startEditing = (promptId: string) => {
+    if (editingPrompt && editingPrompt !== promptId) {
+      const { answers, ok } = applyDraftCommit();
+      if (!ok) return;
+      setDraftPromptAnswers(answers);
+    }
     setEditingPrompt(promptId);
     setDraftAnswer(getAnswer(promptId));
   };
 
-  // Cancel editing
-  const cancelEditing = () => {
-    setEditingPrompt(null);
-    setDraftAnswer('');
-    Keyboard.dismiss();
-  };
-
-  // Save answer for a prompt
-  const saveAnswer = (promptId: string, question: string) => {
-    if (draftAnswer.trim().length >= PHASE2_PROMPT_MIN_TEXT_LENGTH) {
-      updateDraftPromptAnswer(promptId, question, draftAnswer);
-    } else if (draftAnswer.trim().length === 0) {
-      removeDraftPromptAnswer(promptId);
-    }
-    setEditingPrompt(null);
-    setDraftAnswer('');
-    Keyboard.dismiss();
-  };
-
-  // Select answer for multiple choice (Section 1)
+  // Select answer for multiple choice (Section 1). MC selections never enter
+  // `editingPrompt`, so they're independent of the typed-prompt commit flow.
   const selectMultipleChoiceAnswer = (promptId: string, question: string, option: string) => {
     const current = getAnswer(promptId);
     if (current === option) {
@@ -150,6 +212,27 @@ export default function EditPromptsScreen() {
       updateDraftPromptAnswer(promptId, question, option);
     }
   };
+
+  // Scroll the focused TextInput safely above the keyboard while keeping the
+  // question text visible just above it. Uses ScrollView's responder API,
+  // which works on both iOS and Android with a single code path.
+  const handleInputFocus = useCallback((event: any) => {
+    const sv: any = scrollViewRef.current;
+    if (!sv) return;
+    const reactTag = event?.target;
+    if (reactTag == null) return;
+    // Wait for the keyboard animation + KeyboardAvoidingView resize to
+    // settle before measuring; otherwise the scroll target is computed
+    // against the pre-keyboard layout.
+    setTimeout(() => {
+      const scrollResponder = sv.getScrollResponder?.();
+      scrollResponder?.scrollResponderScrollNativeHandleToKeyboard?.(
+        reactTag,
+        120, // additional offset above keyboard so the question stays visible
+        true,
+      );
+    }, 80);
+  }, []);
 
   const normalizedSavedAnswers = useMemo(
     () =>
@@ -181,55 +264,78 @@ export default function EditPromptsScreen() {
 
   const hasUnsavedChanges = normalizedDraftAnswers !== normalizedSavedAnswers || hasPendingInlineEdit;
 
+  /**
+   * Persist the given answers to the Convex backend (or store, in demo mode).
+   * Returns true on success so the caller can continue with navigation.
+   */
+  const persistAnswers = useCallback(
+    async (answers: Phase2PromptAnswer[]): Promise<boolean> => {
+      if (isDemoMode) {
+        setPromptAnswers(answers);
+        return true;
+      }
+
+      if (!userId || !token) {
+        Alert.alert('Error', 'Please sign in to save changes.');
+        return false;
+      }
+
+      setIsSaving(true);
+      try {
+        await updatePrivateProfile({
+          token,
+          authUserId: userId,
+          promptAnswers: answers,
+        });
+        setPromptAnswers(answers);
+        return true;
+      } catch (error) {
+        if (__DEV__) {
+          console.error('[EditPrompts] Save failed:', error);
+        }
+        Alert.alert("Couldn't save", 'Failed to save changes. Please try again.');
+        return false;
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [setPromptAnswers, token, updatePrivateProfile, userId],
+  );
+
+  // Auto-save on back: commit any in-progress inline edit, then persist the
+  // resulting list and let the navigation action proceed. Validation failure
+  // keeps the user on the screen with a clear message — we never silently
+  // drop typed text.
   usePreventRemove(hasUnsavedChanges && !isSaving, ({ data }) => {
-    Alert.alert(
-      'Discard changes?',
-      'You have unsaved prompt edits. Leave without saving?',
-      [
-        { text: 'Keep Editing', style: 'cancel' },
-        {
-          text: 'Discard',
-          style: 'destructive',
-          onPress: () => navigation.dispatch(data.action),
-        },
-      ]
-    );
+    const { answers, ok } = applyDraftCommit();
+    if (!ok) return;
+
+    setDraftPromptAnswers(answers);
+    setEditingPrompt(null);
+    setDraftAnswer('');
+    Keyboard.dismiss();
+
+    void (async () => {
+      const saved = await persistAnswers(answers);
+      if (saved) {
+        navigation.dispatch(data.action);
+      }
+    })();
   });
 
-  // Save all changes to backend
+  // Save all changes to backend (top-right Save button).
   const handleSave = async () => {
-    if (editingPrompt) {
-      Alert.alert('Finish editing', 'Save or cancel the answer you are editing before leaving this screen.');
-      return;
-    }
+    const { answers, ok } = applyDraftCommit();
+    if (!ok) return;
 
-    if (isDemoMode) {
-      setPromptAnswers(draftPromptAnswers);
+    setDraftPromptAnswers(answers);
+    setEditingPrompt(null);
+    setDraftAnswer('');
+    Keyboard.dismiss();
+
+    const saved = await persistAnswers(answers);
+    if (saved) {
       router.back();
-      return;
-    }
-
-    if (!userId || !token) {
-      Alert.alert('Error', 'Please sign in to save changes.');
-      return;
-    }
-
-    setIsSaving(true);
-    try {
-      await updatePrivateProfile({
-        token,
-        authUserId: userId,
-        promptAnswers: draftPromptAnswers,
-      });
-      setPromptAnswers(draftPromptAnswers);
-      router.back();
-    } catch (error) {
-      if (__DEV__) {
-        console.error('[EditPrompts] Save failed:', error);
-      }
-      Alert.alert('Error', 'Failed to save changes. Please try again.');
-    } finally {
-      setIsSaving(false);
     }
   };
 
@@ -342,6 +448,7 @@ export default function EditPromptsScreen() {
                         style={styles.textInput}
                         value={draftAnswer}
                         onChangeText={setDraftAnswer}
+                        onFocus={handleInputFocus}
                         placeholder="Type your answer..."
                         placeholderTextColor={C.textLight}
                         multiline
@@ -351,30 +458,14 @@ export default function EditPromptsScreen() {
                       <Text style={styles.charCount}>
                         {draftAnswer.length}/{PHASE2_PROMPT_MAX_TEXT_LENGTH}
                       </Text>
-                      <View style={styles.editActions}>
-                        <TouchableOpacity
-                          style={styles.cancelBtn}
-                          onPress={cancelEditing}
-                        >
-                          <Text style={styles.cancelBtnText}>Cancel</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={[
-                            styles.saveBtn,
-                            draftAnswer.trim().length < PHASE2_PROMPT_MIN_TEXT_LENGTH &&
-                              draftAnswer.trim().length > 0 &&
-                              styles.saveBtnDisabled,
-                          ]}
-                          onPress={() => saveAnswer(prompt.id, prompt.question)}
-                        >
-                          <Text style={styles.saveBtnText}>Save</Text>
-                        </TouchableOpacity>
-                      </View>
+                      <Text style={styles.editHint}>
+                        Tap Save in the top right or back to save your answer.
+                      </Text>
                     </View>
                   ) : currentAnswer ? (
                     <TouchableOpacity
                       style={styles.answerCard}
-                      onPress={() => startEditing(prompt.id, prompt.question)}
+                      onPress={() => startEditing(prompt.id)}
                       activeOpacity={0.7}
                     >
                       <Text style={styles.answerText} numberOfLines={3}>
@@ -385,7 +476,7 @@ export default function EditPromptsScreen() {
                   ) : (
                     <TouchableOpacity
                       style={styles.addAnswerBtn}
-                      onPress={() => startEditing(prompt.id, prompt.question)}
+                      onPress={() => startEditing(prompt.id)}
                       activeOpacity={0.7}
                     >
                       <Ionicons name="add" size={18} color={C.primary} />
@@ -422,7 +513,7 @@ export default function EditPromptsScreen() {
             onPress={handleSave}
             disabled={isSaving}
           >
-            <Text style={styles.doneBtnText}>{isSaving ? 'Saving...' : 'Done'}</Text>
+            <Text style={styles.doneBtnText}>{isSaving ? 'Saving...' : 'Save'}</Text>
           </TouchableOpacity>
         </View>
 
@@ -483,7 +574,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 16,
-    paddingBottom: 40,
+    paddingBottom: 240,
   },
   sectionCard: {
     backgroundColor: C.surface,
@@ -566,33 +657,11 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     marginTop: 4,
   },
-  editActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 12,
-    marginTop: 12,
-  },
-  cancelBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-  },
-  cancelBtnText: {
-    fontSize: 14,
+  editHint: {
+    fontSize: 12,
     color: C.textLight,
-  },
-  saveBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 20,
-    backgroundColor: C.primary,
-    borderRadius: 16,
-  },
-  saveBtnDisabled: {
-    opacity: 0.5,
-  },
-  saveBtnText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#FFFFFF',
+    marginTop: 8,
+    lineHeight: 16,
   },
   answerCard: {
     flexDirection: 'row',

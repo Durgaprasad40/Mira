@@ -43,6 +43,12 @@ import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
 import { uploadPhotoToConvex } from '@/lib/uploadUtils';
 import { INCOGNITO_COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
+import {
+  PHASE2_SECTION1_PROMPTS,
+  PHASE2_SECTION2_PROMPTS,
+  PHASE2_SECTION3_PROMPTS,
+  type Phase2PromptAnswer,
+} from '@/lib/privateConstants';
 import { cmToFeetInches } from '@/lib/utils';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -363,6 +369,55 @@ export default function EditProfileScreen() {
     return promptAnswers;
   }, [backendProfile, promptAnswers]);
 
+  // Bucket prompt answers by section using the canonical prompt-id catalog.
+  // Off-catalog / legacy promptIds are dropped from the on-screen sections so
+  // we don't accidentally render them in the wrong bucket; they remain in the
+  // underlying store and can still be edited via the dedicated screen.
+  const SECTION1_IDS = useMemo(
+    () => new Set<string>(PHASE2_SECTION1_PROMPTS.map((p) => p.id)),
+    [],
+  );
+  const SECTION2_IDS = useMemo(
+    () => new Set<string>(PHASE2_SECTION2_PROMPTS.map((p) => p.id)),
+    [],
+  );
+  const SECTION3_IDS = useMemo(
+    () => new Set<string>(PHASE2_SECTION3_PROMPTS.map((p) => p.id)),
+    [],
+  );
+
+  const quickAnswers = useMemo(
+    () =>
+      (resolvedPromptAnswers as Phase2PromptAnswer[]).filter((a) =>
+        SECTION1_IDS.has(a.promptId),
+      ),
+    [resolvedPromptAnswers, SECTION1_IDS],
+  );
+  const valueAnswers = useMemo(
+    () =>
+      (resolvedPromptAnswers as Phase2PromptAnswer[]).filter((a) =>
+        SECTION2_IDS.has(a.promptId),
+      ),
+    [resolvedPromptAnswers, SECTION2_IDS],
+  );
+  const personalityAnswers = useMemo(
+    () =>
+      (resolvedPromptAnswers as Phase2PromptAnswer[]).filter((a) =>
+        SECTION3_IDS.has(a.promptId),
+      ),
+    [resolvedPromptAnswers, SECTION3_IDS],
+  );
+
+  const handleEditPromptsSection = useCallback(
+    (section: 'quick' | 'values' | 'personality') => {
+      router.push({
+        pathname: '/(main)/(private)/edit-prompts',
+        params: { section },
+      } as any);
+    },
+    [router],
+  );
+
   // Photo URLs: Convex `privatePhotoUrls` is authoritative (same as Profile tab). While query is loading, fall back
   // to the store (often hydrated by Private layout). During a brief post-save window, prefer `pendingPhotoUrls`.
   const mergedPhotoUrls = useMemo(() => {
@@ -556,7 +611,6 @@ export default function EditProfileScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [isSyncingDetails, setIsSyncingDetails] = useState(false);
   // NOTE: saveSuccess state removed - we now navigate back on success instead
-  const [promptsExpanded, setPromptsExpanded] = useState(false);
   const [editingBio, setEditingBio] = useState(false);
   const [draftBio, setDraftBio] = useState(resolvedPrivateBio);
   const [missingPhotos, setMissingPhotos] = useState<Set<string>>(new Set());
@@ -566,6 +620,16 @@ export default function EditProfileScreen() {
     if (isDemoMode) return;
     if (!userId) return;
     if (isSyncingDetails) return;
+
+    // Block sync while Phase-1 query is still loading; otherwise we'd be acting
+    // on incomplete data and the post-sync feedback would be misleading.
+    if (!isDemoMode && !!userId && currentUser === undefined) {
+      Alert.alert(
+        'Loading your main profile',
+        'Please wait a moment for your main profile to load, then try syncing again.',
+      );
+      return;
+    }
 
     Alert.alert(
       'Sync details from main profile?',
@@ -594,33 +658,68 @@ export default function EditProfileScreen() {
                 return;
               }
 
-              // Update local + store state to immediately reflect synced values (backend will also update).
-              const nextHeight = (phase1User as any)?.height ?? null;
-              const nextWeight = (phase1User as any)?.weight ?? null;
-              const nextSmoking = canonicalizeSmoking((phase1User as any)?.smoking ?? null);
-              const nextDrinking = canonicalizeDrinking((phase1User as any)?.drinking ?? null);
-              const nextEducation = canonicalizeEducation((phase1User as any)?.education ?? null);
-              const nextReligion = canonicalizeReligion((phase1User as any)?.religion ?? null);
-              const nextHobbies = ((phase1User as any)?.activities ?? []) as string[];
+              const applied = (res as any).appliedFields ?? {};
+              const snapshot = (res as any).phase1Snapshot ?? {};
+              const availableInPhase1 = Boolean((res as any).availableInPhase1);
 
-              setLocalHeight(nextHeight);
-              setLocalWeight(nextWeight);
-              setLocalSmoking(nextSmoking);
-              setLocalDrinking(nextDrinking);
-              setLocalEducation(nextEducation);
-              setLocalReligion(nextReligion);
-              setLocalHobbies(nextHobbies);
+              if (!availableInPhase1) {
+                Alert.alert(
+                  'Nothing to sync yet',
+                  'No details found in your main profile yet. Add details in your main profile first, then sync again.',
+                );
+                return;
+              }
 
-              setHeight(nextHeight);
-              setWeight(nextWeight);
-              setSmoking(nextSmoking);
-              setDrinking(nextDrinking);
-              setEducation(nextEducation);
-              setReligion(nextReligion);
-              setHobbies(nextHobbies);
+              // Only touch fields the backend confirms it applied; leave everything
+              // else untouched so we don't visually clear locally-edited values that
+              // Phase-1 doesn't know about.
+              let appliedCount = 0;
+              if (applied.height) {
+                const next = (snapshot.height as number | undefined) ?? null;
+                setLocalHeight(next);
+                setHeight(next);
+                appliedCount++;
+              }
+              if (applied.weight) {
+                const next = (snapshot.weight as number | undefined) ?? null;
+                setLocalWeight(next);
+                setWeight(next);
+                appliedCount++;
+              }
+              if (applied.smoking) {
+                const next = canonicalizeSmoking((snapshot.smoking as string | undefined) ?? null);
+                setLocalSmoking(next);
+                setSmoking(next);
+                appliedCount++;
+              }
+              if (applied.drinking) {
+                const next = canonicalizeDrinking((snapshot.drinking as string | undefined) ?? null);
+                setLocalDrinking(next);
+                setDrinking(next);
+                appliedCount++;
+              }
+              if (applied.education) {
+                const next = canonicalizeEducation((snapshot.education as string | undefined) ?? null);
+                setLocalEducation(next);
+                setEducation(next);
+                appliedCount++;
+              }
+              if (applied.religion) {
+                const next = canonicalizeReligion((snapshot.religion as string | undefined) ?? null);
+                setLocalReligion(next);
+                setReligion(next);
+                appliedCount++;
+              }
+              if (applied.hobbies) {
+                const next = (snapshot.hobbies as string[] | undefined) ?? [];
+                setLocalHobbies(next);
+                setHobbies(next);
+                appliedCount++;
+              }
 
               setDetailsInitialized(true);
-              Alert.alert('Success', 'Details synced from your main profile.');
+              const fieldWord = appliedCount === 1 ? 'field' : 'fields';
+              Alert.alert('Synced', `Synced ${appliedCount} ${fieldWord} from your main profile.`);
             } catch {
               Alert.alert('Could not sync details', 'Please try again.');
             } finally {
@@ -633,9 +732,10 @@ export default function EditProfileScreen() {
   }, [
     isDemoMode,
     userId,
+    token,
     isSyncingDetails,
+    currentUser,
     syncFromMainProfile,
-    phase1User,
     setHeight,
     setWeight,
     setSmoking,
@@ -1681,49 +1781,124 @@ export default function EditProfileScreen() {
           </View>
 
           {/* ────────────────────────────────────────────────────────────── */}
-          {/* SECTION 5: PROMPTS */}
+          {/* SECTION 5a: QUICK ANSWERS (Section 1 — option only, no Q text) */}
           {/* ────────────────────────────────────────────────────────────── */}
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>My Answers</Text>
-              <TouchableOpacity onPress={() => router.push('/(main)/(private)/edit-prompts' as any)}>
-                <Text style={styles.editLink}>
-                  {resolvedPromptAnswers.length > 0 ? 'Edit' : 'Add'}
+              <Text style={styles.sectionTitle}>Quick Answers</Text>
+              <TouchableOpacity
+                onPress={() => handleEditPromptsSection('quick')}
+                accessibilityRole="button"
+                accessibilityLabel="Edit quick answers"
+                style={styles.promptEditPill}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="pencil" size={12} color={C.primary} />
+                <Text style={styles.promptEditPillText}>
+                  {quickAnswers.length > 0 ? 'Edit' : 'Add'}
                 </Text>
               </TouchableOpacity>
             </View>
 
-            {resolvedPromptAnswers.length > 0 ? (
-              <>
-                <View style={styles.promptsContainer}>
-                  {(promptsExpanded ? resolvedPromptAnswers : resolvedPromptAnswers.slice(0, 2)).map((prompt, idx) => (
-                    <View key={prompt.promptId || idx} style={styles.promptCard}>
-                      <Text style={styles.promptQuestion} numberOfLines={2}>{prompt.question}</Text>
-                      <Text style={styles.promptAnswer} numberOfLines={3}>{prompt.answer}</Text>
-                    </View>
-                  ))}
-                </View>
-
-                {resolvedPromptAnswers.length > 2 && (
-                  <TouchableOpacity
-                    style={styles.showMoreBtn}
-                    onPress={() => setPromptsExpanded(!promptsExpanded)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.showMoreText}>
-                      {promptsExpanded ? 'Show less' : `+${resolvedPromptAnswers.length - 2} more`}
+            {quickAnswers.length > 0 ? (
+              <View style={styles.quickChipRow}>
+                {quickAnswers.map((prompt, idx) => (
+                  <View key={prompt.promptId || idx} style={styles.quickChip}>
+                    <Text style={styles.quickChipText} numberOfLines={2}>
+                      {prompt.answer}
                     </Text>
-                    <Ionicons
-                      name={promptsExpanded ? 'chevron-up' : 'chevron-down'}
-                      size={16}
-                      color={C.primary}
-                    />
-                  </TouchableOpacity>
-                )}
-              </>
+                  </View>
+                ))}
+              </View>
             ) : (
               <View style={styles.bioCard}>
-                <Text style={styles.bioEmpty}>Add answers so people can get to know you faster.</Text>
+                <Text style={styles.bioEmpty}>
+                  Pick a few quick answers so matches see your vibe at a glance.
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 5b: YOUR VALUES (Section 2 — Q + A) */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Your Values</Text>
+              <TouchableOpacity
+                onPress={() => handleEditPromptsSection('values')}
+                accessibilityRole="button"
+                accessibilityLabel="Edit your values"
+                style={styles.promptEditPill}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="pencil" size={12} color={C.primary} />
+                <Text style={styles.promptEditPillText}>
+                  {valueAnswers.length > 0 ? 'Edit' : 'Add'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {valueAnswers.length > 0 ? (
+              <View style={styles.promptsContainer}>
+                {valueAnswers.map((prompt, idx) => (
+                  <View key={prompt.promptId || idx} style={styles.promptCard}>
+                    <Text style={styles.promptQuestion} numberOfLines={2}>
+                      {prompt.question}
+                    </Text>
+                    <Text style={styles.promptAnswer} numberOfLines={4}>
+                      {prompt.answer}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.bioCard}>
+                <Text style={styles.bioEmpty}>
+                  Share what you value most so people can find common ground.
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 5c: YOUR PERSONALITY (Section 3 — Q + A) */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Your Personality</Text>
+              <TouchableOpacity
+                onPress={() => handleEditPromptsSection('personality')}
+                accessibilityRole="button"
+                accessibilityLabel="Edit your personality"
+                style={styles.promptEditPill}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="pencil" size={12} color={C.primary} />
+                <Text style={styles.promptEditPillText}>
+                  {personalityAnswers.length > 0 ? 'Edit' : 'Add'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {personalityAnswers.length > 0 ? (
+              <View style={styles.promptsContainer}>
+                {personalityAnswers.map((prompt, idx) => (
+                  <View key={prompt.promptId || idx} style={styles.promptCard}>
+                    <Text style={styles.promptQuestion} numberOfLines={2}>
+                      {prompt.question}
+                    </Text>
+                    <Text style={styles.promptAnswer} numberOfLines={4}>
+                      {prompt.answer}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.bioCard}>
+                <Text style={styles.bioEmpty}>
+                  Tell people what makes you, you — a few lines is plenty.
+                </Text>
               </View>
             )}
           </View>
@@ -2587,18 +2762,39 @@ const styles = StyleSheet.create({
     color: C.text,
     lineHeight: 22,
   },
-  showMoreBtn: {
+  promptEditPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
     gap: 4,
-    marginTop: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: C.primary + '14',
   },
-  showMoreText: {
-    fontSize: 14,
+  promptEditPillText: {
+    fontSize: 13,
     fontWeight: '600',
     color: C.primary,
+  },
+  quickChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  quickChip: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderLeftWidth: 3,
+    borderLeftColor: C.primary,
+    maxWidth: '100%',
+  },
+  quickChipText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+    lineHeight: 20,
   },
 
   // Details

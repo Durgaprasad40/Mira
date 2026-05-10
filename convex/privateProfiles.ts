@@ -1097,8 +1097,9 @@ export const syncFromMainProfile = mutation({
     }
 
     // Build patch object - NEVER write null (schema only accepts undefined)
+    // Hobbies are guarded the same as lifestyle fields: only write when Phase-1
+    // actually has a non-empty array, otherwise we'd silently clear Phase-2.
     const patch: Record<string, unknown> = {
-      hobbies: (user as any).activities ?? [],
       updatedAt: Date.now(),
     };
 
@@ -1109,17 +1110,80 @@ export const syncFromMainProfile = mutation({
     const drinking = (user as any).drinking;
     const education = (user as any).education;
     const religion = (user as any).religion;
+    const activities = (user as any).activities;
 
-    if (typeof height === 'number' && height > 0) patch.height = height;
-    if (typeof weight === 'number' && weight > 0) patch.weight = weight;
-    if (typeof smoking === 'string' && smoking.length > 0) patch.smoking = smoking;
-    if (typeof drinking === 'string' && drinking.length > 0) patch.drinking = drinking;
-    if (typeof education === 'string' && education.length > 0) patch.education = education;
-    if (typeof religion === 'string' && religion.length > 0) patch.religion = religion;
+    const appliedFields = {
+      height: false,
+      weight: false,
+      smoking: false,
+      drinking: false,
+      education: false,
+      religion: false,
+      hobbies: false,
+    };
 
-    await ctx.db.patch(existing._id, patch);
+    if (typeof height === 'number' && height > 0) {
+      patch.height = height;
+      appliedFields.height = true;
+    }
+    if (typeof weight === 'number' && weight > 0) {
+      patch.weight = weight;
+      appliedFields.weight = true;
+    }
+    if (typeof smoking === 'string' && smoking.length > 0) {
+      patch.smoking = smoking;
+      appliedFields.smoking = true;
+    }
+    if (typeof drinking === 'string' && drinking.length > 0) {
+      patch.drinking = drinking;
+      appliedFields.drinking = true;
+    }
+    if (typeof education === 'string' && education.length > 0) {
+      patch.education = education;
+      appliedFields.education = true;
+    }
+    if (typeof religion === 'string' && religion.length > 0) {
+      patch.religion = religion;
+      appliedFields.religion = true;
+    }
+    if (Array.isArray(activities) && activities.length > 0) {
+      patch.hobbies = activities;
+      appliedFields.hobbies = true;
+    }
 
-    return { success: true as const };
+    const availableInPhase1 =
+      appliedFields.height ||
+      appliedFields.weight ||
+      appliedFields.smoking ||
+      appliedFields.drinking ||
+      appliedFields.education ||
+      appliedFields.religion ||
+      appliedFields.hobbies;
+
+    // Snapshot of canonicalized Phase-1 values the client can use to update
+    // local state without re-querying. Only fields that were applied are
+    // included; the rest are explicitly undefined so the client can tell
+    // them apart from "value happens to be falsy in Phase-1".
+    const phase1Snapshot = {
+      height: appliedFields.height ? (height as number) : undefined,
+      weight: appliedFields.weight ? (weight as number) : undefined,
+      smoking: appliedFields.smoking ? (smoking as string) : undefined,
+      drinking: appliedFields.drinking ? (drinking as string) : undefined,
+      education: appliedFields.education ? (education as string) : undefined,
+      religion: appliedFields.religion ? (religion as string) : undefined,
+      hobbies: appliedFields.hobbies ? (activities as string[]) : undefined,
+    };
+
+    if (availableInPhase1) {
+      await ctx.db.patch(existing._id, patch);
+    }
+
+    return {
+      success: true as const,
+      appliedFields,
+      availableInPhase1,
+      phase1Snapshot,
+    };
   },
 });
 
