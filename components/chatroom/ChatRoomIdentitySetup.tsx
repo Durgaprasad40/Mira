@@ -7,7 +7,7 @@
  *
  * PROFILE-SETUP-FIX: Now includes avatar upload during initial setup.
  */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -20,10 +20,11 @@ import {
   Platform,
   ScrollView,
   Image,
+  Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import * as ImagePicker from 'expo-image-picker';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
@@ -36,20 +37,54 @@ interface ChatRoomIdentitySetupProps {
   onComplete: () => void;
 }
 
+function isValidChatRoomNickname(value: string) {
+  const trimmed = value.trim();
+  return (
+    trimmed.length >= 2 &&
+    trimmed.length <= 30 &&
+    /^[a-zA-Z]/.test(trimmed) &&
+    !/^\d+$/.test(trimmed)
+  );
+}
+
 export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySetupProps) {
   const insets = useSafeAreaInsets();
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
+  const privateProfile = useQuery(
+    api.privateProfiles.getByAuthUserId,
+    authUserId && token ? { token, authUserId } : 'skip'
+  );
   const createOrUpdateProfile = useMutation(api.chatRooms.createOrUpdateChatRoomProfile);
   // PROFILE-SETUP-FIX: Avatar upload mutations
   const generateUploadUrl = useMutation(api.chatRooms.generateChatRoomAvatarUploadUrl);
   const getAvatarUrl = useMutation(api.chatRooms.getChatRoomAvatarUrl);
 
   const [nickname, setNickname] = useState('');
+  const [nicknamePrefilledFromProfile, setNicknamePrefilledFromProfile] = useState(false);
   const [bio, setBio] = useState('');
   // PROFILE-SETUP-FIX: Avatar state
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [pendingAvatarLocalUri, setPendingAvatarLocalUri] = useState<string | null>(null);
+  const [galleryPermissionDenied, setGalleryPermissionDenied] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const hasTypedNicknameRef = useRef(false);
+  const didPrefillNicknameRef = useRef(false);
+
+  useEffect(() => {
+    if (didPrefillNicknameRef.current || hasTypedNicknameRef.current || nickname.trim().length > 0) {
+      return;
+    }
+
+    const profileDisplayName = privateProfile?.displayName?.trim();
+    if (!profileDisplayName || !isValidChatRoomNickname(profileDisplayName)) {
+      return;
+    }
+
+    setNickname(profileDisplayName);
+    setNicknamePrefilledFromProfile(true);
+    didPrefillNicknameRef.current = true;
+  }, [nickname, privateProfile?.displayName]);
 
   // Log form initialization
   if (__DEV__) {
@@ -78,9 +113,10 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
       } else {
         const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
         if (status !== 'granted') {
-          Alert.alert('Permission Required', 'Gallery access is needed to select photos.');
+          setGalleryPermissionDenied(true);
           return;
         }
+        setGalleryPermissionDenied(false);
         result = await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ['images'],
           allowsEditing: true,
@@ -93,6 +129,7 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
         const localUri = result.assets[0].uri;
         setAvatarPreview(localUri);
         setPendingAvatarLocalUri(localUri);
+        setGalleryPermissionDenied(false);
       }
     } catch {
       Alert.alert('Error', 'Failed to pick image. Please try again.');
@@ -100,12 +137,20 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
   }, []);
 
   const handleAvatarPress = useCallback(() => {
-    Alert.alert('Add Photo', 'Choose a source', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Gallery', onPress: () => handlePickAvatar('gallery') },
-      { text: 'Camera', onPress: () => handlePickAvatar('camera') },
-    ]);
+    void handlePickAvatar('gallery');
   }, [handlePickAvatar]);
+
+  const handleOpenSettings = useCallback(() => {
+    Linking.openSettings().catch(() => {
+      Alert.alert('Open Settings', 'Please open Settings to enable gallery access.');
+    });
+  }, []);
+
+  const handleNicknameChange = useCallback((value: string) => {
+    hasTypedNicknameRef.current = true;
+    setNicknamePrefilledFromProfile(false);
+    setNickname(value);
+  }, []);
 
   const handleSubmit = useCallback(async () => {
     const trimmedNickname = nickname.trim();
@@ -180,7 +225,7 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
     }
   }, [nickname, bio, authUserId, pendingAvatarLocalUri, createOrUpdateProfile, generateUploadUrl, getAvatarUrl, onComplete]);
 
-  const isValid = nickname.trim().length >= 2 && /^[a-zA-Z]/.test(nickname.trim());
+  const isValid = isValidChatRoomNickname(nickname);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
@@ -195,10 +240,9 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
         >
           {/* Header */}
           <View style={styles.header}>
-            <Text style={styles.title}>Create Your Identity</Text>
+            <Text style={styles.title}>Set up your room identity</Text>
             <Text style={styles.subtitle}>
-              Choose a nickname and avatar for chat rooms.{'\n'}
-              This is separate from your main profile.
+              This is how you’ll appear in chat rooms — separate from your main profile, so you can stay anonymous.
             </Text>
           </View>
 
@@ -219,9 +263,18 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
               <Ionicons name="camera" size={16} color="#FFFFFF" />
             </View>
             <Text style={styles.avatarHint}>
-              {avatarPreview ? 'Tap to change photo' : 'Add a photo (optional)'}
+              {avatarPreview ? 'Tap to change room photo' : 'Add a room photo (optional)'}
             </Text>
           </TouchableOpacity>
+          {galleryPermissionDenied ? (
+            <View style={styles.permissionMessage}>
+              <Text style={styles.permissionText}>Gallery access is off. </Text>
+              <TouchableOpacity onPress={handleOpenSettings} activeOpacity={0.7}>
+                <Text style={styles.permissionLink}>Open Settings</Text>
+              </TouchableOpacity>
+              <Text style={styles.permissionText}> to enable, or skip this for now.</Text>
+            </View>
+          ) : null}
 
           {/* Form */}
           <View style={styles.form}>
@@ -231,15 +284,17 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
               <TextInput
                 style={styles.input}
                 value={nickname}
-                onChangeText={setNickname}
+                onChangeText={handleNicknameChange}
                 placeholder="Enter a nickname (starts with letter)"
                 placeholderTextColor={C.textLight}
                 maxLength={30}
                 autoCapitalize="none"
                 autoCorrect={false}
               />
-              <Text style={[styles.hint, nickname.length >= 2 && /^[a-zA-Z]/.test(nickname) && styles.hintValid]}>
-                {nickname.length}/30 {nickname.length >= 2 && /^[a-zA-Z]/.test(nickname) && '✓'}
+              <Text style={[styles.hint, isValid && styles.hintValid]}>
+                {nicknamePrefilledFromProfile
+                  ? 'Using your profile name. Tap to change.'
+                  : '2–30 characters, must start with a letter.'}
               </Text>
             </View>
 
@@ -356,6 +411,27 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 13,
     color: C.textLight,
+  },
+  permissionMessage: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: -14,
+    marginBottom: 24,
+    paddingHorizontal: 12,
+  },
+  permissionText: {
+    fontSize: 12,
+    color: C.textLight,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+  permissionLink: {
+    fontSize: 12,
+    color: C.primary,
+    fontWeight: '700',
+    lineHeight: 18,
   },
   form: {
     gap: 20,
