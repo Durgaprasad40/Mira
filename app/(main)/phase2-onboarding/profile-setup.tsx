@@ -80,12 +80,20 @@ export default function Phase2ReviewScreen() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const isFinalizingRef = useRef(false);
 
+  // Edit a section: route back to that step with returnTo=review so the step
+  // returns directly to this Review on save instead of continuing the flow.
+  const editStep = (step: 'index' | 'select-photos' | 'profile-edit' | 'prompts') => {
+    router.push({
+      pathname: PHASE2_ONBOARDING_ROUTE_MAP[step] as any,
+      params: { returnTo: 'review' },
+    } as any);
+  };
+
   const displayName = currentPrivateProfile?.displayName || 'Anonymous';
   const age = currentPrivateProfile?.age ?? 0;
   const gender = currentPrivateProfile?.gender || currentUser?.gender || '';
   const city = currentPrivateProfile?.city || currentUser?.city || '';
   const hobbies: string[] = currentPrivateProfile?.hobbies || currentUser?.activities || [];
-  const isVerified = currentPrivateProfile?.isVerified ?? !!currentUser?.isVerified;
   const selectedPhotoUrls: string[] = currentPrivateProfile?.privatePhotoUrls || [];
   const intentKeys = currentPrivateProfile?.privateIntentKeys || [];
   const privateBio = currentPrivateProfile?.privateBio || '';
@@ -114,32 +122,31 @@ export default function Phase2ReviewScreen() {
       }),
     [promptAnswers]
   );
-  // STRICT VALIDATION RULES:
-  // - Section 1: ALL 3 prompts required
-  // - Section 2: At least 1 prompt required
-  // - Section 3: At least 1 prompt required
+  // VALIDATION RULES (Option-3 simplified):
+  // - Section 1: ALL 3 quick questions required
+  // - Section 2 / 3: optional — users can fill these in later from
+  //   Private Profile → Edit Profile → Edit Prompts.
   const section1Count = useMemo(
     () => validPromptAnswers.filter((prompt) => SECTION1_PROMPT_IDS.has(prompt.promptId)).length,
     [validPromptAnswers]
   );
   const hasSection1Complete = section1Count === 3; // ALL 3 required
-  const hasSection2Prompt = useMemo(
-    () => validPromptAnswers.some((prompt) => SECTION2_PROMPT_IDS.has(prompt.promptId)),
-    [validPromptAnswers]
-  );
-  const hasSection3Prompt = useMemo(
-    () => validPromptAnswers.some((prompt) => SECTION3_PROMPT_IDS.has(prompt.promptId)),
+  const hasAnyDeeperAnswer = useMemo(
+    () =>
+      validPromptAnswers.some(
+        (prompt) =>
+          SECTION2_PROMPT_IDS.has(prompt.promptId) || SECTION3_PROMPT_IDS.has(prompt.promptId),
+      ),
     [validPromptAnswers]
   );
 
   const bioLength = privateBio.trim().length;
-  // STRICT COMPLETION RULES:
+  // COMPLETION RULES:
   // - Photos: at least PHASE2_MIN_PHOTOS
   // - Intents: between PHASE2_MIN_INTENTS and PHASE2_MAX_INTENTS
   // - Bio: between PHASE2_DESIRE_MIN_LENGTH and PHASE2_DESIRE_MAX_LENGTH
-  // - Section 1: ALL 3 prompts
-  // - Section 2: At least 1 prompt
-  // - Section 3: At least 1 prompt
+  // - Section 1 (Quick Questions): ALL 3 required
+  // - Sections 2 & 3 are optional and can be added later.
   const canComplete =
     !!userId &&
     !!token &&
@@ -149,8 +156,6 @@ export default function Phase2ReviewScreen() {
     bioLength >= PHASE2_DESIRE_MIN_LENGTH &&
     bioLength <= PHASE2_DESIRE_MAX_LENGTH &&
     hasSection1Complete &&
-    hasSection2Prompt &&
-    hasSection3Prompt &&
     !onboardingState?.phase2OnboardingCompleted;
 
   const missingItems = useMemo(() => {
@@ -159,7 +164,7 @@ export default function Phase2ReviewScreen() {
       missing.push('photos');
     }
     if (intentKeys.length < PHASE2_MIN_INTENTS || intentKeys.length > PHASE2_MAX_INTENTS) {
-      missing.push('looking for');
+      missing.push('relationship goal');
     }
     if (bioLength < PHASE2_DESIRE_MIN_LENGTH || bioLength > PHASE2_DESIRE_MAX_LENGTH) {
       missing.push('private bio');
@@ -167,14 +172,8 @@ export default function Phase2ReviewScreen() {
     if (!hasSection1Complete) {
       missing.push('all 3 quick questions');
     }
-    if (!hasSection2Prompt) {
-      missing.push('at least 1 values question');
-    }
-    if (!hasSection3Prompt) {
-      missing.push('at least 1 personality question');
-    }
     return missing;
-  }, [bioLength, hasSection1Complete, hasSection2Prompt, hasSection3Prompt, intentKeys.length, validPhotoUrls.length]);
+  }, [bioLength, hasSection1Complete, intentKeys.length, validPhotoUrls.length]);
 
   const handleComplete = async () => {
     if (__DEV__) {
@@ -301,26 +300,33 @@ export default function Phase2ReviewScreen() {
           <View style={styles.card}>
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Nickname</Text>
-              <Text style={styles.rowValue}>{displayName || 'Anonymous'}</Text>
+              <View style={styles.rowValueGroup}>
+                <Text style={styles.rowValue}>{displayName || 'Anonymous'}</Text>
+                <TouchableOpacity
+                  onPress={() => editStep('index')}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  accessibilityLabel="Edit nickname"
+                  style={styles.rowEditButton}
+                >
+                  <Ionicons name="pencil" size={14} color={C.primary} />
+                  <Text style={styles.rowEditText}>Edit</Text>
+                </TouchableOpacity>
+              </View>
             </View>
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Age</Text>
               <Text style={styles.rowValue}>{age > 0 ? age : 'Not available'}</Text>
             </View>
-            <View style={styles.row}>
+            <View style={[styles.row, !city && styles.rowLast]}>
               <Text style={styles.rowLabel}>Gender</Text>
               <Text style={styles.rowValue}>{gender || 'Not available'}</Text>
             </View>
             {city ? (
-              <View style={styles.row}>
+              <View style={[styles.row, styles.rowLast]}>
                 <Text style={styles.rowLabel}>City</Text>
                 <Text style={styles.rowValue}>{city}</Text>
               </View>
             ) : null}
-            <View style={[styles.row, styles.rowLast]}>
-              <Text style={styles.rowLabel}>Verified</Text>
-              <Text style={styles.rowValue}>{isVerified ? 'Yes' : 'No'}</Text>
-            </View>
           </View>
           {hobbies.length > 0 ? (
             <View style={styles.hobbiesWrap}>
@@ -334,7 +340,18 @@ export default function Phase2ReviewScreen() {
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Photos</Text>
+          <View style={styles.sectionTitleRow}>
+            <Text style={styles.sectionTitle}>Photos</Text>
+            <TouchableOpacity
+              onPress={() => editStep('select-photos')}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Edit photos"
+              style={styles.sectionEditButton}
+            >
+              <Ionicons name="pencil" size={14} color={C.primary} />
+              <Text style={styles.sectionEditText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
           <View style={styles.photoGrid}>
             {validPhotoUrls.map((url, index) => (
               <Pressable key={`${url}-${index}`} style={styles.photoSlot} onPress={() => setPreviewIndex(index)}>
@@ -345,7 +362,18 @@ export default function Phase2ReviewScreen() {
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Looking for</Text>
+          <View style={styles.sectionTitleRow}>
+            <Text style={styles.sectionTitle}>Relationship goal</Text>
+            <TouchableOpacity
+              onPress={() => editStep('profile-edit')}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Edit relationship goal"
+              style={styles.sectionEditButton}
+            >
+              <Ionicons name="pencil" size={14} color={C.primary} />
+              <Text style={styles.sectionEditText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
           <View style={styles.intentWrap}>
             {selectedIntents.map((intent) => (
               <View key={intent.key} style={styles.intentChip}>
@@ -357,7 +385,18 @@ export default function Phase2ReviewScreen() {
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Private bio</Text>
+          <View style={styles.sectionTitleRow}>
+            <Text style={styles.sectionTitle}>Private bio</Text>
+            <TouchableOpacity
+              onPress={() => editStep('profile-edit')}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Edit private bio"
+              style={styles.sectionEditButton}
+            >
+              <Ionicons name="pencil" size={14} color={C.primary} />
+              <Text style={styles.sectionEditText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
           <View style={styles.bioCard}>
             <Text style={styles.bioText}>{privateBio.trim()}</Text>
           </View>
@@ -365,7 +404,18 @@ export default function Phase2ReviewScreen() {
 
         {validPromptAnswers.length > 0 ? (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Prompt answers</Text>
+            <View style={styles.sectionTitleRow}>
+              <Text style={styles.sectionTitle}>Quick questions</Text>
+              <TouchableOpacity
+                onPress={() => editStep('prompts')}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel="Edit quick questions"
+                style={styles.sectionEditButton}
+              >
+                <Ionicons name="pencil" size={14} color={C.primary} />
+                <Text style={styles.sectionEditText}>Edit</Text>
+              </TouchableOpacity>
+            </View>
             <View style={styles.promptList}>
               {validPromptAnswers.map((prompt) => (
                 <View key={prompt.promptId} style={styles.promptCard}>
@@ -381,6 +431,10 @@ export default function Phase2ReviewScreen() {
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
         {!canComplete ? (
           <Text style={styles.bottomHint}>Finish: {missingItems.join(', ')}</Text>
+        ) : !hasAnyDeeperAnswer ? (
+          <Text style={styles.bottomHint}>
+            You can add deeper answers later from your private profile.
+          </Text>
         ) : (
           <Text style={styles.bottomHint}>We save your profile first, then unlock Private Mode.</Text>
         )}
@@ -496,6 +550,45 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: C.text,
     marginBottom: 12,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  sectionEditButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: C.primary + '14',
+    marginBottom: 12,
+  },
+  sectionEditText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.primary,
+  },
+  rowValueGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  rowEditButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: C.primary + '14',
+  },
+  rowEditText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.primary,
   },
   card: {
     backgroundColor: C.surface,

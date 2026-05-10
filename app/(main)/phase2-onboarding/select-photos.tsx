@@ -8,7 +8,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -35,6 +35,8 @@ export default function Phase2SelectPhotosScreen() {
 
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { returnTo } = useLocalSearchParams<{ returnTo?: string }>();
+  const isEditingFromReview = returnTo === 'review';
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
 
@@ -238,7 +240,11 @@ export default function Phase2SelectPhotosScreen() {
         throw new Error(`Photo save did not succeed: ${errorMsg}`);
       }
 
-      router.push(PHASE2_ONBOARDING_ROUTE_MAP['profile-edit'] as any);
+      if (isEditingFromReview) {
+        router.replace(PHASE2_ONBOARDING_ROUTE_MAP['profile-setup'] as any);
+      } else {
+        router.push(PHASE2_ONBOARDING_ROUTE_MAP['profile-edit'] as any);
+      }
     } catch (error) {
       console.error('[P2_PHOTOS] Save error:', error);
       Alert.alert(
@@ -381,8 +387,14 @@ export default function Phase2SelectPhotosScreen() {
             <ActivityIndicator size="small" color="#FFFFFF" />
           ) : (
             <>
-              <Text style={styles.continueButtonText}>Continue</Text>
-              <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
+              <Text style={styles.continueButtonText}>
+                {isEditingFromReview ? 'Save changes' : 'Continue'}
+              </Text>
+              <Ionicons
+                name={isEditingFromReview ? 'checkmark' : 'arrow-forward'}
+                size={18}
+                color="#FFFFFF"
+              />
             </>
           )}
         </TouchableOpacity>

@@ -11,7 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
@@ -33,13 +33,15 @@ const C = INCOGNITO_COLORS;
 
 // Fluid layout constants
 const CONTENT_PADDING = 16;
-const CHIP_GAP = 10;
+const CHIP_GAP = 8;
 
 export default function Phase2LookingForScreen() {
   useScreenTrace('P2_ONB_LOOKING_FOR');
 
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { returnTo } = useLocalSearchParams<{ returnTo?: string }>();
+  const isEditingFromReview = returnTo === 'review';
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
 
@@ -87,10 +89,14 @@ export default function Phase2LookingForScreen() {
       });
 
       if (!result?.success) {
-        throw new Error('Looking For could not be saved');
+        throw new Error('Relationship goal could not be saved');
       }
 
-      router.push('/(main)/phase2-onboarding/prompts' as any);
+      if (isEditingFromReview) {
+        router.replace('/(main)/phase2-onboarding/profile-setup' as any);
+      } else {
+        router.push('/(main)/phase2-onboarding/prompts' as any);
+      }
     } catch (error) {
       Alert.alert(
         'Unable to continue',
@@ -127,7 +133,7 @@ export default function Phase2LookingForScreen() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>Looking for</Text>
+          <Text style={styles.headerTitle}>Relationship goal</Text>
           <Text style={styles.stepLabel}>Step 3 of 5</Text>
         </View>
         <View style={styles.headerSpacer} />
@@ -146,7 +152,7 @@ export default function Phase2LookingForScreen() {
           {/* Intents Section */}
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Pick 1–3 intents</Text>
+              <Text style={styles.sectionTitle}>Pick 1–3 goals</Text>
               <View style={styles.counterBadge}>
                 <Text style={[
                   styles.counterText,
@@ -157,7 +163,7 @@ export default function Phase2LookingForScreen() {
               </View>
             </View>
             <Text style={styles.sectionSubtitle}>
-              What are you looking for in Private Mode?
+              What kind of connection are you looking for?
             </Text>
 
             {/* Intent Chips - Fluid Wrap */}
@@ -204,7 +210,7 @@ export default function Phase2LookingForScreen() {
 
             {intentKeys.length >= PHASE2_MAX_INTENTS && (
               <Text style={styles.maxReachedHint}>
-                Maximum 3 intents selected
+                Maximum 3 goals selected
               </Text>
             )}
           </View>
@@ -225,7 +231,7 @@ export default function Phase2LookingForScreen() {
                 style={styles.bioInput}
                 value={privateBio}
                 onChangeText={setPrivateBio}
-                placeholder="What are you looking for in Private Mode?"
+                placeholder="Briefly share what you're looking for. Stays private."
                 placeholderTextColor={C.textLight}
                 multiline
                 maxLength={PHASE2_DESIRE_MAX_LENGTH}
@@ -262,7 +268,7 @@ export default function Phase2LookingForScreen() {
               color={intentsValid ? C.primary : C.textLight}
             />
             <Text style={[styles.progressText, intentsValid && styles.progressTextDone]}>
-              {intentKeys.length} intent{intentKeys.length !== 1 ? 's' : ''} selected
+              {intentKeys.length} goal{intentKeys.length !== 1 ? 's' : ''} selected
             </Text>
           </View>
           <View style={styles.progressDot} />
@@ -296,15 +302,27 @@ export default function Phase2LookingForScreen() {
                 <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <>
-                  <Text style={styles.continueButtonText}>Continue to prompts</Text>
-                  <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
+                  <Text style={styles.continueButtonText}>
+                    {isEditingFromReview ? 'Save changes' : 'Continue to prompts'}
+                  </Text>
+                  <Ionicons
+                    name={isEditingFromReview ? 'checkmark' : 'arrow-forward'}
+                    size={18}
+                    color="#FFFFFF"
+                  />
                 </>
               )}
             </LinearGradient>
           ) : (
             <View style={styles.buttonDisabledInner}>
-              <Text style={styles.continueButtonTextDisabled}>Continue to prompts</Text>
-              <Ionicons name="arrow-forward" size={18} color={C.textLight} />
+              <Text style={styles.continueButtonTextDisabled}>
+                {isEditingFromReview ? 'Save changes' : 'Continue to prompts'}
+              </Text>
+              <Ionicons
+                name={isEditingFromReview ? 'checkmark' : 'arrow-forward'}
+                size={18}
+                color={C.textLight}
+              />
             </View>
           )}
         </TouchableOpacity>
@@ -399,13 +417,14 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 24,
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 20,
     backgroundColor: C.surface,
     borderWidth: 1.5,
     borderColor: C.surface,
+    maxWidth: '100%',
   },
   intentChipSelected: {
     borderColor: C.primary,
@@ -421,9 +440,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   intentText: {
-    fontSize: 14,
+    fontSize: 13,
     color: C.textLight,
     fontWeight: '600',
+    flexShrink: 1,
   },
   intentTextSelected: {
     color: C.text,

@@ -17,8 +17,6 @@ import {
 import {
   CURRENT_PHASE2_SETUP_VERSION,
   PHASE2_SECTION1_PROMPT_IDS,
-  PHASE2_SECTION2_PROMPT_IDS,
-  PHASE2_SECTION3_PROMPT_IDS,
 } from "./phase2Constants";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
@@ -2919,12 +2917,15 @@ export const setPhase2OnboardingCompleted = mutation({
       return { success: false, error: 'invalid_private_bio' as const };
     }
 
-    if (!Array.isArray(privateProfile.promptAnswers)) {
-      return { success: false, error: 'missing_prompt_answers' as const };
-    }
+    // Option-3: only Section 1 (Quick Questions) is required to finish onboarding.
+    // Sections 2 & 3 (deeper Values/Personality) are optional and may be added
+    // later from Private Profile → Edit Profile → Edit Prompts.
+    const promptAnswersArray = Array.isArray(privateProfile.promptAnswers)
+      ? privateProfile.promptAnswers
+      : [];
 
     const answeredPromptIds = new Set(
-      privateProfile.promptAnswers
+      promptAnswersArray
         .filter(
           (p) =>
             typeof p?.promptId === 'string' &&
@@ -2938,24 +2939,8 @@ export const setPhase2OnboardingCompleted = mutation({
       answeredPromptIds.has(id)
     );
 
-    const section2Answered = PHASE2_SECTION2_PROMPT_IDS.some((id) =>
-      answeredPromptIds.has(id)
-    );
-
-    const section3Answered = PHASE2_SECTION3_PROMPT_IDS.some((id) =>
-      answeredPromptIds.has(id)
-    );
-
     if (!section1AllAnswered) {
       return { success: false, error: 'incomplete_section1_prompts' as const };
-    }
-
-    if (!section2Answered) {
-      return { success: false, error: 'incomplete_section2_prompts' as const };
-    }
-
-    if (!section3Answered) {
-      return { success: false, error: 'incomplete_section3_prompts' as const };
     }
 
     await ctx.db.patch(privateProfile._id, {

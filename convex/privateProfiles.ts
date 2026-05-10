@@ -13,6 +13,77 @@ const DEBUG_PHASE2_BACKEND = process.env.DEBUG_PHASE2 === "true";
 
 const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
 const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
+
+// Phase-2 nickname (displayName) validation — kept in sync with
+// `lib/phase2Onboarding.ts > validateNickname`. Convex source files cannot
+// import from the app code path, so the rules are mirrored here. If you change
+// either side, update the other.
+const PHASE2_DISPLAY_NAME_MIN_LENGTH = 3;
+const PHASE2_DISPLAY_NAME_MAX_LENGTH = 20;
+const PHASE2_DISPLAY_NAME_MAX_DIGIT_RUN = 3;
+const PHASE2_DISPLAY_NAME_BLOCKED_LONG_TOKENS: readonly string[] = [
+  'instagram', 'insta',
+  'facebook',
+  'telegram', 'tele',
+  'snapchat', 'snap',
+  'whatsapp', 'whtsapp', 'wapp',
+  'twitter',
+  'tiktok', 'tikt',
+  'discord', 'dscrd',
+  'youtube',
+  'phone', 'mobile', 'number', 'contact',
+  'email', 'gmail', 'yahoo', 'outlook',
+  'http', 'https', 'www',
+  'onlyfans',
+];
+const PHASE2_DISPLAY_NAME_BLOCKED_SHORT_TOKENS: readonly string[] = [
+  'ig', 'fb', 'tg', 'wa',
+];
+
+type PhaseDisplayNameValidationCode =
+  | 'TOO_SHORT'
+  | 'TOO_LONG'
+  | 'BAD_CHARSET'
+  | 'DIGIT_RUN'
+  | 'HANDLE_TOKEN';
+
+function validatePhase2DisplayName(
+  raw: string,
+): { ok: true; trimmed: string } | { ok: false; code: PhaseDisplayNameValidationCode } {
+  const trimmed = raw.trim();
+  if (trimmed.length < PHASE2_DISPLAY_NAME_MIN_LENGTH) {
+    return { ok: false, code: 'TOO_SHORT' };
+  }
+  if (trimmed.length > PHASE2_DISPLAY_NAME_MAX_LENGTH) {
+    return { ok: false, code: 'TOO_LONG' };
+  }
+  if (!/^[A-Za-z0-9]+$/.test(trimmed)) {
+    return { ok: false, code: 'BAD_CHARSET' };
+  }
+  if (new RegExp(`\\d{${PHASE2_DISPLAY_NAME_MAX_DIGIT_RUN + 1},}`).test(trimmed)) {
+    return { ok: false, code: 'DIGIT_RUN' };
+  }
+
+  const lower = trimmed.toLowerCase();
+  for (const token of PHASE2_DISPLAY_NAME_BLOCKED_LONG_TOKENS) {
+    if (lower.includes(token)) {
+      return { ok: false, code: 'HANDLE_TOKEN' };
+    }
+  }
+  for (const token of PHASE2_DISPLAY_NAME_BLOCKED_SHORT_TOKENS) {
+    if (lower === token) {
+      return { ok: false, code: 'HANDLE_TOKEN' };
+    }
+    if (new RegExp(`^${token}\\d`).test(lower)) {
+      return { ok: false, code: 'HANDLE_TOKEN' };
+    }
+    if (new RegExp(`\\d${token}`).test(lower)) {
+      return { ok: false, code: 'HANDLE_TOKEN' };
+    }
+  }
+
+  return { ok: true, trimmed };
+}
 const PHASE2_PROMPT_ANSWER_MIN_LENGTH = 5;
 const PHASE2_PROMPT_ANSWER_MAX_LENGTH = 250;
 const PHASE2_MAX_PROMPTS = 10;
@@ -955,10 +1026,11 @@ export const updateDisplayNameByAuthId = mutation({
     displayName: v.string(),
   },
   handler: async (ctx, args) => {
-    const trimmed = args.displayName.trim();
-    if (trimmed.length < 3 || trimmed.length > 20 || !/^[A-Za-z0-9]+$/.test(trimmed)) {
-      return { success: false, error: 'INVALID_DISPLAY_NAME' as const };
+    const validation = validatePhase2DisplayName(args.displayName);
+    if (!validation.ok) {
+      return { success: false, error: 'INVALID_DISPLAY_NAME' as const, code: validation.code };
     }
+    const trimmed = validation.trimmed;
 
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
@@ -1162,12 +1234,16 @@ export const saveOnboardingPhotos = mutation({
     // Get user data to populate required fields with defaults
     const user = await ctx.db.get(userId);
     const derivedAge = ageFromUser(user);
-    const trimmedDisplayName =
-      typeof args.displayName === 'string' ? args.displayName.trim() : '';
-
-    if (trimmedDisplayName.length < 3 || trimmedDisplayName.length > 20 || !/^[A-Za-z0-9]+$/.test(trimmedDisplayName)) {
-      return { success: false, error: 'display_name_required' as const };
+    const rawDisplayName = typeof args.displayName === 'string' ? args.displayName : '';
+    const displayNameValidation = validatePhase2DisplayName(rawDisplayName);
+    if (!displayNameValidation.ok) {
+      return {
+        success: false,
+        error: 'display_name_required' as const,
+        code: displayNameValidation.code,
+      };
     }
+    const trimmedDisplayName = displayNameValidation.trimmed;
     const profileId = await ctx.db.insert('userPrivateProfiles', {
       userId,
       displayName: trimmedDisplayName || '',

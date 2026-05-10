@@ -1,4 +1,4 @@
-export const CURRENT_PHASE2_SETUP_VERSION = 1 as const;
+export const CURRENT_PHASE2_SETUP_VERSION = 2 as const;
 
 export const PHASE2_SECTION1_PROMPT_IDS = [
   'prompt_1',
