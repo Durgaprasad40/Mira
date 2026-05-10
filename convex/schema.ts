@@ -1036,6 +1036,7 @@ export default defineSchema({
       v.literal('tagged_confession'),
       v.literal('confession_connect_requested'),
       v.literal('confession_connect_accepted'),
+      v.literal('confession_connect_rejected'),
       // Legacy Phase-2 literals retained for backwards compatibility with
       // existing rows; new writes MUST go to `privateNotifications`.
       v.literal('phase2_match'),
@@ -2244,6 +2245,7 @@ export default defineSchema({
     updatedAt: v.number(),
     respondedAt: v.optional(v.number()),
     expiresAt: v.number(),
+    seenByOwnerAt: v.optional(v.number()),
   })
     .index('by_confession', ['confessionId'])
     .index('by_from_to', ['fromUserId', 'toUserId'])

@@ -21,6 +21,7 @@ import { useBootStore } from "@/stores/bootStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
 import { processThreadsIntegrity } from "@/lib/threadsIntegrity";
+import { DEMO_CONFESSION_CONNECT_REQUESTS } from "@/lib/demoData";
 import { markTiming } from "@/utils/startupTiming";
 
 /** Concrete DeepConnect screen — avoids group route `/(tabs)` resolving to pathname "/" */
@@ -84,10 +85,10 @@ export default function MainTabsLayout() {
 
   const unreadChats = isDemoMode ? demoUnreadCount : (convexUnreadCount ?? 0);
 
-  // Tagged confession badge count (convexUserId already defined above)
-  const convexTaggedCount = useQuery(
-    api.confessions.getTaggedConfessionBadgeCount,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  // Confess inbox badge count: tagged confessions + unseen connect requests.
+  const convexConfessInboxBadge = useQuery(
+    api.confessions.getConfessInboxBadgeCount,
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Demo mode: use store for tagged count (count confessions targeting current user)
@@ -96,8 +97,16 @@ export default function MainTabsLayout() {
     // Count tagged confessions in demo store
     return s.confessions.filter((c) => c.taggedUserId === currentUserId).length;
   });
+  const seenDemoConnectRequestIds = useConfessionStore((s) => s.seenConfessionConnectRequestIds);
+  const demoConnectRequestCount = isDemoMode
+    ? DEMO_CONFESSION_CONNECT_REQUESTS.filter(
+        (request) => !seenDemoConnectRequestIds.includes(request.connectId)
+      ).length
+    : 0;
 
-  const taggedBadgeCount = isDemoMode ? demoTaggedCount : (convexTaggedCount || 0);
+  const confessBadgeCount = isDemoMode
+    ? demoTaggedCount + demoConnectRequestCount
+    : (convexConfessInboxBadge?.total || 0);
 
   // Query deletion state for Private tab entry gating (non-demo mode)
   const privateDeletionState = useQuery(
@@ -245,7 +254,7 @@ export default function MainTabsLayout() {
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="megaphone" size={size} color={color} />
             ),
-            tabBarBadge: taggedBadgeCount > 0 ? taggedBadgeCount : undefined,
+            tabBarBadge: confessBadgeCount > 0 ? confessBadgeCount : undefined,
             tabBarBadgeStyle: { backgroundColor: COLORS.primary, fontSize: 10 },
           }}
         />

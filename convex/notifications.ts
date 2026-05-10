@@ -294,7 +294,8 @@ export const createNotification = internalMutation({
       // Phase-1 confession surface — tagged-confession bell item.
       v.literal('tagged_confession'),
       v.literal('confession_connect_requested'),
-      v.literal('confession_connect_accepted')
+      v.literal('confession_connect_accepted'),
+      v.literal('confession_connect_rejected')
     ),
     title: v.string(),
     body: v.string(),
@@ -307,6 +308,7 @@ export const createNotification = internalMutation({
       confessionId: v.optional(v.string()),
       connectId: v.optional(v.string()),
       fromUserId: v.optional(v.string()),
+      otherUserId: v.optional(v.string()),
       source: v.optional(v.string()),
     })),
     // 4-1: Optional dedupeKey for upsert behavior
@@ -376,6 +378,7 @@ function computeDedupeKey(
     pairKey?: string;
     confessionId?: string;
     connectId?: string;
+    otherUserId?: string;
   }
 ): string {
   const userId = data?.userId;
@@ -395,6 +398,8 @@ function computeDedupeKey(
       return `confession_connect_requested:${data?.connectId ?? 'unknown'}`;
     case 'confession_connect_accepted':
       return `confession_connect_accepted:${data?.connectId ?? 'unknown'}`;
+    case 'confession_connect_rejected':
+      return `confession_connect_rejected:${data?.connectId ?? 'unknown'}`;
     default:
       return `${type}:unknown`;
   }

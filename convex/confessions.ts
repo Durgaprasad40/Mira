@@ -60,7 +60,8 @@ type ConfessionConnectStatus =
 type ConfessionConnectViewerRole = 'requester' | 'owner';
 type ConfessionConnectNotificationType =
   | 'confession_connect_requested'
-  | 'confession_connect_accepted';
+  | 'confession_connect_accepted'
+  | 'confession_connect_rejected';
 
 // Canonical reply identity mode used by the current product contract.
 // Legacy 'blur' literal maps to 'blur_photo'; unknown/missing maps using isAnonymous.
@@ -379,8 +380,28 @@ async function patchExpiredConnectIfNeeded(
   };
 }
 
-function serializeConfessionConnect(connect: Doc<'confessionConnects'>) {
+function getConnectPartnerUserId(
+  connect: Doc<'confessionConnects'>,
+  viewerId?: Id<'users'>
+): Id<'users'> | undefined {
+  if (!viewerId) return undefined;
+  if (connect.fromUserId === viewerId) return connect.toUserId;
+  if (connect.toUserId === viewerId) return connect.fromUserId;
+  return undefined;
+}
+
+function serializeConfessionConnect(
+  connect: Doc<'confessionConnects'>,
+  options?: {
+    viewerId?: Id<'users'>;
+    matchId?: Id<'matches'>;
+  }
+) {
   const promoted = connect.status === 'mutual' && !!connect.conversationId;
+  const partnerUserId =
+    connect.status === 'mutual'
+      ? getConnectPartnerUserId(connect, options?.viewerId)
+      : undefined;
   return {
     connectId: connect._id,
     confessionId: connect.confessionId,
@@ -388,6 +409,9 @@ function serializeConfessionConnect(connect: Doc<'confessionConnects'>) {
     expiresAt: connect.expiresAt,
     respondedAt: connect.respondedAt,
     conversationId: connect.conversationId,
+    matchId: options?.matchId,
+    otherUserId: partnerUserId,
+    partnerUserId,
     promoted,
     promotionPending: connect.status === 'mutual' && !promoted,
   };
@@ -496,6 +520,54 @@ async function pairCanUseConfessionConnect(
   return true;
 }
 
+async function countTaggedConfessionBadgeForViewer(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'>
+): Promise<number> {
+  const notifications = await ctx.db
+    .query('confessionNotifications')
+    .withIndex('by_user_seen', (q) => q.eq('userId', viewerId).eq('seen', false))
+    .collect();
+  return notifications.length;
+}
+
+async function countPendingConfessionConnectRequestsForViewer(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'>,
+  now: number
+): Promise<number> {
+  const rows = await ctx.db
+    .query('confessionConnects')
+    .withIndex('by_to_status', (q) =>
+      q.eq('toUserId', viewerId).eq('status', 'pending')
+    )
+    .order('desc')
+    .take(CONFESSION_CONNECT_LIST_LIMIT);
+
+  let count = 0;
+  for (const connect of rows) {
+    if (connect.expiresAt <= now || connect.seenByOwnerAt !== undefined) continue;
+
+    const confession = await ctx.db.get(connect.confessionId);
+    if (
+      !confession ||
+      confession.userId !== viewerId ||
+      confession.taggedUserId !== connect.fromUserId ||
+      !confessionIsConnectable(confession, now)
+    ) {
+      continue;
+    }
+
+    if (!(await pairCanUseConfessionConnect(ctx, connect.fromUserId, connect.toUserId))) {
+      continue;
+    }
+
+    count += 1;
+  }
+
+  return count;
+}
+
 async function upsertConfessionConnectNotification(
   ctx: MutationCtx,
   args: {
@@ -509,6 +581,7 @@ async function upsertConfessionConnectNotification(
       fromUserId?: string;
       conversationId?: string;
       matchId?: string;
+      otherUserId?: string;
       source?: string;
     };
     dedupeKey: string;
@@ -558,6 +631,32 @@ async function upsertConfessionConnectNotification(
   });
 }
 
+async function markConfessionConnectRequestNotificationRead(
+  ctx: MutationCtx,
+  args: {
+    ownerUserId: Id<'users'>;
+    connectId: Id<'confessionConnects'>;
+    now: number;
+    expire?: boolean;
+  }
+): Promise<void> {
+  const notification = await ctx.db
+    .query('notifications')
+    .withIndex('by_user_dedupe', (q) =>
+      q
+        .eq('userId', args.ownerUserId)
+        .eq('dedupeKey', `confession_connect_requested:${args.connectId}`)
+    )
+    .first();
+
+  if (!notification) return;
+
+  await ctx.db.patch(notification._id, {
+    readAt: notification.readAt ?? args.now,
+    ...(args.expire ? { expiresAt: args.now } : {}),
+  });
+}
+
 async function notifyConfessionConnectRequested(
   ctx: MutationCtx,
   args: {
@@ -584,6 +683,30 @@ async function notifyConfessionConnectRequested(
   });
 }
 
+async function notifyConfessionConnectRejected(
+  ctx: MutationCtx,
+  args: {
+    requesterUserId: Id<'users'>;
+    confessionId: Id<'confessions'>;
+    connectId: Id<'confessionConnects'>;
+    now: number;
+  }
+): Promise<void> {
+  await upsertConfessionConnectNotification(ctx, {
+    userId: args.requesterUserId,
+    type: 'confession_connect_rejected',
+    title: 'Connect request declined',
+    body: 'Your connect request was declined.',
+    data: {
+      confessionId: String(args.confessionId),
+      connectId: String(args.connectId),
+      source: 'confession',
+    },
+    dedupeKey: `confession_connect_rejected:${args.connectId}`,
+    now: args.now,
+  });
+}
+
 async function notifyConfessionConnectAccepted(
   ctx: MutationCtx,
   args: {
@@ -592,6 +715,7 @@ async function notifyConfessionConnectAccepted(
     connectId: Id<'confessionConnects'>;
     conversationId: Id<'conversations'>;
     matchId: Id<'matches'>;
+    otherUserId: Id<'users'>;
     now: number;
   }
 ): Promise<void> {
@@ -605,6 +729,7 @@ async function notifyConfessionConnectAccepted(
       connectId: String(args.connectId),
       conversationId: String(args.conversationId),
       matchId: String(args.matchId),
+      otherUserId: String(args.otherUserId),
       source: 'confession',
     },
     dedupeKey: `confession_connect_accepted:${args.connectId}`,
@@ -1883,11 +2008,7 @@ export const getTaggedConfessionBadgeCount = query({
       return 0;
     }
 
-    const notifications = await ctx.db
-      .query('confessionNotifications')
-      .withIndex('by_user_seen', (q) => q.eq('userId', userId).eq('seen', false))
-      .collect();
-    return notifications.length;
+    return countTaggedConfessionBadgeForViewer(ctx, userId);
   },
 });
 
@@ -2317,7 +2438,14 @@ export const requestConfessionConnect = mutation({
           now,
         });
       }
-      return serializeConfessionConnect(current);
+      const existingConversation =
+        current.status === 'mutual' && current.conversationId
+          ? await ctx.db.get(current.conversationId)
+          : null;
+      return serializeConfessionConnect(current, {
+        viewerId,
+        matchId: existingConversation?.matchId,
+      });
     }
 
     const connectId = await ctx.db.insert('confessionConnects', {
@@ -2343,7 +2471,7 @@ export const requestConfessionConnect = mutation({
       now,
     });
 
-    return serializeConfessionConnect(connect);
+    return serializeConfessionConnect(connect, { viewerId });
   },
 });
 
@@ -2399,13 +2527,14 @@ export const respondToConfessionConnect = mutation({
         connectId,
         conversationId,
         matchId,
+        otherUserId: connect.toUserId,
         now,
       });
       const updated = await ctx.db.get(connectId);
       if (!updated) {
         throw new Error('Connect request unavailable');
       }
-      return serializeConfessionConnect(updated);
+      return serializeConfessionConnect(updated, { viewerId, matchId });
     }
     if (decision === 'reject' && connect.status === 'rejected_by_to') {
       return serializeConfessionConnect(connect);
@@ -2425,6 +2554,12 @@ export const respondToConfessionConnect = mutation({
         status: 'rejected_by_to',
         updatedAt: now,
         respondedAt: now,
+      });
+      await notifyConfessionConnectRejected(ctx, {
+        requesterUserId: connect.fromUserId,
+        confessionId: connect.confessionId,
+        connectId,
+        now,
       });
       const updated = await ctx.db.get(connectId);
       if (!updated) {
@@ -2454,6 +2589,7 @@ export const respondToConfessionConnect = mutation({
       connectId,
       conversationId,
       matchId,
+      otherUserId: connect.toUserId,
       now,
     });
 
@@ -2461,7 +2597,7 @@ export const respondToConfessionConnect = mutation({
     if (!updated) {
       throw new Error('Connect request unavailable');
     }
-    return serializeConfessionConnect(updated);
+    return serializeConfessionConnect(updated, { viewerId, matchId });
   },
 });
 
@@ -2491,7 +2627,7 @@ export const promoteConfessionConnectToConversation = mutation({
     }
 
     const now = Date.now();
-    const { conversationId } = await ensureMutualConfessionConversation(
+    const { conversationId, matchId } = await ensureMutualConfessionConversation(
       ctx,
       connect,
       confession,
@@ -2509,7 +2645,7 @@ export const promoteConfessionConnectToConversation = mutation({
     if (!updated) {
       throw new Error('Connect request unavailable');
     }
-    return serializeConfessionConnect(updated);
+    return serializeConfessionConnect(updated, { viewerId, matchId });
   },
 });
 
@@ -2532,6 +2668,12 @@ export const cancelConfessionConnect = mutation({
     const now = Date.now();
     connect = await patchExpiredConnectIfNeeded(ctx, connect, now);
     if (connect.status === 'expired' || connect.status === 'cancelled_by_from') {
+      await markConfessionConnectRequestNotificationRead(ctx, {
+        ownerUserId: connect.toUserId,
+        connectId,
+        now,
+        expire: true,
+      });
       return serializeConfessionConnect(connect);
     }
     if (connect.status !== 'pending') {
@@ -2543,12 +2685,97 @@ export const cancelConfessionConnect = mutation({
       updatedAt: now,
       respondedAt: now,
     });
+    await markConfessionConnectRequestNotificationRead(ctx, {
+      ownerUserId: connect.toUserId,
+      connectId,
+      now,
+      expire: true,
+    });
 
     const updated = await ctx.db.get(connectId);
     if (!updated) {
       throw new Error('Connect request unavailable');
     }
     return serializeConfessionConnect(updated);
+  },
+});
+
+export const markConfessionConnectSeen = mutation({
+  args: {
+    token: v.string(),
+    connectId: v.id('confessionConnects'),
+  },
+  handler: async (ctx, { token, connectId }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      throw new Error('Connect request unavailable');
+    }
+
+    const connect = await ctx.db.get(connectId);
+    if (!connect || connect.toUserId !== viewerId) {
+      throw new Error('Connect request unavailable');
+    }
+
+    const now = Date.now();
+    if (connect.seenByOwnerAt === undefined) {
+      await ctx.db.patch(connectId, {
+        seenByOwnerAt: now,
+        updatedAt: now,
+      });
+    }
+
+    await markConfessionConnectRequestNotificationRead(ctx, {
+      ownerUserId: viewerId,
+      connectId,
+      now,
+    });
+
+    return {
+      success: true as const,
+      seenByOwnerAt: connect.seenByOwnerAt ?? now,
+    };
+  },
+});
+
+export const getPendingConfessionConnectBadgeCount = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, { token }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      return 0;
+    }
+
+    return countPendingConfessionConnectRequestsForViewer(ctx, viewerId, Date.now());
+  },
+});
+
+export const getConfessInboxBadgeCount = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, { token }) => {
+    const viewerId = await getValidatedViewerFromToken(ctx, token);
+    if (!viewerId) {
+      return {
+        taggedCount: 0,
+        pendingConnectCount: 0,
+        total: 0,
+      };
+    }
+
+    const now = Date.now();
+    const [taggedCount, pendingConnectCount] = await Promise.all([
+      countTaggedConfessionBadgeForViewer(ctx, viewerId),
+      countPendingConfessionConnectRequestsForViewer(ctx, viewerId, now),
+    ]);
+
+    return {
+      taggedCount,
+      pendingConnectCount,
+      total: taggedCount + pendingConnectCount,
+    };
   },
 });
 

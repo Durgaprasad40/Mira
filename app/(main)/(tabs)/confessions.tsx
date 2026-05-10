@@ -47,6 +47,7 @@ import {
   ReportReasonKey,
 } from '@/components/confessions/ReportConfessionSheet';
 import { HeaderAvatarButton } from '@/components/ui';
+import { DEMO_CONFESSION_CONNECT_REQUESTS } from '@/lib/demoData';
 
 type FeedConfession = {
   id: string;
@@ -183,8 +184,14 @@ export default function ConfessionsScreen() {
   const getTimeUntilNextConfession = useConfessionStore((s) => s.getTimeUntilNextConfession);
   const getMyLatestConfession = useConfessionStore((s) => s.getMyLatestConfession);
   const seenTaggedConfessionIds = useConfessionStore((s) => s.seenTaggedConfessionIds);
+  const seenConfessionConnectRequestIds = useConfessionStore(
+    (s) => s.seenConfessionConnectRequestIds
+  );
   const markTaggedConfessionSeen = useConfessionStore((s) => s.markTaggedConfessionSeen);
   const markAllTaggedConfessionsSeen = useConfessionStore((s) => s.markAllTaggedConfessionsSeen);
+  const markAllConfessionConnectRequestsSeen = useConfessionStore(
+    (s) => s.markAllConfessionConnectRequestsSeen
+  );
 
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const blockUserLocal = useBlockStore((s) => s.blockUser);
@@ -211,9 +218,9 @@ export default function ConfessionsScreen() {
     api.confessions.listTaggedConfessionsForUser,
     !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
   );
-  const liveTaggedCount = useQuery(
-    api.confessions.getTaggedConfessionBadgeCount,
-    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+  const liveConfessInboxBadge = useQuery(
+    api.confessions.getConfessInboxBadgeCount,
+    !isDemoMode && token ? { token } : 'skip'
   );
   const likedUsersQuery = useQuery(
     api.likes.getLikedUsers,
@@ -432,9 +439,15 @@ export default function ConfessionsScreen() {
   }, [currentUserId, demoConfessions, liveTaggedConfessions, seenTaggedConfessionIds]);
 
   const taggedBadgeCount = useMemo(() => {
-    if (!isDemoMode) return liveTaggedCount ?? 0;
+    if (!isDemoMode) return liveConfessInboxBadge?.taggedCount ?? 0;
     return taggedConfessions.filter((item) => !item.seen && !item.isExpired).length;
-  }, [isDemoMode, liveTaggedCount, taggedConfessions]);
+  }, [isDemoMode, liveConfessInboxBadge?.taggedCount, taggedConfessions]);
+
+  const pendingConnectBadgeCount = !isDemoMode
+    ? (liveConfessInboxBadge?.pendingConnectCount ?? 0)
+    : DEMO_CONFESSION_CONNECT_REQUESTS.filter(
+        (request) => !seenConfessionConnectRequestIds.includes(request.connectId)
+      ).length;
 
   const trendingHero = useMemo(() => {
     if (!isDemoMode) {
@@ -564,7 +577,8 @@ export default function ConfessionsScreen() {
   const isLoading = !isDemoMode && (
     liveConfessions === undefined ||
     liveTrending === undefined ||
-    (!!currentUserId && (liveTaggedConfessions === undefined || liveTaggedCount === undefined))
+    (!!currentUserId && liveTaggedConfessions === undefined) ||
+    (!!token && liveConfessInboxBadge === undefined)
   );
 
   const handleOpenComposer = useCallback(() => {
@@ -755,6 +769,19 @@ export default function ConfessionsScreen() {
       // Keep the feed usable even if badge clearing fails.
     });
   }, [currentUserId, isDemoMode, markAllTaggedConfessionsSeen, markTaggedConfessionSeen, markTaggedSeenMutation, router, taggedConfessions]);
+
+  const handleOpenConnectRequests = useCallback(() => {
+    if (isDemoMode) {
+      markAllConfessionConnectRequestsSeen(
+        DEMO_CONFESSION_CONNECT_REQUESTS.map((request) => request.connectId)
+      );
+    }
+    safePush(
+      router,
+      '/(main)/comment-connect-requests' as any,
+      'confessions->connectRequests'
+    );
+  }, [markAllConfessionConnectRequestsSeen, router]);
 
   const handleOpenThread = useCallback((confessionId?: string | null) => {
     if (!confessionId) {
@@ -1255,8 +1282,26 @@ export default function ConfessionsScreen() {
           <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
         </TouchableOpacity>
       )}
+
+      {pendingConnectBadgeCount > 0 && (
+        <TouchableOpacity style={styles.connectRequestsRow} onPress={handleOpenConnectRequests} activeOpacity={0.84}>
+          <View style={styles.taggedRowLeft}>
+            <Ionicons name="person-add" size={18} color={COLORS.primary} />
+            <View style={styles.connectRequestsTextGroup}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.taggedRowText}>Connect requests</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.connectRequestsSubtitle}>
+                People who want to connect from your confessions
+              </Text>
+            </View>
+            <View style={styles.badge}>
+              <Text maxFontSizeMultiplier={1.2} style={styles.badgeText}>{pendingConnectBadgeCount}</Text>
+            </View>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+        </TouchableOpacity>
+      )}
     </View>
-  ), [canPostNow, countdownMs, formatCountdown, handleOpenTaggedSection, handleOpenThread, myLatestConfession, taggedBadgeCount, taggedConfessions.length, trendingHero]);
+  ), [canPostNow, countdownMs, formatCountdown, handleOpenConnectRequests, handleOpenTaggedSection, handleOpenThread, myLatestConfession, pendingConnectBadgeCount, taggedBadgeCount, taggedConfessions.length, trendingHero]);
 
   if (isLoading && confessions.length === 0) {
     return (
@@ -1833,15 +1878,39 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     backgroundColor: 'rgba(255,107,107,0.08)',
   },
+  connectRequestsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: SPACING.sm,
+    marginTop: 0,
+    marginBottom: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,107,107,0.16)',
+  },
   taggedRowLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm,
+    flex: 1,
   },
   taggedRowText: {
     fontSize: FONT_SIZE.md,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  connectRequestsTextGroup: {
+    flex: 1,
+    minWidth: 0,
+  },
+  connectRequestsSubtitle: {
+    marginTop: 2,
+    fontSize: FONT_SIZE.xs,
+    color: COLORS.textMuted,
   },
   badge: {
     minWidth: 18,

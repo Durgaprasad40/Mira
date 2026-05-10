@@ -11,6 +11,7 @@ export const PHASE1_ONLY_TYPES = new Set<string>([
   'tagged_confession',
   'confession_connect_requested',
   'confession_connect_accepted',
+  'confession_connect_rejected',
 ]);
 
 export const PHASE2_ONLY_TYPES = new Set<string>([

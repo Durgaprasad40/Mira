@@ -26,6 +26,7 @@ const PHASE1_DEMO_TYPES = new Set([
   'tagged_confession',
   'confession_connect_requested',
   'confession_connect_accepted',
+  'confession_connect_rejected',
 ]);
 
 // Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell.
@@ -159,6 +160,8 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `confession_connect_requested:${data?.connectId ?? data?.confessionId ?? 'unknown'}`;
     case 'confession_connect_accepted':
       return `confession_connect_accepted:${data?.connectId ?? data?.conversationId ?? 'unknown'}`;
+    case 'confession_connect_rejected':
+      return `confession_connect_rejected:${data?.connectId ?? data?.confessionId ?? 'unknown'}`;
     // P2-007 FIX: Phase-2 notification deduplication
     case 'phase2_match':
       // Dedupe by conversation ID (one notification per match conversation)
@@ -254,6 +257,67 @@ function createDemoNotifications(): AppNotification[] {
       isRead: true,
       readAt: now - 2 * 60 * 60 * 1000,
       dedupeKey: 'super_like:demo_superlike_meera',
+    },
+    {
+      _id: 'demo_notif_confess_tagged',
+      type: 'tagged_confession',
+      title: 'Tagged in a confession',
+      body: 'Someone tagged you in a confession.',
+      data: { confessionId: 'conf_2', source: 'confession' },
+      createdAt: now - 45 * 60 * 1000,
+      expiresAt: now - 45 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS,
+      isRead: false,
+      dedupeKey: 'tagged_confession:conf_2',
+    },
+    {
+      _id: 'demo_notif_confess_connect_requested',
+      type: 'confession_connect_requested',
+      title: 'New connect request',
+      body: 'Someone wants to connect from your confession.',
+      data: {
+        confessionId: 'conf_1',
+        connectId: 'demo_connect_request_1',
+        source: 'confession',
+      },
+      createdAt: now - 18 * 60 * 1000,
+      expiresAt: now - 18 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS,
+      isRead: false,
+      dedupeKey: 'confession_connect_requested:demo_connect_request_1',
+    },
+    {
+      _id: 'demo_notif_confess_connect_accepted',
+      type: 'confession_connect_accepted',
+      title: 'You connected',
+      body: "You both connected. Say hi when you're ready.",
+      data: {
+        confessionId: 'conf_2',
+        connectId: 'demo_connect_accepted_1',
+        conversationId: 'demo_convo_demo_profile_2',
+        matchId: 'demo_match_demo_profile_2',
+        otherUserId: 'demo_profile_2',
+        source: 'confession',
+      },
+      createdAt: now - 70 * 60 * 1000,
+      expiresAt: now - 70 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS,
+      isRead: true,
+      readAt: now - 65 * 60 * 1000,
+      dedupeKey: 'confession_connect_accepted:demo_connect_accepted_1',
+    },
+    {
+      _id: 'demo_notif_confess_connect_rejected',
+      type: 'confession_connect_rejected',
+      title: 'Connect request declined',
+      body: 'Your connect request was declined.',
+      data: {
+        confessionId: 'conf_3',
+        connectId: 'demo_connect_rejected_1',
+        source: 'confession',
+      },
+      createdAt: now - 95 * 60 * 1000,
+      expiresAt: now - 95 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS,
+      isRead: true,
+      readAt: now - 90 * 60 * 1000,
+      dedupeKey: 'confession_connect_rejected:demo_connect_rejected_1',
     },
   ];
 }

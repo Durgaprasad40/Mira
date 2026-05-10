@@ -31,7 +31,8 @@ export default function MatchCelebrationScreen() {
   const insets = useSafeAreaInsets();
   const {
     matchId,
-    userId: otherUserId,
+    userId: routeUserId,
+    otherUserId: routeOtherUserId,
     mode,
     phase,
     conversationId,
@@ -40,6 +41,7 @@ export default function MatchCelebrationScreen() {
   } = useLocalSearchParams<{
     matchId?: string;
     userId?: string;
+    otherUserId?: string;
     mode?: string;
     phase?: string;
     conversationId?: string;
@@ -47,6 +49,7 @@ export default function MatchCelebrationScreen() {
     alreadyMatched?: string;
   }>();
   const userId = useAuthStore((s) => s.userId);
+  const otherUserId = routeOtherUserId ?? routeUserId;
   const isConfessionSource = source === 'confession';
   const confessionConversationId =
     typeof conversationId === 'string' && conversationId.trim().length > 0

@@ -211,6 +211,52 @@ export function NotificationPopover({
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
         break;
+      case 'confession_connect_requested':
+        router.push({
+          pathname: '/(main)/comment-connect-requests',
+          params: {
+            source: 'notification',
+            notificationId: notification._id,
+            ...(notification.dedupeKey && { dedupeKey: notification.dedupeKey }),
+            ...(notification.data?.connectId && { connectId: notification.data.connectId }),
+            ...(notification.data?.confessionId && { confessionId: notification.data.confessionId }),
+          },
+        } as any);
+        break;
+      case 'confession_connect_accepted':
+        if (notification.data?.conversationId) {
+          const params: Record<string, string> = {
+            conversationId: notification.data.conversationId,
+            source: 'confession',
+            phase: 'phase1',
+            notificationId: notification._id,
+          };
+          if (notification.dedupeKey) params.dedupeKey = notification.dedupeKey;
+          if (notification.data.matchId) params.matchId = notification.data.matchId;
+          if (notification.data.otherUserId) {
+            params.userId = notification.data.otherUserId;
+            params.otherUserId = notification.data.otherUserId;
+          }
+          router.push({
+            pathname: '/(main)/match-celebration',
+            params,
+          } as any);
+        }
+        break;
+      case 'confession_connect_rejected':
+      case 'tagged_confession':
+        if (notification.data?.confessionId) {
+          router.push({
+            pathname: '/(main)/confession-thread',
+            params: {
+              confessionId: notification.data.confessionId,
+              source: 'notification',
+              notificationId: notification._id,
+              dedupeKey: notification.dedupeKey,
+            },
+          } as any);
+        }
+        break;
       default:
         break;
     }
@@ -246,6 +292,14 @@ export function NotificationPopover({
         return 'information-circle';
       case 'subscription':
         return 'card';
+      case 'tagged_confession':
+        return 'at';
+      case 'confession_connect_requested':
+        return 'person-add';
+      case 'confession_connect_accepted':
+        return 'chatbubbles';
+      case 'confession_connect_rejected':
+        return 'person-remove-outline';
       default:
         return 'notifications';
     }
@@ -277,6 +331,11 @@ export function NotificationPopover({
         return '#607D8B';
       case 'system':
         return '#2196F3';
+      case 'tagged_confession':
+      case 'confession_connect_requested':
+      case 'confession_connect_accepted':
+      case 'confession_connect_rejected':
+        return '#9C27B0';
       default:
         return COLORS.textLight;
     }

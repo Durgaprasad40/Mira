@@ -51,6 +51,14 @@ type ConfessionConnectStatusResult = {
   conversationId?: string;
 };
 
+type ConfessionConnectMutationResult = {
+  status?: ConfessionConnectStatusValue;
+  conversationId?: string;
+  matchId?: string;
+  otherUserId?: string;
+  partnerUserId?: string;
+};
+
 function formatTimeLeft(expiresAt: number): string {
   const diff = expiresAt - Date.now();
   if (diff <= 0) return 'Expired';
@@ -233,7 +241,11 @@ export default function ConfessionChatScreen() {
     );
   }, [router]);
 
-  const openConnectCelebration = useCallback((conversationId?: string | null, matchId?: string | null) => {
+  const openConnectCelebration = useCallback((
+    conversationId?: string | null,
+    matchId?: string | null,
+    otherUserId?: string | null
+  ) => {
     const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
     if (!normalized) {
       Toast.show('Connected. Chat is being prepared.');
@@ -247,6 +259,11 @@ export default function ConfessionChatScreen() {
     const normalizedMatchId = typeof matchId === 'string' ? matchId.trim() : '';
     if (normalizedMatchId) {
       params.set('matchId', normalizedMatchId);
+    }
+    const normalizedOtherUserId = typeof otherUserId === 'string' ? otherUserId.trim() : '';
+    if (normalizedOtherUserId) {
+      params.set('userId', normalizedOtherUserId);
+      params.set('otherUserId', normalizedOtherUserId);
     }
     safePush(
       router,
@@ -269,10 +286,14 @@ export default function ConfessionChatScreen() {
       const result = await requestConfessionConnectMutation({
         token,
         confessionId: liveConfessionId as any,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
+      }) as ConfessionConnectMutationResult;
       setConnectDismissed(false);
       if (result?.status === 'mutual' && result.conversationId) {
-        openConnectCelebration(result.conversationId, result.matchId);
+        openConnectCelebration(
+          result.conversationId,
+          result.matchId,
+          result.otherUserId ?? result.partnerUserId
+        );
       } else {
         Toast.show('Request sent. Waiting for them to connect.');
       }
@@ -335,10 +356,14 @@ export default function ConfessionChatScreen() {
         token,
         connectId: connectStatus.connectId as any,
         decision,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
+      }) as ConfessionConnectMutationResult;
       if (decision === 'connect') {
         if (result?.conversationId) {
-          openConnectCelebration(result.conversationId, result.matchId);
+          openConnectCelebration(
+            result.conversationId,
+            result.matchId,
+            result.otherUserId ?? result.partnerUserId
+          );
         } else {
           Toast.show('Connected. Chat is being prepared.');
         }
@@ -434,7 +459,7 @@ export default function ConfessionChatScreen() {
           <View style={[styles.connectBanner, styles.connectBannerSuccess]}>
             <Ionicons name="checkmark-circle" size={16} color="#34C759" />
             <Text style={[styles.connectBannerText, styles.connectBannerTextSuccess]}>
-              Connected. Continue in Messages.
+              You both connected. Continue in Messages.
             </Text>
           </View>
           <View style={styles.connectActions}>
@@ -459,10 +484,12 @@ export default function ConfessionChatScreen() {
     ) {
       const copy =
         status === 'expired'
-          ? 'This connect request expired.'
+          ? 'Request expired.'
           : status === 'cancelled_by_from'
-            ? 'This connect request was cancelled.'
-            : 'This connect request was declined.';
+            ? 'Request cancelled.'
+            : connectStatus.viewerRole === 'requester'
+              ? 'Request declined.'
+              : 'Request rejected.';
       return (
         <View style={styles.connectBanner}>
           <Ionicons name="close-circle-outline" size={16} color={COLORS.textMuted} />
@@ -477,7 +504,9 @@ export default function ConfessionChatScreen() {
           <View style={styles.connectActions}>
             <View style={styles.connectWaitingRow}>
               <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
-              <Text style={styles.connectWaitingText}>Request sent. Waiting for them to connect.</Text>
+              <Text style={styles.connectWaitingText}>
+                Request sent. Waiting for them to connect. Your identity stays protected until both sides connect.
+              </Text>
             </View>
             {connectStatus.canCancel ? (
               <TouchableOpacity
@@ -503,7 +532,7 @@ export default function ConfessionChatScreen() {
         return (
           <View style={styles.connectActions}>
             <Text style={styles.connectPrompt}>
-              Connect opens a real Messages chat only if both sides agree.
+              Connect opens a real Messages chat only if both sides connect. Your identity stays protected until both sides connect.
             </Text>
             <View style={styles.connectButtonRow}>
               <TouchableOpacity
@@ -550,7 +579,7 @@ export default function ConfessionChatScreen() {
         return (
           <View style={styles.connectActions}>
             <Text style={styles.connectPrompt}>
-              They want to connect. If you agree, Mira will open a real chat in Messages.
+              Someone wants to connect from your confession. Your identity stays protected until both sides connect.
             </Text>
             <View style={styles.connectButtonRow}>
               <TouchableOpacity

@@ -128,6 +128,14 @@ type ConfessionConnectStatusResult = {
   conversationId?: string;
 };
 
+type ConfessionConnectMutationResult = {
+  status?: ConfessionConnectStatusValue;
+  conversationId?: string;
+  matchId?: string;
+  otherUserId?: string;
+  partnerUserId?: string;
+};
+
 // Match homepage avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
 const REPLY_AVATAR_SIZE = moderateScale(22, 0.3);
@@ -411,7 +419,11 @@ export default function ConfessionThreadScreen() {
     );
   }, [router]);
 
-  const openConnectCelebration = useCallback((conversationId?: string | null, matchId?: string | null) => {
+  const openConnectCelebration = useCallback((
+    conversationId?: string | null,
+    matchId?: string | null,
+    otherUserId?: string | null
+  ) => {
     const normalized = typeof conversationId === 'string' ? conversationId.trim() : '';
     if (!normalized) {
       Alert.alert('Connected', 'The chat is being prepared. Please try opening it again.');
@@ -425,6 +437,11 @@ export default function ConfessionThreadScreen() {
     const normalizedMatchId = typeof matchId === 'string' ? matchId.trim() : '';
     if (normalizedMatchId) {
       params.set('matchId', normalizedMatchId);
+    }
+    const normalizedOtherUserId = typeof otherUserId === 'string' ? otherUserId.trim() : '';
+    if (normalizedOtherUserId) {
+      params.set('userId', normalizedOtherUserId);
+      params.set('otherUserId', normalizedOtherUserId);
     }
     safePush(
       router,
@@ -445,12 +462,16 @@ export default function ConfessionThreadScreen() {
       const result = await requestConfessionConnectMutation({
         token,
         confessionId: confessionId as any,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
+      }) as ConfessionConnectMutationResult;
       setConnectDismissed(false);
       if (result?.status === 'mutual' && result.conversationId) {
-        openConnectCelebration(result.conversationId, result.matchId);
+        openConnectCelebration(
+          result.conversationId,
+          result.matchId,
+          result.otherUserId ?? result.partnerUserId
+        );
       } else {
-        Alert.alert('Request sent', 'If they connect too, Mira will open a chat in Messages.');
+        Alert.alert('Request sent', 'Waiting for them to connect.');
       }
     } catch (error: any) {
       Alert.alert('Connect unavailable', error?.message || 'Please try again later.');
@@ -495,16 +516,20 @@ export default function ConfessionThreadScreen() {
         token,
         connectId: connectStatus.connectId as any,
         decision,
-      }) as { status?: ConfessionConnectStatusValue; conversationId?: string; matchId?: string };
+      }) as ConfessionConnectMutationResult;
 
       if (decision === 'connect') {
         if (result?.conversationId) {
-          openConnectCelebration(result.conversationId, result.matchId);
+          openConnectCelebration(
+            result.conversationId,
+            result.matchId,
+            result.otherUserId ?? result.partnerUserId
+          );
         } else {
           Alert.alert('Connected', 'The chat is being prepared. Please try opening it again.');
         }
       } else {
-        Alert.alert('Request declined', 'This connect request has been closed.');
+        Alert.alert('Request rejected', 'This connect request has been closed.');
       }
     } catch (error: any) {
       Alert.alert('Connect unavailable', error?.message || 'Please try again later.');
@@ -1077,7 +1102,7 @@ export default function ConfessionThreadScreen() {
             <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connected</Text>
           </View>
           <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
-            You both agreed. Continue in Messages.
+            You both connected. Continue in Messages.
           </Text>
           <TouchableOpacity
             style={styles.connectPrimaryButton}
@@ -1100,15 +1125,25 @@ export default function ConfessionThreadScreen() {
     ) {
       const copy =
         status === 'expired'
-          ? 'This connect request expired.'
+          ? 'Request expired.'
           : status === 'cancelled_by_from'
-            ? 'This connect request was cancelled.'
-            : 'This connect request was declined.';
+            ? 'Request cancelled.'
+            : role === 'requester'
+              ? 'Request declined.'
+              : 'Request rejected.';
+      const title =
+        status === 'expired'
+          ? 'Request expired'
+          : status === 'cancelled_by_from'
+            ? 'Request cancelled'
+            : role === 'requester'
+              ? 'Request declined'
+              : 'Request rejected';
       return (
         <View style={styles.connectPanel}>
           <View style={styles.connectPanelHeader}>
             <Ionicons name="close-circle-outline" size={16} color={COLORS.textMuted} />
-            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connect closed</Text>
+            <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>{title}</Text>
           </View>
           <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>{copy}</Text>
         </View>
@@ -1124,7 +1159,7 @@ export default function ConfessionThreadScreen() {
               <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Request sent</Text>
             </View>
             <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
-              Waiting for them to connect. Your identity stays protected until both sides agree.
+              Waiting for them to connect. Your identity stays protected until both sides connect.
             </Text>
             {connectStatus.canCancel ? (
               <TouchableOpacity
@@ -1155,7 +1190,7 @@ export default function ConfessionThreadScreen() {
               <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connect?</Text>
             </View>
             <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
-              If you both choose Connect, Mira will open a real chat in Messages.
+              If you both choose Connect, Mira will open a real Messages chat. Your identity stays protected until both sides connect.
             </Text>
             <View style={styles.connectButtonRow}>
               <TouchableOpacity
@@ -1207,7 +1242,7 @@ export default function ConfessionThreadScreen() {
               <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelTitle}>Connect request</Text>
             </View>
             <Text maxFontSizeMultiplier={1.2} style={styles.connectPanelText}>
-              They want to connect. If you agree, Mira will open a real chat in Messages.
+              Someone wants to connect from your confession. Your identity stays protected until both sides connect.
             </Text>
             <View style={styles.connectButtonRow}>
               <TouchableOpacity

@@ -2540,6 +2540,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     replyCount: 8,
     reactionCount: 42,
     createdAt: Date.now() - 1000 * 60 * 60 * 2,
+    taggedUserId: 'demo_user_1',
+    taggedUserName: 'You',
     revealPolicy: 'never' as const,
   },
   {
@@ -2743,6 +2745,20 @@ export const DEMO_CONFESSION_CHATS: ConfessionChat[] = [
     ],
     createdAt: Date.now() - 1000 * 60 * 120,
     expiresAt: Date.now() + 1000 * 60 * 60 * 22,
+  },
+];
+
+export const DEMO_CONFESSION_CONNECT_REQUESTS = [
+  {
+    connectId: 'demo_connect_request_1',
+    confessionId: 'conf_1',
+    status: 'pending' as const,
+    createdAt: Date.now() - 18 * 60 * 1000,
+    updatedAt: Date.now() - 18 * 60 * 1000,
+    expiresAt: Date.now() + 6 * 60 * 60 * 1000,
+    confessionText: DEMO_CONFESSIONS[0]?.text ?? 'A demo confession',
+    confessionMood: DEMO_CONFESSIONS[0]?.mood ?? 'funny',
+    confessionCreatedAt: DEMO_CONFESSIONS[0]?.createdAt ?? Date.now(),
   },
 ];
 

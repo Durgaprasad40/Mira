@@ -90,6 +90,8 @@ interface ConfessionState {
 
   // Seen tracking for demo mode (tagged confessions)
   seenTaggedConfessionIds: string[];
+  // Seen tracking for demo mode (connect requests)
+  seenConfessionConnectRequestIds: string[];
 
   // Rate limiting: timestamps of user's own confessions (within 24h window)
   confessionTimestamps: number[];
@@ -118,6 +120,10 @@ interface ConfessionState {
   markTaggedConfessionSeen: (confessionId: string) => void;
   /** Mark all tagged confessions as seen */
   markAllTaggedConfessionsSeen: (confessionIds: string[]) => void;
+  /** Mark a demo connect request as seen */
+  markConfessionConnectRequestSeen: (connectId: string) => void;
+  /** Mark all demo connect requests as seen */
+  markAllConfessionConnectRequestsSeen: (connectIds: string[]) => void;
   /** Cleanup expired confessions from store */
   cleanupExpiredConfessions: (expiredIds: string[]) => void;
   /** Cleanup expired confession chats from store */
@@ -175,6 +181,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
   seeded: false,
   confessionThreads: {},
   seenTaggedConfessionIds: [],
+  seenConfessionConnectRequestIds: [],
   confessionTimestamps: [],
   _hasHydrated: true,
 
@@ -480,6 +487,33 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       if (newIds.length === 0) return state;
       return {
         seenTaggedConfessionIds: [...state.seenTaggedConfessionIds, ...newIds],
+      };
+    });
+  },
+
+  markConfessionConnectRequestSeen: (connectId) => {
+    set((state) => {
+      if (state.seenConfessionConnectRequestIds.includes(connectId)) return state;
+      return {
+        seenConfessionConnectRequestIds: [
+          ...state.seenConfessionConnectRequestIds,
+          connectId,
+        ],
+      };
+    });
+  },
+
+  markAllConfessionConnectRequestsSeen: (connectIds) => {
+    set((state) => {
+      const newIds = connectIds.filter(
+        (id) => !state.seenConfessionConnectRequestIds.includes(id)
+      );
+      if (newIds.length === 0) return state;
+      return {
+        seenConfessionConnectRequestIds: [
+          ...state.seenConfessionConnectRequestIds,
+          ...newIds,
+        ],
       };
     });
   },

@@ -241,6 +241,10 @@ export default function NotificationsScreen() {
           if (notification.data.matchId) {
             params.matchId = notification.data.matchId;
           }
+          if (notification.data.otherUserId) {
+            params.userId = notification.data.otherUserId;
+            params.otherUserId = notification.data.otherUserId;
+          }
           router.push({
             pathname: '/(main)/match-celebration',
             params,
@@ -252,10 +256,24 @@ export default function NotificationsScreen() {
           );
         }
         break;
+      case 'confession_connect_rejected':
       case 'confession_reaction':
       case 'confession_reply':
       case 'tagged_confession':
         if (notification.data?.confessionId) {
+          if (isDemoMode) {
+            router.push({
+              pathname: '/(main)/confession-thread',
+              params: {
+                confessionId: notification.data.confessionId,
+                source: 'notification',
+                notificationId: notification._id,
+                dedupeKey: notification.dedupeKey,
+              },
+            } as any);
+            break;
+          }
+
           try {
             const confession = await convex.query(api.confessions.getConfession, {
               confessionId: notification.data.confessionId as any,
@@ -335,6 +353,8 @@ export default function NotificationsScreen() {
         return 'person-add';
       case 'confession_connect_accepted':
         return 'chatbubbles';
+      case 'confession_connect_rejected':
+        return 'person-remove-outline';
       default:
         return 'notifications';
     }
@@ -369,6 +389,7 @@ export default function NotificationsScreen() {
       case 'tagged_confession':
       case 'confession_connect_requested':
       case 'confession_connect_accepted':
+      case 'confession_connect_rejected':
         return '#9C27B0';
       default:
         return COLORS.textLight;
