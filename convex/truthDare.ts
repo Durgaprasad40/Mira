@@ -1905,27 +1905,9 @@ export const respondToConnect = mutation({
       const conversationId = ensured.conversationId;
       const conversationCreated = ensured.conversationCreated;
 
-      if (conversationCreated) {
-        await ctx.db.insert('privateMessages', {
-          conversationId,
-          senderId: recipientDbId as Id<'users'>,
-          type: 'system',
-          content: '[SYSTEM:truthdare]T&D connection accepted! Say hi!',
-          createdAt: now,
-        });
-
-        const senderParticipant = await ctx.db
-          .query('privateConversationParticipants')
-          .withIndex('by_user_conversation', (q) =>
-            q.eq('userId', senderDbId as Id<'users'>).eq('conversationId', conversationId)
-          )
-          .first();
-        if (senderParticipant) {
-          await ctx.db.patch(senderParticipant._id, {
-            unreadCount: senderParticipant.unreadCount + 1,
-          });
-        }
-      }
+      // Phase-2 chat should open cleanly after a T/D connection. Do not
+      // persist a visible system intro row; the connected request/match
+      // records above are the internal source of truth.
 
       console.log('[TOD_CONNECT_RESPOND] Accepted:', {
         requestId,

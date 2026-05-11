@@ -85,6 +85,56 @@ function shouldHideExpiredPrivateSecureMedia(
   );
 }
 
+function isLegacyTruthDareConnectionIntroMessage(message: {
+  type?: string;
+  content?: string;
+  systemSubtype?: string;
+}): boolean {
+  if (typeof message.content !== 'string') return false;
+  const content = message.content.replace(/\s+/g, ' ').trim();
+  const hasTruthDareMarker =
+    message.systemSubtype === 'truthdare' ||
+    /^\[SYSTEM:{1,2}truthdare\]/i.test(content);
+  const isSystemLike = message.type === 'system' || hasTruthDareMarker;
+  if (!isSystemLike) return false;
+
+  return (
+    /T&D connection accepted/i.test(content) ||
+    (/connection accepted/i.test(content) &&
+      /say hi/i.test(content) &&
+      /(T&D|truth\s*\/?\s*dare|truthdare)/i.test(content))
+  );
+}
+
+function isLegacyTruthDareSpinTranscriptMessage(message: {
+  type?: string;
+  content?: string;
+  systemSubtype?: string;
+}): boolean {
+  if (typeof message.content !== 'string') return false;
+  const content = message.content.replace(/\s+/g, ' ').trim();
+  const hasTruthDareMarker =
+    message.systemSubtype === 'truthdare' ||
+    message.systemSubtype === 'tod_perm' ||
+    message.systemSubtype === 'tod_temp' ||
+    /^\[SYSTEM:{1,2}(truthdare|tod_perm|tod_temp)\]/i.test(content);
+  const isSystemLike = message.type === 'system' || hasTruthDareMarker;
+  if (!isSystemLike) return false;
+
+  return /\bspun the bottle$/i.test(content) || /^Bottle landed on\b/i.test(content);
+}
+
+function shouldHidePrivateTruthDareSystemMessage(message: {
+  type?: string;
+  content?: string;
+  systemSubtype?: string;
+}): boolean {
+  return (
+    isLegacyTruthDareConnectionIntroMessage(message) ||
+    isLegacyTruthDareSpinTranscriptMessage(message)
+  );
+}
+
 function isPrivateVisualMediaType(type: string | undefined): type is 'image' | 'video' {
   return type === 'image' || type === 'video';
 }
@@ -383,8 +433,9 @@ export const getUserPrivateConversations = query({
         const lastMessage =
           lastMessageCandidates.find(
             (m) =>
-              !m.isProtected ||
-              (!m.isExpired && getPrivateSecureMediaExpiredAt(m, nowMs) === null)
+              !shouldHidePrivateTruthDareSystemMessage(m) &&
+              (!m.isProtected ||
+                (!m.isExpired && getPrivateSecureMediaExpiredAt(m, nowMs) === null))
           ) ?? null;
 
         const lastRealMessage = await ctx.db
@@ -597,7 +648,9 @@ export const getPrivateMessages = query({
     // once the deadline passes. Belt-and-braces with the cron sweep below.
     const nowMs = Date.now();
     const visibleMessages = messages.filter(
-      (m) => !shouldHideExpiredPrivateSecureMedia(m, nowMs)
+      (m) =>
+        !shouldHidePrivateTruthDareSystemMessage(m) &&
+        !shouldHideExpiredPrivateSecureMedia(m, nowMs)
     );
 
     // P0-003: Batch-fetch audio URLs for voice messages (Phase-1 parity)

@@ -120,6 +120,44 @@ function shouldHideExpiredPhase2SecureMedia(message: any, nowMs: number): boolea
   );
 }
 
+function isLegacyPhase2TruthDareConnectionIntro(message: any): boolean {
+  if (typeof message?.content !== 'string') return false;
+  const content = message.content.replace(/\s+/g, ' ').trim();
+  const hasTruthDareMarker =
+    message.systemSubtype === 'truthdare' ||
+    /^\[SYSTEM:{1,2}truthdare\]/i.test(content);
+  const isSystemLike = message.type === 'system' || hasTruthDareMarker;
+  if (!isSystemLike) return false;
+
+  return (
+    /T&D connection accepted/i.test(content) ||
+    (/connection accepted/i.test(content) &&
+      /say hi/i.test(content) &&
+      /(T&D|truth\s*\/?\s*dare|truthdare)/i.test(content))
+  );
+}
+
+function isLegacyPhase2TruthDareSpinTranscript(message: any): boolean {
+  if (typeof message?.content !== 'string') return false;
+  const content = message.content.replace(/\s+/g, ' ').trim();
+  const hasTruthDareMarker =
+    message.systemSubtype === 'truthdare' ||
+    message.systemSubtype === 'tod_perm' ||
+    message.systemSubtype === 'tod_temp' ||
+    /^\[SYSTEM:{1,2}(truthdare|tod_perm|tod_temp)\]/i.test(content);
+  const isSystemLike = message.type === 'system' || hasTruthDareMarker;
+  if (!isSystemLike) return false;
+
+  return /\bspun the bottle$/i.test(content) || /^Bottle landed on\b/i.test(content);
+}
+
+function shouldHidePhase2TruthDareSystemMessage(message: any): boolean {
+  return (
+    isLegacyPhase2TruthDareConnectionIntro(message) ||
+    isLegacyPhase2TruthDareSpinTranscript(message)
+  );
+}
+
 const C = INCOGNITO_COLORS;
 
 type GameState = 'none' | 'pending' | 'active' | 'expired' | 'cooldown';
@@ -1932,7 +1970,9 @@ export default function Phase2ChatThread() {
   // ChatScreenInner.tsx:715-720).
   const messageList = useMemo(() => {
     const server = ((stableMessages ?? []) as any[]).filter(
-      (m) => !shouldHideExpiredPhase2SecureMedia(m, secureMediaNowMs)
+      (m) =>
+        !shouldHidePhase2TruthDareSystemMessage(m) &&
+        !shouldHideExpiredPhase2SecureMedia(m, secureMediaNowMs)
     );
     if (pendingPhase2Messages.length === 0) return server;
     const pendingAsRows = pendingPhase2Messages.map((p) => ({

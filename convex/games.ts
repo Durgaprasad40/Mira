@@ -436,18 +436,30 @@ async function listRecentBottleSpinSessions(
 async function expireStalePendingSessions(
   ctx: MutationCtx,
   sessions: BottleSpinSessionDoc[],
-  now: number
+  now: number,
+  authUserId: string
 ) {
   const stalePendingSessions = sessions.filter((session) => isPendingInviteExpired(session, now));
 
-  await Promise.all(
-    stalePendingSessions.map((session) =>
-      ctx.db.patch(session._id, {
-        status: 'expired',
-        respondedAt: session.respondedAt ?? now,
-      })
-    )
-  );
+  for (const session of stalePendingSessions) {
+    await ctx.db.patch(session._id, {
+      status: 'expired',
+      respondedAt: session.respondedAt ?? now,
+      endedAt: session.endedAt ?? now,
+      endedReason: session.endedReason ?? 'invite_expired',
+      ...(session.cooldownUntil && session.cooldownUntil > now
+        ? {}
+        : { cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS }),
+    });
+
+    await insertTodSystemMessage(ctx, {
+      conversationId: session.conversationId,
+      authUserId,
+      content: 'Game invite expired',
+      subtype: 'tod_temp',
+      eventKey: `tod:${session._id}:invite_expired`,
+    });
+  }
 }
 
 // Get current game session status for a conversation
@@ -616,7 +628,7 @@ export const sendBottleSpinInvite = mutation({
     // FIX: Check ALL sessions for this conversation
     const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
-    await expireStalePendingSessions(ctx, allSessions, now);
+    await expireStalePendingSessions(ctx, allSessions, now, authUserId);
 
     const freshPendingSession = allSessions.find(
       (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
@@ -682,7 +694,7 @@ export const respondToBottleSpinInvite = mutation({
     const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     const hadAnyPendingSession = allSessions.some((session) => session.status === 'pending');
-    await expireStalePendingSessions(ctx, allSessions, now);
+    await expireStalePendingSessions(ctx, allSessions, now, authUserId);
 
     const pendingSessions = allSessions.filter(
       (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
@@ -944,17 +956,18 @@ export const cleanupExpiredSession = mutation({
     // P2-TOD-CHAT-EVENTS: Transient chip — timeout / expiry. Only emit when we
     // actually transitioned a session to 'expired' so we never spam the chat
     // on idempotent cleanup retries.
-    if (cleanedCount > 0) {
-      const expiryCopy =
-        endedReason === 'invite_expired'
-          ? 'Game invite expired'
-          : 'Game ended due to inactivity';
+    for (const sessionId of cleanedSessionIds) {
+      const isInviteExpiry = endedReason === 'invite_expired';
       await insertTodSystemMessage(ctx, {
         conversationId,
         authUserId,
-        content: expiryCopy,
+        content: isInviteExpiry
+          ? 'Game invite expired'
+          : 'Game ended due to inactivity',
         subtype: 'tod_temp',
-        eventKey: `tod:${cleanedSessionIds.sort().join(',')}:expired:${endedReason}`,
+        eventKey: isInviteExpiry
+          ? `tod:${sessionId}:invite_expired`
+          : `tod:${sessionId}:inactivity_end`,
       });
     }
 
@@ -1146,46 +1159,24 @@ export const setBottleSpinTurn = mutation({
     });
 
     // ═══════════════════════════════════════════════════════════════════════
-    // P2-TOD-CHAT-EVENTS: Emit in-chat system messages for the user-visible
-    // turn transitions. We only emit on the transition that actually
-    // produced new state to avoid duplicate chips on idempotent retries.
+    // P2-TOD-CHAT-EVENTS: Emit in-chat system messages for persisted game
+    // outcomes. Phase-1 keeps bottle spin / landed events inside the modal,
+    // so Phase-2 does not write chat chips for those transitions.
     // ═══════════════════════════════════════════════════════════════════════
-    if (turnPhase === 'spinning' && selectedTargetRole) {
-      const callerName = await todDisplayName(ctx, authUserId);
-      // Permanent: spinner identity stays in transcript.
-      await insertTodSystemMessage(ctx, {
-        conversationId,
-        authUserId,
-        content: `${callerName} spun the bottle`,
-        subtype: 'tod_perm',
-        eventKey: `tod:${session._id}:spun:${previousActionAt}:${authUserId}`,
-      });
-      // Permanent: bottle target. Resolve the target's display name from the
-      // session.inviterId/inviteeId mapping so we never leak the wrong name.
-      const targetAuthUserId =
-        selectedTargetRole === 'inviter' ? session.inviterId : session.inviteeId;
-      const targetName = await todDisplayName(ctx, targetAuthUserId);
-      await insertTodSystemMessage(ctx, {
-        conversationId,
-        authUserId,
-        content: `Bottle landed on ${targetName}`,
-        subtype: 'tod_perm',
-        eventKey: `tod:${session._id}:landed:${previousActionAt}:${selectedTargetRole}`,
-      });
-    } else if (turnPhase === 'choosing' && lastSpinResult === 'skip') {
+    if (turnPhase === 'choosing' && lastSpinResult === 'skip') {
       // Skip during the choose step — transient.
       const skipperName = await todDisplayName(ctx, authUserId);
       await insertTodSystemMessage(ctx, {
         conversationId,
         authUserId,
-        content: `${skipperName} skipped this turn`,
+        content: `${skipperName} skipped 😅`,
         subtype: 'tod_temp',
         eventKey: `tod:${session._id}:skip_choosing:${previousActionAt}:${authUserId}`,
       });
     } else if (turnPhase === 'complete' && lastSpinResult) {
       const actorName = await todDisplayName(ctx, authUserId);
       if (lastSpinResult === 'truth' || lastSpinResult === 'dare') {
-        const label = lastSpinResult === 'truth' ? 'Truth' : 'Dare';
+        const label = lastSpinResult === 'truth' ? 'TRUTH 🔥' : 'DARE 😈';
         await insertTodSystemMessage(ctx, {
           conversationId,
           authUserId,
@@ -1197,7 +1188,7 @@ export const setBottleSpinTurn = mutation({
         await insertTodSystemMessage(ctx, {
           conversationId,
           authUserId,
-          content: `${actorName} skipped this turn`,
+          content: `${actorName} skipped 😅`,
           subtype: 'tod_temp',
           eventKey: `tod:${session._id}:choice:${previousActionAt}:${authUserId}:skip`,
         });
