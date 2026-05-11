@@ -255,6 +255,13 @@ export default function Phase2ChatThread() {
   const openPrivateSecureMedia = useMutation(
     api.privateConversations.openPrivateSecureMedia
   );
+  const setTyping = useMutation(api.privateConversations.setPrivateTypingStatus);
+  const typingStatus = useQuery(
+    api.privateConversations.getPrivateTypingStatus,
+    id && userId && !isConversationClosed
+      ? { conversationId: id as any, authUserId: userId }
+      : 'skip'
+  ) as { isTyping?: boolean } | undefined;
   const markRead = useMutation(api.privateConversations.markPrivateMessagesRead);
   // P2_HEADER_PARITY: Phase-2-isolated presence writer. Writes ONLY to
   // `privateUserPresence` (never `users.lastActive`) — see
@@ -581,7 +588,15 @@ export default function Phase2ChatThread() {
   useEffect(() => {
     if (isConversationClosed) return;
     if (!gameSession) return;
-    if (tdState === 'active' && gameStartedAt && !tdPaused) {
+    if (
+      tdState === 'active' &&
+      gameStartedAt &&
+      truthDareTurnPhase === 'choosing' &&
+      truthDareChooserRole &&
+      myTruthDareRole &&
+      truthDareChooserRole === myTruthDareRole &&
+      !tdPaused
+    ) {
       setShowGameModal(true);
     }
     if (tdState !== 'active' && showGameModal) {
@@ -592,8 +607,16 @@ export default function Phase2ChatThread() {
     if (tdState !== 'active' && tdPaused) {
       setTdPaused(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConversationClosed, tdState, tdPaused, gameStartedAt]);
+  }, [
+    isConversationClosed,
+    tdState,
+    tdPaused,
+    gameStartedAt,
+    truthDareTurnPhase,
+    truthDareChooserRole,
+    myTruthDareRole,
+    showGameModal,
+  ]);
 
   // P2_TD_AUTO_PROMPT: live chooser prompt. The header T/D button already
   // opens BottleSpinGame manually, but the selected player must not need to
@@ -1183,6 +1206,18 @@ export default function Phase2ChatThread() {
       }
     },
     [id, token, sendPrivateMessage, isConversationClosed]
+  );
+
+  const handleTypingChange = useCallback(
+    (isTyping: boolean) => {
+      if (isConversationClosed || !id || !token) return;
+      setTyping({
+        token,
+        conversationId: id as any,
+        isTyping,
+      }).catch(() => {});
+    },
+    [id, token, isConversationClosed, setTyping]
   );
 
   // P2_TD_PARITY: BottleSpinGame emits result strings (e.g. "Truth: <q>",
@@ -2506,11 +2541,25 @@ export default function Phase2ChatThread() {
           )}
         </View>
 
+        {typingStatus?.isTyping ? (
+          <View pointerEvents="none" style={styles.typingIndicatorFloating}>
+            <View style={styles.typingIndicatorBar}>
+              <View style={styles.typingIndicatorDot} />
+              <Text style={styles.typingIndicatorText} numberOfLines={1}>
+                {stableOtherUserName || otherUserName
+                  ? (stableOtherUserName || otherUserName) + ' is typing…'
+                  : 'Typing…'}
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
         <MessageInput
           onSend={handleSendText}
           onSendCamera={handleSendCameraPress}
           onSendGallery={handleSendGalleryPress}
           onSendVoice={handleSendVoiceMessage}
+          onTypingChange={handleTypingChange}
           theme="phase2"
         />
       </KeyboardAvoidingView>
@@ -3071,6 +3120,45 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     textAlign: 'center',
     marginBottom: 18,
+  },
+  typingIndicatorFloating: {
+    position: 'absolute',
+    left: 18,
+    right: 18,
+    bottom: 88,
+    alignItems: 'flex-start',
+    zIndex: 30,
+    elevation: 10,
+  },
+  typingIndicatorBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    maxWidth: '86%',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.94)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(0,0,0,0.08)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+  },
+  typingIndicatorDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: C.primary,
+    marginRight: 8,
+  },
+  typingIndicatorText: {
+    flexShrink: 1,
+    fontSize: 12,
+    lineHeight: 15,
+    fontWeight: '600',
+    color: '#3A3147',
   },
   // PHASE-2 PREMIUM (T/D): deeper plum-tinted backdrop so the invite modal
   // sits inside the same midnight palette as the gradient surface.

@@ -287,7 +287,7 @@ function MessageBubbleComponent({
   const avatarFallbackOverlay = isPhase2
     ? { backgroundColor: PHASE2.avatarFallbackBg }
     : null;
-  const usePhase1OwnInlineMeta = isOwn && !isPhase2;
+  const usePhase1OwnInlineMeta = isOwn;
   const usePhase1OwnInlineTimestamp = usePhase1OwnInlineMeta && showTimestamp;
 
   const renderInlineTime = (timestamp: number) => {
