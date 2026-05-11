@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { query, mutation } from './_generated/server';
-import type { Id } from './_generated/dataModel';
+import type { Doc, Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
 import { resolveUserIdByAuthId, isRevealed } from './helpers';
@@ -121,6 +121,31 @@ function getProfileIntentKeys(profile: { privateIntentKeys?: string[]; privateIn
   return (profile.privateIntentKeys && profile.privateIntentKeys.length > 0)
     ? profile.privateIntentKeys
     : (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+}
+
+function shouldExcludeDeepConnectConversationPartner(conversation: Doc<'privateConversations'>): boolean {
+  if (
+    conversation.connectionSource === 'room' ||
+    Boolean((conversation as any).sourceRoomId)
+  ) {
+    return false;
+  }
+
+  if (conversation.isPreMatch === true) {
+    return false;
+  }
+
+  if (conversation.matchId) {
+    return true;
+  }
+
+  return (
+    conversation.connectionSource === 'tod' ||
+    conversation.connectionSource === 'desire' ||
+    conversation.connectionSource === 'desire_match' ||
+    conversation.connectionSource === 'desire_super_like' ||
+    conversation.connectionSource === 'friend'
+  );
 }
 
 async function isWithinDeepConnectImpressionRateLimit(
@@ -273,6 +298,7 @@ export const getProfiles = query({
       );
       for (const conv of conversations) {
         if (!conv) continue;
+        if (!shouldExcludeDeepConnectConversationPartner(conv)) continue;
         for (const participantId of conv.participants) {
           if (participantId !== viewerUserId) {
             conversationPartnerIds.add(participantId as string);

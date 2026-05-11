@@ -91,8 +91,14 @@ function isActiveDiscoverConversationPartner(
     return false;
   }
 
+  if (conversation.confessionId && !conversation.matchId) {
+    return false;
+  }
+
   if (!conversation.matchId) {
-    return true;
+    // Non-match conversations such as room-originated chats or pending/pre-match flows
+    // must not hide users from Phase-1 Discover. Active matches are handled separately.
+    return false;
   }
 
   if (!match || match.isActive === false) {
