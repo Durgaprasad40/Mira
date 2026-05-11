@@ -98,6 +98,7 @@ type PendingPhase2Message = {
 // [P2_MEDIA_UPLOAD] 50ms throttle matches Phase-1 (ChatScreenInner.tsx:558).
 const P2_PROGRESS_UPDATE_INTERVAL_MS = 50;
 const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
+const SYSTEM_MESSAGE_ROW_RE = /^\[SYSTEM:[a-z_]+\]/i;
 
 function getPhase2SecureMediaExpiredAt(message: any, nowMs: number): number | null {
   if (!message?.isProtected) return null;
@@ -118,6 +119,15 @@ function shouldHideExpiredPhase2SecureMedia(message: any, nowMs: number): boolea
     typeof expiredAt === 'number' &&
     nowMs - expiredAt >= EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS
   );
+}
+
+function isPhase2NonBubbleMessageRow(message: any): boolean {
+  if (!message) return false;
+  if (message.type === 'system') return true;
+  if (message.type === 'text' && SYSTEM_MESSAGE_ROW_RE.test(message.content ?? '')) {
+    return true;
+  }
+  return shouldHideExpiredPhase2SecureMedia(message, Date.now());
 }
 
 function isLegacyPhase2TruthDareConnectionIntro(message: any): boolean {
@@ -2058,10 +2068,20 @@ export default function Phase2ChatThread() {
   const renderItem = useCallback(
     ({ item, index }: { item: any; index: number }) => {
       const isOwn = item.senderId === userId;
-      // AVATAR GROUPING: last in group when next message has different sender
-      // or this is the most recent message in the list.
-      const next = messageList[index + 1];
-      const isLastInGroup = !next || next.senderId !== item.senderId;
+      // AVATAR GROUPING: match Phase-1 by ignoring centered/hidden rows
+      // when deciding whether this is the last visible bubble in a sender run.
+      let nextBubbleIndex = index + 1;
+      while (
+        nextBubbleIndex < messageList.length &&
+        isPhase2NonBubbleMessageRow(messageList[nextBubbleIndex])
+      ) {
+        nextBubbleIndex += 1;
+      }
+      const nextVisibleBubble = messageList[nextBubbleIndex];
+      const currentIsNonBubble = isPhase2NonBubbleMessageRow(item);
+      const isLastInGroup =
+        !nextVisibleBubble || nextVisibleBubble.senderId !== item.senderId;
+      const showAvatar = !isOwn && !currentIsNonBubble && isLastInGroup;
 
       // [P2_MEDIA_UPLOAD] Optimistic pending media bubble: render through the
       // shared MessageBubble pending path (components/chat/MessageBubble.tsx
@@ -2161,7 +2181,7 @@ export default function Phase2ChatThread() {
           // internally in MediaMessage.
           requireMediaDownloadBeforeOpen
           autoDownloadMedia={false}
-          showAvatar={!isOwn && isLastInGroup}
+          showAvatar={showAvatar}
           avatarUrl={otherPhotoUrl}
           isLastInGroup={isLastInGroup}
           // PHASE-2 SECURE MEDIA: substitute Phase2ProtectedMediaBubble into
