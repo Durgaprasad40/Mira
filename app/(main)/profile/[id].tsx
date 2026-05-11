@@ -533,10 +533,7 @@ export default function ViewProfileScreen() {
   const presenceStatus = presence?.status;
 
   const displayPhotos = useMemo(() => getRenderableProfilePhotos(profile?.photos), [profile?.photos]);
-  const visiblePhotos = useMemo(
-    () => (isConfessPreview ? displayPhotos.slice(0, 2) : displayPhotos),
-    [displayPhotos, isConfessPreview],
-  );
+  const visiblePhotos = displayPhotos;
   if (__DEV__) {
     // [PHOTO_DEBUG] P0: verify backendCount === renderCount on profile screen.
     // Remove after validation.
@@ -816,6 +813,11 @@ export default function ViewProfileScreen() {
   const floatingActionRowBottom =
     actionRowBottom + (!isPhase2 ? PHASE1_OPEN_PROFILE_ACTION_LIFT : 0);
   const actionScrollPaddingBottom = floatingActionRowBottom + actionRowClearance;
+  const scrollBottomPadding = showActionButtons
+    ? actionScrollPaddingBottom
+    : isConfessPreview
+      ? insets.bottom + 40
+      : undefined;
 
   return (
     <View style={styles.rootContainer}>
@@ -846,7 +848,7 @@ export default function ViewProfileScreen() {
         onScroll={handleScroll}
         scrollEventThrottle={16}
         contentContainerStyle={
-          showActionButtons ? { paddingBottom: actionScrollPaddingBottom } : undefined
+          scrollBottomPadding ? { paddingBottom: scrollBottomPadding } : undefined
         }
       >
         {/* Header: No back button, no overlay, just the 3-dots menu in top-right */}
@@ -1035,13 +1037,6 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {isConfessPreview && (
-          <View style={styles.previewOnlyBanner}>
-            <Ionicons name="eye-outline" size={18} color={COLORS.textMuted} />
-            <Text style={styles.previewOnlyText}>Preview Only</Text>
-          </View>
-        )}
-
         {/* Phase-1 premium polish: header metadata row.
             - Verified is rendered as a premium standalone pill (success
               tint) — feels like a certification mark, not a generic chip.
@@ -1052,7 +1047,7 @@ export default function ViewProfileScreen() {
             - "Photos Added", "Profile Complete", "Popular" and the
               "+N" overflow are intentionally not rendered to keep the
               metadata clean and premium. */}
-        {!isConfessPreview && (() => {
+        {(() => {
           const isOnline = presenceStatus === 'online';
           const isRecentlyActive = presenceStatus === 'active_today';
           const showPresence = isOnline || isRecentlyActive;
@@ -1175,7 +1170,7 @@ export default function ViewProfileScreen() {
         {/* ========== PHASE-1 SECTION ORDER: Bio -> Relationship goal -> Quick picks -> Lifestyle -> Family -> Interests -> Work & education -> Religion / Values ========== */}
 
         {/* Phase-1: Bio comes first after identity so the profile reads human before categorical. */}
-        {!isPhase2 && !isConfessPreview && profile.bio && (
+        {!isPhase2 && profile.bio && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Bio</Text>
             <Text style={styles.bio}>{profile.bio}</Text>
@@ -1184,7 +1179,7 @@ export default function ViewProfileScreen() {
 
         {/* Phase-1 Relationship goal: relationshipIntent chips only.
             Gender preferences (Women / Men / Everyone) are not relationship goals. */}
-        {!isPhase2 && !isConfessPreview && (() => {
+        {!isPhase2 && (() => {
           const relIntent: string[] = profile.relationshipIntent || [];
           if (relIntent.length === 0) return null;
 
@@ -1209,7 +1204,7 @@ export default function ViewProfileScreen() {
         })()}
 
         {/* Phase-1 Quick picks / Prompts. Existing prompt cards, now placed after intent. */}
-        {!isPhase2 && !isConfessPreview && profile.profilePrompts && profile.profilePrompts.length > 0 && (
+        {!isPhase2 && profile.profilePrompts && profile.profilePrompts.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Quick picks</Text>
             {profile.profilePrompts.slice(0, 3).map((prompt: { question: string; answer: string }, idx: number) => (
@@ -1223,7 +1218,7 @@ export default function ViewProfileScreen() {
 
         {/* Phase-1 Lifestyle and Family. Single Parent intent stays in Relationship goal;
             Family only renders when a real kids/family field exists. */}
-        {!isPhase2 && !isConfessPreview && (() => {
+        {!isPhase2 && (() => {
           const kidsLabel = profile.kids
             ? KIDS_OPTIONS.find((o) => o.value === profile.kids)?.label ?? null
             : null;
@@ -1281,7 +1276,7 @@ export default function ViewProfileScreen() {
         })()}
 
         {/* Shared Interests - Phase-1 interest context, placed inside the Interests / Activities band. */}
-        {!isConfessPreview && (() => {
+        {(() => {
           // P1-3: In live mode, pull current viewer's activities from the Convex
           // currentViewer query (was previously hardcoded to [] outside demo mode,
           // which meant "You both enjoy" never appeared for real users).
@@ -1312,7 +1307,7 @@ export default function ViewProfileScreen() {
         })()}
 
         {/* Interests / Activities - Phase-1 */}
-        {!isPhase2 && !isConfessPreview && Array.isArray(profile.activities) && profile.activities.length > 0 && (
+        {!isPhase2 && Array.isArray(profile.activities) && profile.activities.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Interests</Text>
             <View style={styles.chips}>
@@ -1331,7 +1326,7 @@ export default function ViewProfileScreen() {
         )}
 
         {/* Phase-1 Work & education, then Religion / Values. Empty groups are skipped. */}
-        {!isPhase2 && !isConfessPreview && (() => {
+        {!isPhase2 && (() => {
           const religionLabel = profile.religion
             ? RELIGION_OPTIONS.find((o) => o.value === profile.religion)?.label ?? null
             : null;
@@ -1421,7 +1416,7 @@ export default function ViewProfileScreen() {
         {/* Common Places - Phase-1 only, privacy-safe shared locations.
             Kept after the requested profile-data structure so it does not
             interrupt the main opened-profile reading order. */}
-        {!isPhase2 && !isConfessPreview && sharedPlaces && sharedPlaces.length > 0 && (
+        {!isPhase2 && sharedPlaces && sharedPlaces.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Common Places</Text>
             <View style={styles.chips}>
@@ -1432,6 +1427,13 @@ export default function ViewProfileScreen() {
                 </View>
               ))}
             </View>
+          </View>
+        )}
+
+        {isConfessPreview && (
+          <View style={styles.previewOnlyBanner}>
+            <Ionicons name="eye-outline" size={18} color={COLORS.textMuted} />
+            <Text style={styles.previewOnlyText}>Preview Only</Text>
           </View>
         )}
 

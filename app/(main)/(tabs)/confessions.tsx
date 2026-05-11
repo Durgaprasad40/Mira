@@ -463,6 +463,8 @@ export default function ConfessionsScreen() {
         authorPhotoUrl: item.authorPhotoUrl,
         authorAge: item.authorAge,
         authorGender: item.authorGender,
+        taggedUserId: item.taggedUserId,
+        taggedUserName: item.taggedUserName,
         createdAt: item.createdAt,
         replyCount: item.replyCount ?? 0,
         reactionCount: item.reactionCount ?? 0,
@@ -828,6 +830,7 @@ export default function ConfessionsScreen() {
           params: {
             id: profileUserId,
             source: 'confess_tag',
+            mode: 'confess_preview',
             fromConfessionId: confessionId,
           },
         } as any,
@@ -854,6 +857,7 @@ export default function ConfessionsScreen() {
           params: {
             id: profileUserId,
             source: 'confess_tag',
+            mode: 'confess_preview',
             fromConfessionId: confessionId,
           },
         } as any,
@@ -1073,6 +1077,8 @@ export default function ConfessionsScreen() {
         const trendingIsAnonymous = trendingVisibility === 'anonymous';
         const trendingIsBlurPhoto = trendingVisibility === 'blur_photo' || trendingVisibility === 'blur';
         const trendingGenderSymbol = getConfessGenderSymbol(trendingHero.authorGender);
+        const trendingTaggedUserId = (trendingHero as any).taggedUserId as string | undefined;
+        const trendingTaggedUserName = ((trendingHero as any).taggedUserName as string | undefined)?.trim();
         return (
         <TouchableOpacity
           style={styles.trendingCard}
@@ -1142,6 +1148,23 @@ export default function ConfessionsScreen() {
           {/* Confession text */}
           <Text maxFontSizeMultiplier={1.2} style={styles.trendingText} numberOfLines={3}>{trendingHero.text}</Text>
 
+          {trendingTaggedUserId && trendingTaggedUserName ? (
+            <TouchableOpacity
+              style={styles.heroTaggedRow}
+              onPress={(event) => {
+                event.stopPropagation?.();
+                void handleTagPress(trendingHero.id, trendingTaggedUserId);
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="heart" size={12} color={COLORS.primary} />
+              <Text maxFontSizeMultiplier={1.2} style={styles.heroTaggedLabel}>Confess-to:</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.heroTaggedName} numberOfLines={1}>
+                {trendingTaggedUserName}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
           {/* Meta row */}
           <View style={styles.trendingMeta}>
             <View style={styles.trendingMetaItem}>
@@ -1167,17 +1190,19 @@ export default function ConfessionsScreen() {
         const myIsBlurPhoto = myVisibility === 'blur_photo' || myVisibility === 'blur';
         const myGenderSymbol = getConfessGenderSymbol((myLatestConfession as any).authorGender);
         const reviewStatus = getReviewBadgeStatus(myAny);
+        const myConfessionId = myAny.id || myAny._id;
+        const myTaggedUserId = myAny.taggedUserId as string | undefined;
+        const myTaggedUserName = (myAny.taggedUserName as string | undefined)?.trim();
         return (
         <TouchableOpacity
           style={styles.myConfessionCard}
           activeOpacity={0.88}
           onPress={() => {
-            const confessionId = (myLatestConfession as any).id || (myLatestConfession as any)._id;
-            if (__DEV__) console.log('[CONFESS_CARD_PRESS]', { screen: 'confessions', source: 'my-confession', hasId: !!confessionId });
-            handleOpenThread(confessionId);
+            if (__DEV__) console.log('[CONFESS_CARD_PRESS]', { screen: 'confessions', source: 'my-confession', hasId: !!myConfessionId });
+            handleOpenThread(myConfessionId);
           }}
           onLongPress={() => handleOpenMenuSheet(
-            (myLatestConfession as any).id || (myLatestConfession as any)._id,
+            myConfessionId,
             (myLatestConfession as any).userId
           )}
           delayLongPress={300}
@@ -1242,6 +1267,23 @@ export default function ConfessionsScreen() {
             {myLatestConfession.text}
           </Text>
 
+          {myConfessionId && myTaggedUserId && myTaggedUserName ? (
+            <TouchableOpacity
+              style={styles.heroTaggedRow}
+              onPress={(event) => {
+                event.stopPropagation?.();
+                void handleTagPress(myConfessionId, myTaggedUserId);
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="heart" size={12} color={COLORS.primary} />
+              <Text maxFontSizeMultiplier={1.2} style={styles.heroTaggedLabel}>Confess-to:</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.heroTaggedName} numberOfLines={1}>
+                {myTaggedUserName}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
           {/* Meta row */}
           <View style={styles.myConfessionMeta}>
             <View style={styles.myConfessionMetaItem}>
@@ -1301,7 +1343,7 @@ export default function ConfessionsScreen() {
         </TouchableOpacity>
       )}
     </View>
-  ), [canPostNow, countdownMs, formatCountdown, handleOpenConnectRequests, handleOpenTaggedSection, handleOpenThread, myLatestConfession, pendingConnectBadgeCount, taggedBadgeCount, taggedConfessions.length, trendingHero]);
+  ), [canPostNow, countdownMs, formatCountdown, handleOpenConnectRequests, handleOpenTaggedSection, handleOpenMenuSheet, handleOpenThread, handleTagPress, myLatestConfession, pendingConnectBadgeCount, taggedBadgeCount, taggedConfessions.length, trendingHero]);
 
   if (isLoading && confessions.length === 0) {
     return (
@@ -2030,6 +2072,29 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: COLORS.text,
     marginBottom: SPACING.sm,
+  },
+  heroTaggedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    alignSelf: 'flex-start',
+    marginBottom: SPACING.sm,
+    paddingVertical: SPACING.xxs + 1,
+    paddingHorizontal: SPACING.sm + 2,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,107,107,0.05)',
+  },
+  heroTaggedLabel: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: '500',
+    color: COLORS.textMuted,
+  },
+  heroTaggedName: {
+    maxWidth: moderateScale(180, 0.4),
+    fontSize: FONT_SIZE.sm,
+    fontWeight: '600',
+    color: COLORS.primary,
+    textDecorationLine: 'underline',
   },
   trendingMeta: {
     flexDirection: 'row',

@@ -53,6 +53,7 @@ function getReviewBadgeStatus(confession?: any): ConfessionModerationStatus {
 export default function MyConfessionsScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
 
   const demoConfessions = useConfessionStore((s) => s.confessions);
@@ -68,6 +69,9 @@ export default function MyConfessionsScreen() {
 
   // Delete mutation
   const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
+  const consumeTagProfileViewGrantMutation = useMutation(
+    api.confessions.consumeConfessionTagProfileViewGrant
+  );
 
   // Menu state
   const [showMenuSheet, setShowMenuSheet] = useState(false);
@@ -91,6 +95,8 @@ export default function MyConfessionsScreen() {
         authorPhotoUrl: confession.authorPhotoUrl,
         authorAge: confession.authorAge,
         authorGender: confession.authorGender,
+        taggedUserId: confession.taggedUserId,
+        taggedUserName: confession.taggedUserName,
         replyCount: confession.replyCount ?? 0,
         reactionCount: confession.reactionCount ?? 0,
         createdAt: confession.createdAt,
@@ -117,6 +123,8 @@ export default function MyConfessionsScreen() {
         authorPhotoUrl: confession.authorPhotoUrl,
         authorAge: confession.authorAge,
         authorGender: confession.authorGender,
+        taggedUserId: confession.taggedUserId,
+        taggedUserName: confession.taggedUserName,
         replyCount: confession.replyCount ?? 0,
         reactionCount: confession.reactionCount ?? 0,
         createdAt: confession.createdAt,
@@ -140,6 +148,58 @@ export default function MyConfessionsScreen() {
     setMenuTargetConfession({ id: confessionId, authorId });
     setShowMenuSheet(true);
   }, []);
+
+  const handleTagPress = useCallback(async (
+    confessionId: string,
+    profileUserId: string | undefined
+  ) => {
+    if (!confessionId || !profileUserId) return;
+
+    if (isDemoMode) {
+      safePush(
+        router,
+        {
+          pathname: '/(main)/profile/[id]',
+          params: {
+            id: profileUserId,
+            source: 'confess_tag',
+            mode: 'confess_preview',
+            fromConfessionId: confessionId,
+          },
+        } as any,
+        'myConfessions->profile(tag)'
+      );
+      return;
+    }
+
+    if (!token) {
+      Alert.alert('Profile unavailable');
+      return;
+    }
+
+    try {
+      await consumeTagProfileViewGrantMutation({
+        token,
+        confessionId: confessionId as any,
+        profileUserId: profileUserId as any,
+      });
+      safePush(
+        router,
+        {
+          pathname: '/(main)/profile/[id]',
+          params: {
+            id: profileUserId,
+            source: 'confess_tag',
+            mode: 'confess_preview',
+            fromConfessionId: confessionId,
+          },
+        } as any,
+        'myConfessions->profile(tag)'
+      );
+    } catch {
+      Alert.alert('Profile unavailable');
+    }
+  }, [consumeTagProfileViewGrantMutation, router, token]);
 
   const handleCloseMenuSheet = useCallback(() => {
     setShowMenuSheet(false);
@@ -234,6 +294,8 @@ export default function MyConfessionsScreen() {
                 authorPhotoUrl={item.authorPhotoUrl}
                 authorAge={item.authorAge}
                 authorGender={item.authorGender}
+                taggedUserId={item.taggedUserId}
+                taggedUserName={item.taggedUserName}
                 createdAt={item.createdAt}
                 isExpired={item.isExpired}
                 expiredDateLabel={item.isExpired ? formatExpiredDateLabel(item.expiresAt) : undefined}
@@ -248,6 +310,11 @@ export default function MyConfessionsScreen() {
                 onCardPress={() => handleOpenThread(item.id)}
                 onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
                 onReact={() => {}}
+                onTagPress={
+                  item.taggedUserId
+                    ? () => void handleTagPress(item.id, item.taggedUserId)
+                    : undefined
+                }
               />
             </View>
           );

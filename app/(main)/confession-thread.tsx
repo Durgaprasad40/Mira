@@ -1050,6 +1050,7 @@ export default function ConfessionThreadScreen() {
           params: {
             id: profileUserId,
             source: 'confess_tag',
+            mode: 'confess_preview',
             fromConfessionId: sourceConfessionId,
           },
         } as any,
@@ -1076,6 +1077,7 @@ export default function ConfessionThreadScreen() {
           params: {
             id: profileUserId,
             source: 'confess_tag',
+            mode: 'confess_preview',
             fromConfessionId: sourceConfessionId,
           },
         } as any,

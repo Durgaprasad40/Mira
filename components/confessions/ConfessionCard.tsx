@@ -234,10 +234,10 @@ export default function ConfessionCard({
   // Author remains anonymous, but target is visible
   const getTagDisplayText = (): string | null => {
     if (!taggedUserId) return null;
+    const safeTaggedUserName = taggedUserName?.trim();
+    if (!safeTaggedUserName) return null;
     if (viewerId === taggedUserId) return 'You';
-    // Show actual name to all viewers if available
-    if (taggedUserName) return taggedUserName;
-    return 'Someone';
+    return safeTaggedUserName;
   };
   const tagDisplayText = getTagDisplayText();
 
