@@ -2,13 +2,12 @@
  * Phase2CameraPhotoSheet — secure media review + options bottom sheet for
  * Phase-2 (Deep Connect) Messages. UX parity with Phase-1 CameraPhotoSheet:
  *   - Thumbnail preview of the captured/picked photo or video
- *   - View-once delivery for all Phase-2 photo/video sends
+ *   - Normal / view-once / timed delivery options
  *   - Cancel / Send actions
  *
  * Differences from Phase-1:
  *   - Uses INCOGNITO_COLORS (Phase-2 dark navy + rose/pink primary)
- *   - Confirm payload always uses timer=0; backend also enforces one-time
- *     delivery so older clients cannot send permanently reopenable visuals.
+ *   - Confirm payload uses Phase-2 privateMessages fields only.
  */
 import React, { useState, useEffect } from 'react';
 import {
@@ -31,8 +30,10 @@ const SHEET_HEIGHT = SCREEN_HEIGHT * 0.5;
 const C = INCOGNITO_COLORS;
 
 export interface Phase2CameraPhotoOptions {
-  /** Phase-2 photo/video is always one-time. */
-  timer: number;
+  /** Protected media timer in seconds. 0 means normal unless viewOnce is true. */
+  timer: 0 | 30 | 60;
+  /** True for one successful recipient view, with no countdown timer. */
+  viewOnce: boolean;
   /** Phase-2 backend value */
   viewingMode: 'tap' | 'hold';
 }
@@ -46,7 +47,10 @@ interface Phase2CameraPhotoSheetProps {
 }
 
 const TIMER_OPTIONS: ReadonlyArray<{ label: string; value: number }> = [
-  { label: 'View once', value: 0 },
+  { label: 'Normal', value: 0 },
+  { label: 'View once', value: -1 },
+  { label: '30s', value: 30 },
+  { label: '60s', value: 60 },
 ];
 
 export function Phase2CameraPhotoSheet({
@@ -66,7 +70,13 @@ export function Phase2CameraPhotoSheet({
 
   const handleSend = () => {
     if (!imageUri) return;
-    onConfirm(imageUri, { timer: 0, viewingMode: 'tap' });
+    const viewOnce = timer === -1;
+    const protectedMediaTimer = viewOnce ? 0 : timer;
+    onConfirm(imageUri, {
+      timer: protectedMediaTimer as 0 | 30 | 60,
+      viewOnce,
+      viewingMode: 'tap',
+    });
     setTimer(0);
   };
 
@@ -77,7 +87,12 @@ export function Phase2CameraPhotoSheet({
 
   if (!visible || !imageUri) return null;
 
-  const subtitle = `${isVideo ? 'Video' : 'Photo'} closes after the first successful view`;
+  const subtitle =
+    timer === -1
+      ? `${isVideo ? 'Video' : 'Photo'} closes after the first successful view`
+      : timer > 0
+        ? `${isVideo ? 'Video' : 'Photo'} expires ${timer}s after it is opened`
+        : `${isVideo ? 'Video' : 'Photo'} stays protected and opens on tap`;
 
   return (
     <Modal visible={visible} transparent animationType="slide">

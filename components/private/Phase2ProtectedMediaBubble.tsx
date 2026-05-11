@@ -57,7 +57,8 @@ interface Phase2ProtectedMediaBubbleProps {
   isExpired?: boolean;
   viewedAt?: number;
   timerEndsAt?: number;
-  protectedMediaTimer?: number; // seconds; 0 = view-once
+  protectedMediaTimer?: number; // seconds; 0 = normal unless viewOnce is true
+  viewOnce?: boolean;
   protectedMediaViewingMode?: 'tap' | 'hold';
   onOpen: () => void;
   /**
@@ -85,6 +86,7 @@ export function Phase2ProtectedMediaBubble({
   viewedAt,
   timerEndsAt,
   protectedMediaTimer,
+  viewOnce = false,
   protectedMediaViewingMode,
   onOpen,
   mediaUrl,
@@ -92,19 +94,22 @@ export function Phase2ProtectedMediaBubble({
   onDownloaded,
 }: Phase2ProtectedMediaBubbleProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const timerSeconds = protectedMediaTimer ?? 0;
+  const isViewOnce = viewOnce === true;
+  const isTimed = !isViewOnce && timerSeconds > 0;
 
   const state = useMemo<'viewed' | 'expired' | 'viewing' | 'locked'>(() => {
-    if (viewedAt && (protectedMediaTimer ?? 0) === 0) return 'viewed';
     if (isExpired) return 'expired';
-    if (viewedAt && timerEndsAt) {
+    if (isViewOnce && viewedAt) return 'viewed';
+    if (isTimed && viewedAt && timerEndsAt) {
       return timerEndsAt > nowMs ? 'viewing' : 'expired';
     }
     return 'locked';
-  }, [isExpired, viewedAt, timerEndsAt, nowMs, protectedMediaTimer]);
+  }, [isExpired, isTimed, isViewOnce, viewedAt, timerEndsAt, nowMs]);
 
   // Keep the active timer card live while the viewer can still reopen it.
   useEffect(() => {
-    if (!viewedAt || !timerEndsAt || isExpired) return;
+    if (!isTimed || !viewedAt || !timerEndsAt || isExpired) return;
 
     let interval: ReturnType<typeof setInterval> | undefined;
     const syncNow = () => {
@@ -122,7 +127,7 @@ export function Phase2ProtectedMediaBubble({
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isExpired, viewedAt, timerEndsAt]);
+  }, [isExpired, isTimed, viewedAt, timerEndsAt]);
 
   // LOAD-FIRST: receiver-only download gate. Sender bypasses (they may preview
   // their own media without a network fetch — usually it's already on-device).
@@ -172,15 +177,22 @@ export function Phase2ProtectedMediaBubble({
 
   if (!isProtected) return null;
 
-  const timerLabel =
-    typeof protectedMediaTimer === 'number' && protectedMediaTimer > 0
-      ? `${protectedMediaTimer}s`
-      : 'Once';
+  const timerLabel = isViewOnce
+    ? 'Once'
+    : isTimed
+      ? `${timerSeconds}s`
+      : null;
   const activeTimerLabel =
     state === 'viewing' && timerEndsAt
       ? `${Math.max(0, Math.ceil((timerEndsAt - nowMs) / 1000))}s left`
       : timerLabel;
   const modeLabel = protectedMediaViewingMode === 'hold' ? 'Hold' : 'Tap';
+  const renderTimerBadge = (label: string | null) =>
+    label ? (
+      <View style={styles.timerBadge}>
+        <Text style={styles.timerBadgeText}>{label}</Text>
+      </View>
+    ) : null;
 
   // Frame styling shared by all states so the OUTER card looks identical
   // (size + border + radius) regardless of locked / viewing / expired.
@@ -199,9 +211,7 @@ export function Phase2ProtectedMediaBubble({
       >
         <Ionicons name="lock-closed" size={18} color="rgba(255,255,255,0.55)" />
         <Text style={styles.expiredText}>Expired</Text>
-        <View style={styles.timerBadge}>
-          <Text style={styles.timerBadgeText}>{timerLabel}</Text>
-        </View>
+        {renderTimerBadge(timerLabel)}
       </View>
     );
   }
@@ -215,9 +225,7 @@ export function Phase2ProtectedMediaBubble({
       >
         <Ionicons name="checkmark-circle" size={18} color="rgba(255,255,255,0.55)" />
         <Text style={styles.expiredText}>Viewed</Text>
-        <View style={styles.timerBadge}>
-          <Text style={styles.timerBadgeText}>{timerLabel}</Text>
-        </View>
+        {renderTimerBadge(timerLabel)}
       </View>
     );
   }
@@ -233,9 +241,7 @@ export function Phase2ProtectedMediaBubble({
       >
         <Ionicons name="shield-checkmark" size={20} color={C.primary} />
         <Text style={styles.titleText}>Tap to continue</Text>
-        <View style={styles.timerBadge}>
-          <Text style={styles.timerBadgeText}>{activeTimerLabel}</Text>
-        </View>
+        {renderTimerBadge(activeTimerLabel)}
       </Pressable>
     );
   }
@@ -268,9 +274,7 @@ export function Phase2ProtectedMediaBubble({
             <Text style={styles.titleText}>Tap to load</Text>
           </>
         )}
-        <View style={styles.timerBadge}>
-          <Text style={styles.timerBadgeText}>{timerLabel}</Text>
-        </View>
+        {renderTimerBadge(timerLabel)}
       </Pressable>
     );
   }
@@ -289,9 +293,7 @@ export function Phase2ProtectedMediaBubble({
       <Text style={styles.titleText}>
         {isOwn ? 'Tap to preview' : `${modeLabel} to view`}
       </Text>
-      <View style={styles.timerBadge}>
-        <Text style={styles.timerBadgeText}>{timerLabel}</Text>
-      </View>
+      {renderTimerBadge(timerLabel)}
     </Pressable>
   );
 }

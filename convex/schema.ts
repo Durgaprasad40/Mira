@@ -848,6 +848,7 @@ export default defineSchema({
     audioDurationMs: v.optional(v.number()),
     isProtected: v.optional(v.boolean()),
     protectedMediaTimer: v.optional(v.number()),
+    viewOnce: v.optional(v.boolean()),
     protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     protectedMediaIsMirrored: v.optional(v.boolean()),
     viewedAt: v.optional(v.number()),

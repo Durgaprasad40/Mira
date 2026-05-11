@@ -23,6 +23,7 @@ import { awardWalletCoins } from './wallet';
 // Message types that count toward unread badges (excludes system messages)
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice'];
 const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
+const PRIVATE_PROTECTED_MEDIA_TIMERS = new Set([0, 30, 60]);
 
 type PrivateMessageMediaKind = 'image' | 'video' | 'audio';
 
@@ -41,6 +42,22 @@ type PrivateSecureMediaVisibilityFields = {
   timerEndsAt?: number;
   expiredAt?: number;
 };
+
+type PrivateSecureMediaModeFields = {
+  protectedMediaTimer?: number;
+  viewOnce?: boolean;
+};
+
+function isPrivateSecureMediaViewOnce(
+  message: PrivateSecureMediaModeFields
+): boolean {
+  // New Phase-2 rows persist an explicit boolean. Legacy Phase-2 secure
+  // photos/videos were timer-0 and one-time before this field existed.
+  return (
+    message.viewOnce === true ||
+    (message.viewOnce === undefined && (message.protectedMediaTimer ?? 0) === 0)
+  );
+}
 
 function getPrivateSecureMediaExpiredAt(
   message: PrivateSecureMediaVisibilityFields,
@@ -635,9 +652,9 @@ export const getPrivateMessages = query({
         };
       }
 
-      // Phase-2 visual media is one-time by backend rule. List queries expose
+      // Phase-2 visual media is protected by backend rule. List queries expose
       // only metadata; playable photo/video URLs are returned exclusively by
-      // openPrivateSecureMedia after it atomically records the viewer's claim.
+      // openPrivateSecureMedia.
       // Keep this branch even after the cleanup cron clears imageStorageId so
       // expired secure media renders as an expired card during its grace window
       // instead of falling through as a plain "Secure photo/video" message.
@@ -652,12 +669,15 @@ export const getPrivateMessages = query({
         const expiredAt = getPrivateSecureMediaExpiredAt(m, nowMs);
         const viewerView = visualViewByMessageId.get(m._id as string);
         const viewerConsumed = !!viewerView || !!m.viewedAt;
-        const derivedExpired = !!m.isExpired || expiredAt !== null || timerEnded || viewerConsumed;
+        const isViewOnce = isPrivateSecureMediaViewOnce(m);
+        const derivedExpired =
+          !!m.isExpired || expiredAt !== null || timerEnded || (isViewOnce && viewerConsumed);
         return {
           ...baseMessage,
           isProtected: true,
           imageUrl: null,
-          protectedMediaTimer: 0,
+          protectedMediaTimer: m.protectedMediaTimer ?? 0,
+          viewOnce: isViewOnce,
           protectedMediaViewingMode: m.protectedMediaViewingMode ?? 'tap',
           protectedMediaIsMirrored: m.protectedMediaIsMirrored,
           viewedAt: viewerView?.viewedAt ?? m.viewedAt,
@@ -783,6 +803,7 @@ export const sendPrivateMessage = mutation({
     // P1-001: Protected media fields for secure photos/videos
     isProtected: v.optional(v.boolean()),
     protectedMediaTimer: v.optional(v.number()),
+    viewOnce: v.optional(v.boolean()),
     protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     protectedMediaIsMirrored: v.optional(v.boolean()),
     clientMessageId: v.optional(v.string()), // Idempotency key
@@ -790,7 +811,7 @@ export const sendPrivateMessage = mutation({
   handler: async (ctx, args) => {
     const {
       token, conversationId, type, content, imageStorageId, audioStorageId, audioDurationMs,
-      isProtected, protectedMediaTimer, protectedMediaViewingMode, protectedMediaIsMirrored,
+      isProtected, protectedMediaTimer, viewOnce, protectedMediaViewingMode, protectedMediaIsMirrored,
       clientMessageId
     } = args;
     const now = Date.now();
@@ -891,15 +912,27 @@ export const sendPrivateMessage = mutation({
       await validatePrivateMessageMediaMetadata(ctx, audioStorageId, 'audio');
     }
 
+    if (
+      protectedMediaTimer !== undefined &&
+      !PRIVATE_PROTECTED_MEDIA_TIMERS.has(protectedMediaTimer)
+    ) {
+      throw new Error('Invalid protected media timer');
+    }
+
+    const normalizedViewOnce = isVisualMedia ? viewOnce === true : viewOnce;
     const normalizedIsProtected = isVisualMedia ? true : isProtected;
-    const normalizedProtectedMediaTimer = isVisualMedia ? 0 : protectedMediaTimer;
+    const normalizedProtectedMediaTimer = isVisualMedia
+      ? normalizedViewOnce
+        ? 0
+        : protectedMediaTimer ?? 0
+      : protectedMediaTimer;
     const normalizedProtectedMediaViewingMode =
       isVisualMedia ? 'tap' : protectedMediaViewingMode;
     const normalizedProtectedMediaIsMirrored =
       isVisualMedia ? !!protectedMediaIsMirrored : protectedMediaIsMirrored;
 
     // Insert message into privateMessages table
-    // Phase-2 visual media is always protected one-time. Audio stays replayable.
+    // Phase-2 visual media is always protected. Audio stays replayable.
     const messageId = await ctx.db.insert('privateMessages', {
       conversationId,
       senderId,
@@ -910,6 +943,7 @@ export const sendPrivateMessage = mutation({
       audioDurationMs,
       isProtected: normalizedIsProtected,
       protectedMediaTimer: normalizedProtectedMediaTimer,
+      viewOnce: normalizedViewOnce,
       protectedMediaViewingMode: normalizedProtectedMediaViewingMode,
       protectedMediaIsMirrored: normalizedProtectedMediaIsMirrored,
       createdAt: now,
@@ -1704,13 +1738,23 @@ export const openPrivateSecureMedia = mutation({
       return { status: 'no_media' as const };
     }
 
+    const isViewOnce = isPrivateSecureMediaViewOnce(message);
+    const protectedMediaTimer = isViewOnce
+      ? 0
+      : message.protectedMediaTimer ?? 0;
+    const timerEnded =
+      typeof message.timerEndsAt === 'number' && message.timerEndsAt <= Date.now();
+    if (message.isExpired || timerEnded) {
+      return { status: 'no_media' as const };
+    }
+
     const existingView = await ctx.db
       .query('privateMessageMediaViews')
       .withIndex('by_message_viewer', (q) =>
         q.eq('messageId', messageId).eq('viewerUserId', viewerUserId)
       )
       .first();
-    if (existingView || message.viewedAt) {
+    if (isViewOnce && (existingView || message.viewedAt)) {
       return { status: 'already_viewed' as const };
     }
 
@@ -1719,19 +1763,14 @@ export const openPrivateSecureMedia = mutation({
       return { status: 'no_media' as const };
     }
 
-    const viewedAt = Date.now();
-    await ctx.db.insert('privateMessageMediaViews', {
-      messageId,
-      viewerUserId,
-      viewedAt,
-    });
-
     return {
       status: 'ok' as const,
       url,
       mediaType: message.type,
-      viewedAt,
-      protectedMediaTimer: 0,
+      viewedAt: existingView?.viewedAt ?? message.viewedAt,
+      timerEndsAt: message.timerEndsAt,
+      protectedMediaTimer,
+      viewOnce: isViewOnce,
       protectedMediaViewingMode: (message.protectedMediaViewingMode ?? 'tap') as 'tap' | 'hold',
       protectedMediaIsMirrored: !!message.protectedMediaIsMirrored,
     };
@@ -1863,13 +1902,47 @@ export const markPrivateSecureMediaViewed = mutation({
       )
       .first();
 
-    // Skip if already viewed (idempotent)
+    const isViewOnce = isPrivateSecureMediaViewOnce(message);
+    const protectedMediaTimer = isViewOnce
+      ? 0
+      : message.protectedMediaTimer ?? 0;
+    if (!PRIVATE_PROTECTED_MEDIA_TIMERS.has(protectedMediaTimer)) {
+      return { success: false, error: 'invalid_timer' };
+    }
+
+    const timerEnded =
+      typeof message.timerEndsAt === 'number' && message.timerEndsAt <= now;
+    if (message.isExpired || timerEnded) {
+      return {
+        success: false,
+        error: 'expired',
+        viewedAt: existingView?.viewedAt ?? message.viewedAt,
+        timerEndsAt: message.timerEndsAt,
+      };
+    }
+
+    // Skip if already viewed (idempotent), but preserve/repair a timed
+    // deadline so reopen resumes the same countdown instead of resetting.
     if (existingView || message.viewedAt) {
+      let timerEndsAt = message.timerEndsAt;
+      const patch: { viewedAt?: number; timerEndsAt?: number } = {};
+
+      if (!message.viewedAt) {
+        patch.viewedAt = existingView?.viewedAt ?? now;
+      }
+      if (protectedMediaTimer > 0 && !timerEndsAt) {
+        timerEndsAt = now + protectedMediaTimer * 1000;
+        patch.timerEndsAt = timerEndsAt;
+      }
+      if (Object.keys(patch).length > 0) {
+        await ctx.db.patch(messageId, patch);
+      }
+
       return {
         success: true,
         alreadyViewed: true,
-        viewedAt: existingView?.viewedAt ?? message.viewedAt,
-        timerEndsAt: message.timerEndsAt,
+        viewedAt: existingView?.viewedAt ?? message.viewedAt ?? patch.viewedAt,
+        timerEndsAt,
       };
     }
 
@@ -1879,12 +1952,20 @@ export const markPrivateSecureMediaViewed = mutation({
       viewedAt: now,
     });
 
-    console.log('[markPrivateSecureMediaViewed]', {
-      messageId: (messageId as string)?.slice(-8),
-      timerSeconds: 0,
+    const timerEndsAt =
+      protectedMediaTimer > 0 ? now + protectedMediaTimer * 1000 : undefined;
+    await ctx.db.patch(messageId, {
+      viewedAt: now,
+      ...(timerEndsAt ? { timerEndsAt } : {}),
     });
 
-    return { success: true, viewedAt: now, timerEndsAt: undefined };
+    console.log('[markPrivateSecureMediaViewed]', {
+      messageId: (messageId as string)?.slice(-8),
+      timerSeconds: protectedMediaTimer,
+      viewOnce: isViewOnce,
+    });
+
+    return { success: true, viewedAt: now, timerEndsAt };
   },
 });
 

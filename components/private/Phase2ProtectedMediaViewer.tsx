@@ -50,6 +50,7 @@ interface MessageData {
     localUri?: string;
     mediaType?: 'photo' | 'video';
     timer?: number;
+    viewOnce?: boolean;
     viewingMode?: 'tap' | 'hold';
     isMirrored?: boolean;
     expiresDurationMs?: number;
@@ -303,15 +304,15 @@ export function Phase2ProtectedMediaViewer({
 
   // Get message properties
   const timerSeconds = message?.protectedMedia?.timer ?? 0;
+  const isViewOnce = message?.protectedMedia?.viewOnce === true;
+  const isTimed = !isViewOnce && timerSeconds > 0;
   const viewingMode = message?.protectedMedia?.viewingMode ?? 'tap';
   const isHoldMode = viewingMode === 'hold';
   const mediaUri = message?.protectedMedia?.localUri;
   const isVideo = message?.protectedMedia?.mediaType === 'video';
   const isMirrored = message?.protectedMedia?.isMirrored === true;
-  const expiresDurationMs = message?.protectedMedia?.expiresDurationMs ?? (timerSeconds * 1000);
-
-  // ONCE view detection: timer === 0 means view once then expire
-  const isOnce = timerSeconds === 0;
+  const expiresDurationMs =
+    message?.protectedMedia?.expiresDurationMs ?? (isTimed ? timerSeconds * 1000 : 0);
 
   // Calculate elapsed time for video resume (wall-clock based)
   // elapsedMs = how long since first view started
@@ -393,12 +394,12 @@ export function Phase2ProtectedMediaViewer({
     clearTimer();
 
     // ONCE view: expire immediately on close (but NOT for sender viewing their own media)
-    if (isOnce && !isSenderViewing && !hasExpiredRef.current && message && !effectiveIsExpired) {
+    if (isViewOnce && !isSenderViewing && !hasExpiredRef.current && message && !effectiveIsExpired) {
       doMarkExpired();
     }
 
     onClose();
-  }, [isOnce, isSenderViewing, message, effectiveIsExpired, clearTimer, doMarkExpired, onClose]);
+  }, [isViewOnce, isSenderViewing, message, effectiveIsExpired, clearTimer, doMarkExpired, onClose]);
 
   // Android back button handler (only for tap mode)
   useEffect(() => {
@@ -416,7 +417,7 @@ export function Phase2ProtectedMediaViewer({
   // Uses module-level Set to persist across component unmounts.
   // SENDER-VIEW-FIX: Skip expiration logic when sender is viewing
   useEffect(() => {
-    if (!visible || !isOnce || !isHoldMode) return;
+    if (!visible || !isViewOnce || !isHoldMode) return;
     // SENDER-VIEW-FIX: Sender viewing should never trigger ONCE expiration
     if (isSenderViewing) return;
 
@@ -440,7 +441,7 @@ export function Phase2ProtectedMediaViewer({
     return () => {
       doMarkExpired();
     };
-  }, [visible, isOnce, isHoldMode, messageId, doMarkExpired, isSenderViewing]);
+  }, [visible, isViewOnce, isHoldMode, messageId, doMarkExpired, isSenderViewing]);
 
   // SAFETY GUARD: If viewer opens but message is already expired, close immediately
   // This prevents any race condition from showing an expired photo
@@ -474,7 +475,7 @@ export function Phase2ProtectedMediaViewer({
   useEffect(() => {
     if (!visible && wasViewedThisSessionRef.current) {
       // ONCE + TAP: expire on close (but NOT for sender viewing their own media)
-      if (isOnce && !isHoldMode && !isSenderViewing && !hasExpiredRef.current) {
+      if (isViewOnce && !isHoldMode && !isSenderViewing && !hasExpiredRef.current) {
         doMarkExpired();
       }
 
@@ -492,7 +493,7 @@ export function Phase2ProtectedMediaViewer({
       setLocalIsExpired(false);
       clearTimer();
     }
-  }, [visible, isOnce, isHoldMode, isSenderViewing, clearTimer, doMarkExpired]);
+  }, [visible, isViewOnce, isHoldMode, isSenderViewing, clearTimer, doMarkExpired]);
 
   // TIMER-FIX: Mark as viewed ONLY when media is actually ready to display
   // For videos: wait for SecureVideoPlayer.onReady callback
@@ -509,29 +510,29 @@ export function Phase2ProtectedMediaViewer({
     // PHASE-1 PARITY FIX: Prevent duplicate calls
     if (hasMarkedViewedRef.current) return;
 
-    // Only set timerEndsAt if not already set
-    if (!effectiveViewedAt && !effectiveTimerEndsAt) {
-      hasMarkedViewedRef.current = true;
+    const shouldMarkViewed = isTimed ? !effectiveTimerEndsAt : !effectiveViewedAt;
+    if (!shouldMarkViewed) return;
 
-      if (isBackendMessage && token) {
-        // Backend message: call mutation
-        markViewedMutation({ token, messageId: messageId as Id<'privateMessages'> })
-          .then((result: any) => {
-            if (result?.success) {
-              // Update local state for immediate UI update
-              setLocalViewedAt(result.viewedAt);
-              setLocalTimerEndsAt(result.timerEndsAt);
-            }
-          })
-          .catch((err) => {
-            if (__DEV__) console.warn('[SECURE_VIEWER] markViewed error:', err);
-          });
-      } else {
-        // Local message: use store action
-        markSecurePhotoViewed(conversationId, messageId);
-      }
+    hasMarkedViewedRef.current = true;
+
+    if (isBackendMessage && token) {
+      // Backend message: call mutation
+      markViewedMutation({ token, messageId: messageId as Id<'privateMessages'> })
+        .then((result: any) => {
+          if (result?.success) {
+            // Update local state for immediate UI update
+            setLocalViewedAt(result.viewedAt);
+            setLocalTimerEndsAt(result.timerEndsAt);
+          }
+        })
+        .catch((err) => {
+          if (__DEV__) console.warn('[SECURE_VIEWER] markViewed error:', err);
+        });
+    } else {
+      // Local message: use store action
+      markSecurePhotoViewed(conversationId, messageId);
     }
-  }, [visible, message, effectiveIsExpired, effectiveViewedAt, effectiveTimerEndsAt, isMediaReady, isBackendMessage, token, messageId, conversationId, markViewedMutation, markSecurePhotoViewed, isSenderViewing]);
+  }, [visible, message, effectiveIsExpired, effectiveViewedAt, effectiveTimerEndsAt, isTimed, isMediaReady, isBackendMessage, token, messageId, conversationId, markViewedMutation, markSecurePhotoViewed, isSenderViewing]);
 
   // Countdown timer - uses ref to read timerEndsAt (avoids stale closure)
   useEffect(() => {
@@ -544,12 +545,14 @@ export function Phase2ProtectedMediaViewer({
       return;
     }
 
+    if (!isTimed) {
+      setTimeLeft(null);
+      setTimerLabel('');
+      return;
+    }
+
     // If timerEndsAt not set yet, wait for it
     if (!effectiveTimerEndsAt) {
-      if (timerSeconds === 0) {
-        setTimeLeft(null);
-        setTimerLabel('');
-      }
       return;
     }
 
@@ -576,10 +579,10 @@ export function Phase2ProtectedMediaViewer({
     };
 
     updateTimeLeft();
-    timerRef.current = setInterval(updateTimeLeft, 100);
+    timerRef.current = setInterval(updateTimeLeft, 1000);
 
     return () => clearTimer();
-  }, [visible, effectiveTimerEndsAt, effectiveIsExpired, timerSeconds, clearTimer, doMarkExpired]);
+  }, [visible, effectiveTimerEndsAt, effectiveIsExpired, isTimed, clearTimer, doMarkExpired]);
 
   // Cleanup on unmount
   useEffect(() => {
