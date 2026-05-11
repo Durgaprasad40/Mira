@@ -2943,8 +2943,17 @@ export const setPhase2OnboardingCompleted = mutation({
       return { success: false, error: 'incomplete_section1_prompts' as const };
     }
 
+    // DEEPCONNECT-ELIGIBILITY-FIX: Flip the discovery eligibility flag at the
+    // same point Phase-2 completion is recorded. `convex/privateDiscover.ts`
+    // (getProfiles) drops candidates whose `isSetupComplete !== true`, so a
+    // successfully-completed user must have this set or they will be invisible
+    // to peers in Deep Connect. Previously this flag was only flipped by the
+    // one-time `privateProfilesBackfill.backfillSetupComplete` migration,
+    // which left users completing Phase-2 after the backfill ran in a
+    // permanent "complete-but-hidden" state.
     await ctx.db.patch(privateProfile._id, {
       phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
+      isSetupComplete: true,
       updatedAt: Date.now(),
     });
 

@@ -1627,7 +1627,14 @@ export const upsertByAuthId = mutation({
       privateDesireTagKeys,
       privateBoundaries: args.privateBoundaries ?? [],
       revealPolicy: args.revealPolicy ?? 'mutual_only',
-      isSetupComplete: args.isSetupComplete ?? false,
+      // DEEPCONNECT-ELIGIBILITY-FIX: Preserve an already-complete profile's
+      // discovery eligibility when the client omits `isSetupComplete` on edit.
+      // Previously this fell back to `false`, silently knocking a completed
+      // profile out of Deep Connect every time the client called the upsert
+      // path without re-asserting the flag (e.g. minor edits, partial syncs).
+      // Order: explicit arg overrides; otherwise keep whatever was on the
+      // existing row; only on first-create with no flag, default to false.
+      isSetupComplete: args.isSetupComplete ?? existing?.isSetupComplete ?? false,
       hobbies: args.hobbies ?? [],
       isVerified: args.isVerified ?? false,
       // Phase-2 Onboarding Step 3: Prompt answers
