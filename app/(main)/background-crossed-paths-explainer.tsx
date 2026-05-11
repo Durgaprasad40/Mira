@@ -2,19 +2,20 @@
  * Background Crossed Paths — Explainer modal (Phase-3)
  *
  * Strict contract:
- *   - When the client-side feature gate is OFF (current default), this screen
- *     is purely informational. The "continue" button only dismisses; it
- *     NEVER calls a consent mutation, NEVER asks for any OS permission, and
- *     NEVER starts a TaskManager task.
- *   - When the gate flips ON (a future release), the "continue" button hands
- *     off to `useBackgroundLocation.enableBackgroundCrossedPaths()`, which
+ *   - When the client-side feature gate is ON (current default), the
+ *     "continue" button hands off to
+ *     `useBackgroundLocation.enableBackgroundCrossedPaths()`, which
  *     orchestrates: foreground permission → server consent → background
  *     permission → platform-specific server flag → start task. The flow
  *     fail-closes and rolls back on any step failure.
- *   - This screen ITSELF still never directly calls Location APIs or
+ *   - When the gate is OFF (kill switch), this screen falls back to a
+ *     purely informational mode: the "continue" button only dismisses; it
+ *     NEVER calls a consent mutation, NEVER asks for any OS permission, and
+ *     NEVER starts a TaskManager task.
+ *   - This screen ITSELF never directly calls Location APIs or
  *     TaskManager; all OS-touching code lives in the hook.
  *
- * Reached from: Nearby Settings → "Enable background crossed paths".
+ * Reached from: Nearby Settings → "Allow background".
  */
 import React, { useState, useCallback } from 'react';
 import {
@@ -73,7 +74,7 @@ export default function BackgroundCrossedPathsExplainerScreen() {
     try {
       const result = await enableBackgroundCrossedPaths();
       if (result.ok) {
-        Toast.show('Background crossed paths enabled');
+        Toast.show('Background detection enabled');
         if (router.canGoBack()) router.back();
       } else {
         // Map structured failure reasons to user-facing toasts.
@@ -89,7 +90,7 @@ export default function BackgroundCrossedPathsExplainerScreen() {
             break;
           case 'consent_failed':
             if ((result.message || '').includes('foreground_consent_required')) {
-              Toast.show('Enable Nearby first to continue.');
+              Toast.show('Turn on Nearby first to use background detection.');
             } else if ((result.message || '').includes('feature_flag_off')) {
               Toast.show('This feature is not available yet.');
             } else {
@@ -105,7 +106,7 @@ export default function BackgroundCrossedPathsExplainerScreen() {
           case 'demo_mode':
           case 'not_authenticated':
           default:
-            Toast.show('Could not enable background crossed paths.');
+            Toast.show('Could not enable background detection.');
             break;
         }
       }

@@ -25,34 +25,30 @@ function loadBackgroundTaskModule(): typeof import('expo-background-task') | nul
 }
 
 /**
- * Background Crossed Paths — Phase-2 client foundation
+ * Background Crossed Paths — Phase-3 client surface
  *
- * UI/consent surface ONLY. This module deliberately ships with the feature
- * gated OFF and exposes NO entry points to the OS background-location APIs.
+ * Real background-location opt-in is now wired end-to-end:
+ *   - backend `featureFlags.bgCrossedPathsEnabled` row (admin-seeded)
+ *   - native ACCESS_BACKGROUND_LOCATION + FOREGROUND_SERVICE_LOCATION (Android)
+ *   - iOS Significant Location Change task (registered via expo-location)
+ *   - Android Discovery Mode task via TaskManager
+ *   - `acceptBackgroundLocationConsent` mutation on explicit ON-flip
  *
- * Phase-3 (later) will:
- *   - flip the backend `bgCrossedPathsEnabled` feature flag,
- *   - add ACCESS_BACKGROUND_LOCATION + FOREGROUND_SERVICE_LOCATION manifests,
- *   - register the iOS Significant Location Change task,
- *   - register the Android Discovery Mode task via TaskManager,
- *   - and only then call `acceptBackgroundLocationConsent` on a real ON-flip.
- *
- * Until that happens, the in-app toggle remains in a "Coming soon" state and
- * the only consent mutation reachable from the UI is the always-allowed
- * `revokeBackgroundLocationConsent` (so any consent ever recorded can still
- * be cleared from this screen).
+ * The toggle remains gated by both this client flag AND the backend feature
+ * flag, so the backend can still freeze writes if needed. Revoke
+ * (`revokeBackgroundLocationConsent`) is always reachable so consent can be
+ * cleared regardless of feature gate state.
  */
 
 /**
- * Client-side mirror of the backend `featureFlags.bgCrossedPathsEnabled` row.
+ * Client-side gate for the Background Crossed Paths surface.
  *
- * MUST stay `false` for the entire Phase-2 milestone. Flipping this to true
- * without the corresponding native + manifest work in Phase-3 would still
- * not actually request OS permissions, but it would unlock the consent
- * mutation in the UI — which is reserved for the Phase-3 unlock so the two
- * sides ship together.
+ * When `true`, the Settings UI exposes the explicit enable flow that triggers
+ * `acceptBackgroundLocationConsent` and the OS permission prompts. The
+ * backend independently re-validates `featureFlags.bgCrossedPathsEnabled` on
+ * every write path, so this client flag alone cannot bypass server gating.
  */
-export const BG_CROSSED_PATHS_FEATURE_READY = false;
+export const BG_CROSSED_PATHS_FEATURE_READY = true;
 
 export const BACKGROUND_FLUSH_TASK_NAME = 'mira-background-crossed-paths-flush-v1';
 const BACKGROUND_FLUSH_MIN_INTERVAL_MINUTES = 60;
@@ -69,43 +65,43 @@ export const BG_LOCATION_CONSENT_VERSION = 'bg_crossed_paths_v1';
 /** Copy strings for the Background Crossed Paths surface. Centralized so
  *  product can iterate without spelunking through the settings file. */
 export const BG_COPY = {
-  sectionTitle: 'Background crossed paths',
+  sectionTitle: 'Background detection',
   sectionTagline:
-    'Best-effort background detection for approximate crossed-path encounters — once you choose to turn it on later.',
-  toggleTitle: 'Enable background crossed paths',
+    'Optional background detection for crossed paths when Mira is not open.',
+  toggleTitle: 'Background detection',
   toggleDescriptionUnavailable:
-    'Coming soon. We will let you know when this is ready to enable.',
+    'Background detection is temporarily paused.',
   toggleDescriptionReady:
-    'Mira can occasionally check approximate crossed-path encounters in the background after you enable it.',
+    'Mira can detect crossed paths when the app is not open after you allow background location.',
   androidBatteryTitle: 'Android reliability',
   androidBatteryDescription:
     'Samsung, OnePlus, and some Android phones may pause background detection to save battery. You can improve reliability by allowing Mira unrestricted battery usage in Android settings.',
   androidBatteryAction: 'Open app settings',
-  statusComingSoon: 'Unavailable in this version',
-  statusConsentGranted: 'Consent granted',
-  statusConsentNone: 'Not enabled',
+  statusComingSoon: 'Feature paused/off',
+  statusConsentGranted: 'Background ON',
+  statusConsentNone: 'Foreground only',
   discoveryActiveLabel: 'Discovery Mode active',
   discoveryInactiveLabel: 'Discovery Mode off',
   // Explainer modal copy
-  explainerTitle: 'Background crossed paths',
+  explainerTitle: 'Background detection',
   explainerLead:
-    'When you turn this on later, Mira can use best-effort background detection for approximate crossed-path encounters.',
+    'Background detection helps Mira detect crossed paths when the app is not open.',
   explainerBullets: [
-    'Mira only uses background location if you explicitly enable it.',
-    'Your exact coordinates are never shown to other users — only that an approximate crossed-path encounter happened.',
-    'You can turn it off anytime from Nearby Settings, and your consent is cleared.',
-    'Privacy zones, distance rules, pause, and Android battery limits still apply.',
+    'Your exact location is never shown.',
+    'Foreground Nearby still works without background permission.',
+    'You can turn this off anytime from Nearby Settings.',
+    'Privacy zones, pause, Incognito, and phone battery settings still apply.',
   ],
   explainerNoticeUnavailable:
-    'This phase does not start real background location yet. We are only saving your preference.',
+    'Background detection is paused right now.',
   explainerNoticeReady:
-    'Tapping continue records your consent. Mira may then ask the system for background location permission.',
+    'Mira will ask your phone for background location permission only after you continue.',
   explainerCancel: 'Cancel',
   explainerContinueUnavailable: 'OK, got it',
-  explainerContinueReady: 'I understand, enable',
+  explainerContinueReady: 'Allow background',
   // Revoke confirmation copy
   revokeNote:
-    'Turning this off clears your background crossed-paths consent and disables Discovery Mode if active.',
+    'Turning this off clears background consent and disables background detection.',
 } as const;
 
 /**

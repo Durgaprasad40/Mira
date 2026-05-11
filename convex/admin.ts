@@ -1448,3 +1448,106 @@ export const backfillPrimaryPhotoUrl = internalMutation({
     };
   },
 });
+
+/**
+ * Seed / flip the `featureFlags.bgCrossedPathsEnabled` row.
+ *
+ * Background Crossed Paths is dual-gated: client `BG_CROSSED_PATHS_FEATURE_READY`
+ * AND backend `featureFlags.bgCrossedPathsEnabled === true`. This mutation is the
+ * ONLY supported way to toggle the backend gate.
+ *
+ * Safety:
+ *  - `internalMutation` → not exposed to clients; only callable via
+ *    `npx convex run admin:setBgCrossedPathsFeatureFlag '...'` from a trusted
+ *    operator shell with deploy credentials.
+ *  - Idempotent: upserts the single named row, preserves history via updatedAt.
+ *  - Records `updatedBy` for audit so we can see who flipped the flag and when.
+ *
+ * Usage:
+ *   Enable:  npx convex run admin:setBgCrossedPathsFeatureFlag '{"value": true,  "updatedBy": "durga@dev"}'
+ *   Disable: npx convex run admin:setBgCrossedPathsFeatureFlag '{"value": false, "updatedBy": "durga@dev"}'
+ */
+export const setBgCrossedPathsFeatureFlag = internalMutation({
+  args: {
+    value: v.boolean(),
+    updatedBy: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const FLAG_NAME = 'bgCrossedPathsEnabled';
+    const now = Date.now();
+
+    const existing = await ctx.db
+      .query('featureFlags')
+      .withIndex('by_name', (q) => q.eq('name', FLAG_NAME))
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        value: args.value,
+        updatedAt: now,
+        updatedBy: args.updatedBy,
+      });
+      console.log(
+        `[FEATURE_FLAG] Updated ${FLAG_NAME} -> ${args.value} (by ${args.updatedBy ?? 'unknown'})`,
+      );
+      return {
+        action: 'updated' as const,
+        flag: FLAG_NAME,
+        previousValue: existing.value,
+        newValue: args.value,
+        updatedAt: now,
+        updatedBy: args.updatedBy ?? null,
+      };
+    }
+
+    await ctx.db.insert('featureFlags', {
+      name: FLAG_NAME,
+      value: args.value,
+      updatedAt: now,
+      updatedBy: args.updatedBy,
+    });
+    console.log(
+      `[FEATURE_FLAG] Inserted ${FLAG_NAME} = ${args.value} (by ${args.updatedBy ?? 'unknown'})`,
+    );
+    return {
+      action: 'inserted' as const,
+      flag: FLAG_NAME,
+      previousValue: null,
+      newValue: args.value,
+      updatedAt: now,
+      updatedBy: args.updatedBy ?? null,
+    };
+  },
+});
+
+/**
+ * Read the current state of `featureFlags.bgCrossedPathsEnabled`.
+ *
+ * Safe to call any time — purely read-only, internal-only, returns the row
+ * (or null if the flag has never been seeded).
+ *
+ * Usage:
+ *   npx convex run admin:getBgCrossedPathsFeatureFlag '{}'
+ */
+export const getBgCrossedPathsFeatureFlag = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const row = await ctx.db
+      .query('featureFlags')
+      .withIndex('by_name', (q) => q.eq('name', 'bgCrossedPathsEnabled'))
+      .first();
+    if (!row) {
+      console.log('[FEATURE_FLAG] bgCrossedPathsEnabled is NOT seeded (treated as false).');
+      return null;
+    }
+    console.log(
+      `[FEATURE_FLAG] bgCrossedPathsEnabled = ${row.value} (updatedAt=${row.updatedAt}, updatedBy=${row.updatedBy ?? 'unknown'})`,
+    );
+    return {
+      name: row.name,
+      value: row.value,
+      updatedAt: row.updatedAt,
+      updatedBy: row.updatedBy ?? null,
+    };
+  },
+});

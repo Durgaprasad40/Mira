@@ -243,7 +243,7 @@ export default defineSchema({
     lastLocationUpdatedAt: v.optional(v.number()),   // timestamp of last location save (30-min gate)
     nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true) — gates map visibility
     crossedPathsEnabled: v.optional(v.boolean()),     // LEGACY: superseded by recordCrossedPaths in Phase-2; kept for back-compat and migrations only, no longer read
-    recordCrossedPaths: v.optional(v.boolean()),      // Phase-2: separate opt-in for crossed-paths pipeline (default true when undefined)
+    recordCrossedPaths: v.optional(v.boolean()),      // Legacy: now follows nearbyEnabled; retained for back-compat/migrations
     // Server-side Nearby / Crossed Paths consent. A user is treated as
     // un-consented (and all location writes are dropped) unless both fields
     // are present and nearbyConsentVersion matches the current

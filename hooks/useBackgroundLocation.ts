@@ -98,6 +98,8 @@ export type BgStatus = {
   foregroundPermissionGranted: boolean;
   /** OS-level "always" / Android background permission. */
   backgroundPermissionGranted: boolean;
+  /** False when the OS requires opening app settings to grant background permission. */
+  backgroundPermissionCanAskAgain: boolean;
   /** Whether `TaskManager.defineTask` ran — should always be true once the
    *  root layout imports the task module. */
   taskRegistered: boolean;
@@ -115,6 +117,7 @@ export type BgStatus = {
 export async function getBackgroundLocationStatus(): Promise<BgStatus> {
   let foregroundPermissionGranted = false;
   let backgroundPermissionGranted = false;
+  let backgroundPermissionCanAskAgain = true;
   try {
     const fg = await Location.getForegroundPermissionsAsync();
     foregroundPermissionGranted = fg.status === 'granted';
@@ -124,8 +127,10 @@ export async function getBackgroundLocationStatus(): Promise<BgStatus> {
   try {
     const bg = await Location.getBackgroundPermissionsAsync();
     backgroundPermissionGranted = bg.status === 'granted';
+    backgroundPermissionCanAskAgain = bg.canAskAgain !== false;
   } catch {
     backgroundPermissionGranted = false;
+    backgroundPermissionCanAskAgain = true;
   }
 
   let taskRegistered = false;
@@ -148,6 +153,7 @@ export async function getBackgroundLocationStatus(): Promise<BgStatus> {
     available: BG_CROSSED_PATHS_FEATURE_READY && !isDemoMode,
     foregroundPermissionGranted,
     backgroundPermissionGranted,
+    backgroundPermissionCanAskAgain,
     taskRegistered,
     taskActive,
     bufferSize: backgroundLocationBuffer.size(),

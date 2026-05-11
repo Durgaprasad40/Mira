@@ -13,6 +13,7 @@ import {
   TouchableOpacity,
   Switch,
   Linking,
+  Alert,
   Platform,
   I18nManager,
 } from 'react-native';
@@ -33,12 +34,30 @@ import {
   resolveBgConsentStatus,
   type BgConsentStatus,
 } from '@/lib/backgroundCrossedPaths';
-import { useBackgroundLocation } from '@/hooks/useBackgroundLocation';
+import {
+  getBackgroundLocationStatus,
+  useBackgroundLocation,
+  type BgStatus,
+} from '@/hooks/useBackgroundLocation';
 
 // Phase-1 cleanup: the `always / app_open / recent` visibility-mode UI was
 // removed because the backend no longer enforces these modes (Nearby became a
 // persistent coarse-discovery map). The setting would have been a dead promise.
 // Use the Pause and master "Nearby visibility & crossings" toggles instead.
+const NEARBY_CONSENT_VERSION = 'nearby_crossed_paths_v1';
+
+function hasAcceptedNearbyConsent(user: any): boolean {
+  return (
+    typeof user?.nearbyConsentAt === 'number' &&
+    user.nearbyConsentAt > 0 &&
+    user.nearbyConsentVersion === NEARBY_CONSENT_VERSION
+  );
+}
+
+function getEffectiveNearbyEnabled(user: any): boolean {
+  if (!user) return false;
+  return user.nearbyEnabled !== false && (isDemoMode || hasAcceptedNearbyConsent(user));
+}
 
 export default function NearbySettingsScreen() {
   const router = useRouter();
@@ -54,7 +73,8 @@ export default function NearbySettingsScreen() {
   // Mutations
   const updateNearbySettingsMut = useMutation(api.users.updateNearbySettings);
   const pauseNearbyMut = useMutation(api.users.pauseNearby);
-  // Phase-3 background crossed paths: the OFF path is routed through the
+  const acceptNearbyConsentMut = useMutation(api.users.acceptNearbyConsent);
+  // Phase-3 background detection: the OFF path is routed through the
   // `useBackgroundLocation` hook, which stops the OS task, clears the buffer,
   // and revokes server-side consent. ON path is reserved for the explainer
   // modal — and even there only when the client-side feature gate is ON.
@@ -64,12 +84,13 @@ export default function NearbySettingsScreen() {
   const [nearbyEnabled, setNearbyEnabled] = useState(true);
   const [hideDistance, setHideDistance] = useState(false);
   const [incognitoMode, setIncognitoMode] = useState(false);
-  // Phase-2: separate crossed-paths opt-in. Default true (undefined → on).
+  // Legacy mirror; Crossed Paths now follows Nearby visibility.
   const [recordCrossedPaths, setRecordCrossedPaths] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
   const [pausedUntil, setPausedUntil] = useState<number | null>(null);
   // Phase-2: pause duration picker visibility
   const [showPauseOptions, setShowPauseOptions] = useState(false);
+  const [bgStatus, setBgStatus] = useState<BgStatus | null>(null);
 
   // Loading states
   const [timedOut, setTimedOut] = useState(false);
@@ -86,11 +107,14 @@ export default function NearbySettingsScreen() {
   useEffect(() => {
     if (currentUser) {
       setTimedOut(false);
-      setNearbyEnabled(currentUser.nearbyEnabled !== false);
+      const effectiveNearbyEnabled = getEffectiveNearbyEnabled(currentUser);
+      setNearbyEnabled(effectiveNearbyEnabled);
       setHideDistance(currentUser.hideDistance === true);
       setIncognitoMode(currentUser.incognitoMode === true);
-      // Phase-2: undefined treated as opted-in (default true).
-      setRecordCrossedPaths(currentUser.recordCrossedPaths !== false);
+      // Crossed Paths now follows the Nearby master switch. Keep this local
+      // mirror only so older explicit opt-outs can be repaired on the next
+      // master ON flow.
+      setRecordCrossedPaths(effectiveNearbyEnabled);
 
       // Check pause status
       const pauseUntil = currentUser.nearbyPausedUntil;
@@ -103,6 +127,18 @@ export default function NearbySettingsScreen() {
       }
     }
   }, [currentUser]);
+
+  const refreshBackgroundStatus = useCallback(async () => {
+    try {
+      setBgStatus(await getBackgroundLocationStatus());
+    } catch {
+      setBgStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshBackgroundStatus();
+  }, [refreshBackgroundStatus, currentUser?.backgroundLocationEnabled, currentUser?.backgroundLocationConsentAt, currentUser?.discoveryModeEnabled]);
 
   // Premium check for incognito (premium-only, no gender-based access)
   const canUseIncognito = currentUser?.subscriptionTier === 'premium';
@@ -128,10 +164,9 @@ export default function NearbySettingsScreen() {
         Toast.show(error.message || 'Failed to update setting');
         // Revert local state on error
         if (currentUser) {
-          if (field === 'nearbyEnabled') setNearbyEnabled(currentUser.nearbyEnabled !== false);
+          if (field === 'nearbyEnabled') setNearbyEnabled(getEffectiveNearbyEnabled(currentUser));
           if (field === 'hideDistance') setHideDistance(currentUser.hideDistance === true);
           if (field === 'incognitoMode') setIncognitoMode(currentUser.incognitoMode === true);
-          if (field === 'recordCrossedPaths') setRecordCrossedPaths(currentUser.recordCrossedPaths !== false);
         }
       } finally {
         setIsSaving(false);
@@ -140,11 +175,112 @@ export default function NearbySettingsScreen() {
     [userId, currentUser, updateNearbySettingsMut]
   );
 
+  const hasNearbyConsent = isDemoMode || hasAcceptedNearbyConsent(currentUser);
+
+  const confirmNearbyConsent = useCallback(
+    () =>
+      new Promise<boolean>((resolve) => {
+        Alert.alert(
+          'Turn on Nearby?',
+          'People can discover you when your paths cross. Your exact location is never shown.',
+          [
+            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'I agree', onPress: () => resolve(true) },
+          ],
+        );
+      }),
+    [],
+  );
+
+  const ensureNearbyConsent = useCallback(async (): Promise<boolean> => {
+    if (isDemoMode) return true;
+    if (!userId) return false;
+    if (hasNearbyConsent) return true;
+
+    const accepted = await confirmNearbyConsent();
+    if (!accepted) return false;
+
+    await acceptNearbyConsentMut({
+      authUserId: userId,
+      consentVersion: NEARBY_CONSENT_VERSION,
+    });
+    return true;
+  }, [acceptNearbyConsentMut, confirmNearbyConsent, hasNearbyConsent, userId]);
+
   // Toggle handlers
-  const handleNearbyEnabledToggle = (value: boolean) => {
-    setNearbyEnabled(value);
-    handleSave('nearbyEnabled', value);
-  };
+  const handleNearbyEnabledToggle = useCallback(
+    async (value: boolean) => {
+      if (isSaving) return;
+      if (value) {
+        try {
+          const consentOk = await ensureNearbyConsent();
+          if (!consentOk) return;
+
+          setNearbyEnabled(true);
+          setRecordCrossedPaths(true);
+          setIsPaused(false);
+          setPausedUntil(null);
+
+          if (!isDemoMode && userId) {
+            setIsSaving(true);
+            await updateNearbySettingsMut({
+              authUserId: userId,
+              nearbyEnabled: true,
+              recordCrossedPaths: true,
+            });
+            await pauseNearbyMut({ authUserId: userId, paused: false });
+          }
+          Toast.show('Nearby is on');
+        } catch (error: any) {
+          Toast.show(error.message || 'Failed to turn on Nearby');
+          if (currentUser) {
+            const effectiveNearbyEnabled = getEffectiveNearbyEnabled(currentUser);
+            setNearbyEnabled(effectiveNearbyEnabled);
+            setRecordCrossedPaths(effectiveNearbyEnabled);
+          }
+        } finally {
+          setIsSaving(false);
+        }
+        return;
+      }
+
+      setNearbyEnabled(false);
+      setRecordCrossedPaths(false);
+      try {
+        await disableBackgroundCrossedPaths();
+        await refreshBackgroundStatus();
+
+        if (!isDemoMode && userId) {
+          setIsSaving(true);
+          await updateNearbySettingsMut({
+            authUserId: userId,
+            nearbyEnabled: false,
+            recordCrossedPaths: false,
+          });
+        }
+        Toast.show('You are hidden from Nearby');
+      } catch (error: any) {
+        Toast.show(error.message || 'Failed to hide from Nearby');
+        if (currentUser) {
+          const effectiveNearbyEnabled = getEffectiveNearbyEnabled(currentUser);
+          setNearbyEnabled(effectiveNearbyEnabled);
+          setRecordCrossedPaths(effectiveNearbyEnabled);
+        }
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [
+      currentUser,
+      disableBackgroundCrossedPaths,
+      ensureNearbyConsent,
+      isSaving,
+      pauseNearbyMut,
+      refreshBackgroundStatus,
+      updateNearbySettingsMut,
+      userId,
+    ],
+  );
 
   const handleHideDistanceToggle = (value: boolean) => {
     setHideDistance(value);
@@ -163,23 +299,9 @@ export default function NearbySettingsScreen() {
     handleSave('incognitoMode', value);
   };
 
-  // Phase-2: record-crossed-paths toggle (independent from map visibility)
-  const handleRecordCrossedPathsToggle = (value: boolean) => {
-    setRecordCrossedPaths(value);
-    handleSave('recordCrossedPaths', value);
-  };
-
   // ────────────────────────────────────────────────────────────────────────
-  // Phase-2: Background Crossed Paths — UI/consent foundation only.
-  //
-  // STRICT RULES enforced by this section:
-  //   - The toggle does NOT request any OS background-location permission.
-  //   - It does NOT call TaskManager / startLocationUpdatesAsync.
-  //   - "Turn ON" is only reachable when BG_CROSSED_PATHS_FEATURE_READY is true
-  //     AND, even then, only routes through the explainer modal — accept is
-  //     called from there, not from this row.
-  //   - "Turn OFF" always works (idempotent revoke), regardless of the gate,
-  //     so any consent ever recorded can be cleared from this screen.
+  // Background detection — status row only. Foreground Nearby and crossed
+  // paths are controlled by the master Nearby visibility action above.
   // ────────────────────────────────────────────────────────────────────────
   const bgConsentAt: number | undefined = currentUser?.backgroundLocationConsentAt;
   const bgConsentVersion: string | undefined =
@@ -195,79 +317,82 @@ export default function NearbySettingsScreen() {
     consentVersion: bgConsentVersion,
   });
 
-  // Toggle is "on" from the user's perspective when consent is granted AND
-  // the server still has backgroundLocationEnabled=true. Stale-version
-  // consent renders as off so the user can re-confirm via the explainer.
-  const bgToggleOn =
+  const bgServerActive =
     BG_CROSSED_PATHS_FEATURE_READY &&
     bgConsentStatus === 'granted' &&
-    bgEnabledServer;
+    (bgEnabledServer || discoveryEnabled);
+
+  const bgPermissionBlocked =
+    bgStatus?.backgroundPermissionGranted === false &&
+    bgStatus.backgroundPermissionCanAskAgain === false;
+
+  const nearbyActiveForCrossedPaths =
+    nearbyEnabled && !isPaused && !incognitoMode;
+
+  const bgIsOn =
+    bgServerActive &&
+    bgStatus?.backgroundPermissionGranted === true &&
+    bgStatus.taskActive === true;
+
+  const bgPausedByOs =
+    bgServerActive &&
+    (!bgStatus?.backgroundPermissionGranted || bgStatus.taskActive === false);
 
   const discoveryCountdown = discoveryEnabled
     ? formatDiscoveryCountdown(discoveryExpiresAt)
     : null;
 
-  const handleBgToggle = useCallback(
-    async (value: boolean) => {
-      // OFF path — ALWAYS available. The hook stops the OS task, clears the
-      // on-disk buffer, then revokes server-side consent (which also clears
-      // backgroundLocationEnabled and Discovery Mode). The OFF path NEVER
-      // requests any OS permission and never starts anything.
-      if (!value) {
-        // No consent on file and feature gate is off → nothing to do.
-        if (
-          bgConsentStatus === 'unavailable' ||
-          (bgConsentStatus === 'none' && !bgEnabledServer)
-        ) {
-          return;
-        }
-        if (isDemoMode) {
-          Toast.show('Background crossed paths turned off');
-          return;
-        }
-        const result = await disableBackgroundCrossedPaths();
-        if (result.ok) {
-          Toast.show('Background crossed paths turned off');
-        } else {
-          Toast.show('Failed to update background crossed paths');
-        }
-        return;
-      }
-
-      // ON path — gated. When the feature is not ready we route to the
-      // explainer in read-only mode (its accept CTA itself is gated and
-      // currently dismisses without any side effects). When the feature
-      // flips ON, the explainer's CTA hands off to
-      // `enableBackgroundCrossedPaths()` which performs the full flow.
-      router.push('/(main)/background-crossed-paths-explainer' as any);
-    },
-    [bgConsentStatus, bgEnabledServer, disableBackgroundCrossedPaths, router],
-  );
-
-  const handleOpenBgExplainer = useCallback(() => {
-    router.push('/(main)/background-crossed-paths-explainer' as any);
-  }, [router]);
-
   const handleOpenAndroidAppSettings = useCallback(async () => {
     try {
       await Linking.openSettings();
     } catch {
-      Toast.show('Open Android settings and choose Mira to adjust battery usage.');
+      Toast.show('Open your phone settings and choose Mira.');
     }
   }, []);
 
-  const bgStatusLine = (() => {
-    if (bgConsentStatus === 'unavailable') return BG_COPY.statusComingSoon;
-    if (bgConsentStatus === 'granted' && bgEnabledServer) {
-      return BG_COPY.statusConsentGranted;
+  const bgDisplay = (() => {
+    if (!nearbyActiveForCrossedPaths) {
+      return {
+        title: 'Feature paused/off',
+        subtitle: 'Background detection follows Nearby. Turn on Nearby to detect crossed paths.',
+        action: !nearbyEnabled ? 'Turn on Nearby first' : isPaused ? 'Resume Nearby' : null,
+      };
     }
-    if (bgConsentStatus === 'stale') return BG_COPY.statusConsentNone;
-    return BG_COPY.statusConsentNone;
+    if (!BG_CROSSED_PATHS_FEATURE_READY) {
+      return {
+        title: 'Feature paused/off',
+        subtitle: 'Background detection is temporarily unavailable.',
+        action: null,
+      };
+    }
+    if (bgIsOn) {
+      return {
+        title: 'Background ON',
+        subtitle: 'Mira can detect crossed paths even when the app is not open.',
+        action: 'Turn off background detection',
+      };
+    }
+    if (bgPausedByOs) {
+      return {
+        title: 'Paused by OS',
+        subtitle: 'Background detection is paused by your phone settings.',
+        action: bgPermissionBlocked ? 'Open Settings' : 'Allow background',
+      };
+    }
+    if (bgPermissionBlocked) {
+      return {
+        title: 'Needs permission',
+        subtitle: 'Allow background location to detect crossed paths when Mira is not open.',
+        action: 'Open Settings',
+      };
+    }
+    return {
+      title: 'Foreground only',
+      subtitle: 'Crossed paths work while Mira is open. Allow background location to detect more.',
+      action: 'Allow background',
+    };
   })();
 
-  const bgDescription = BG_CROSSED_PATHS_FEATURE_READY
-    ? BG_COPY.toggleDescriptionReady
-    : BG_COPY.toggleDescriptionUnavailable;
   const showAndroidBatteryGuidance =
     Platform.OS === 'android' &&
     BG_CROSSED_PATHS_FEATURE_READY &&
@@ -283,7 +408,7 @@ export default function NearbySettingsScreen() {
   ];
 
   // Resume (clear pause)
-  const handleResumeNearby = async () => {
+  const handleResumeNearby = useCallback(async () => {
     setShowPauseOptions(false);
     if (isDemoMode) {
       setIsPaused(false);
@@ -299,7 +424,7 @@ export default function NearbySettingsScreen() {
     } catch {
       Toast.show('Failed to update pause status');
     }
-  };
+  }, [pauseNearbyMut, userId]);
 
   // Pause with chosen duration (Phase-2)
   const handlePauseWithDuration = async (durationMs: number | null, shortLabel: string) => {
@@ -315,6 +440,8 @@ export default function NearbySettingsScreen() {
     if (!userId) return;
     try {
       await pauseNearbyMut({ authUserId: userId, paused: true, durationMs });
+      await disableBackgroundCrossedPaths();
+      await refreshBackgroundStatus();
       setIsPaused(true);
       setPausedUntil(Date.now() + effectiveMs);
       Toast.show(
@@ -326,6 +453,51 @@ export default function NearbySettingsScreen() {
       Toast.show('Failed to update pause status');
     }
   };
+
+  const handleBackgroundAction = useCallback(async () => {
+    if (!nearbyEnabled) {
+      await handleNearbyEnabledToggle(true);
+      return;
+    }
+    if (isPaused) {
+      await handleResumeNearby();
+      return;
+    }
+    if (!nearbyActiveForCrossedPaths) {
+      return;
+    }
+    if (bgServerActive) {
+      const result = await disableBackgroundCrossedPaths();
+      await refreshBackgroundStatus();
+      Toast.show(
+        result.ok
+          ? 'Background detection turned off'
+          : 'Failed to turn off background detection',
+      );
+      return;
+    }
+    if (bgPermissionBlocked) {
+      await handleOpenAndroidAppSettings();
+      return;
+    }
+
+    const consentOk = await ensureNearbyConsent();
+    if (!consentOk) return;
+    router.push('/(main)/background-crossed-paths-explainer' as any);
+  }, [
+    bgPermissionBlocked,
+    bgServerActive,
+    disableBackgroundCrossedPaths,
+    ensureNearbyConsent,
+    handleNearbyEnabledToggle,
+    handleOpenAndroidAppSettings,
+    handleResumeNearby,
+    isPaused,
+    nearbyActiveForCrossedPaths,
+    nearbyEnabled,
+    refreshBackgroundStatus,
+    router,
+  ]);
 
   // Format "paused until ..." status line. Indefinite pauses render as a
   // text sentinel rather than the literal year-2125 timestamp.
@@ -371,20 +543,26 @@ export default function NearbySettingsScreen() {
           <Text style={styles.sectionTitle}>Visibility</Text>
 
           {/* Nearby visibility */}
-          <View style={styles.toggleRow}>
+          <View style={styles.actionRow}>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Show me in Nearby</Text>
+              <Text style={styles.toggleTitle}>
+                {nearbyEnabled ? 'You’re visible in Nearby' : 'You’re hidden from Nearby'}
+              </Text>
               <Text style={styles.toggleDescription}>
-                Allow nearby people to discover you through Nearby and crossed paths.
+                {nearbyEnabled
+                  ? 'People can discover you when your paths cross. Your exact location is never shown.'
+                  : 'Turn this on to appear in Nearby and save crossed-path history.'}
               </Text>
             </View>
-            <Switch
-              value={nearbyEnabled}
-              onValueChange={handleNearbyEnabledToggle}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
+            <TouchableOpacity
+              style={[styles.actionButton, nearbyEnabled && styles.actionButtonActive]}
+              onPress={() => handleNearbyEnabledToggle(!nearbyEnabled)}
               disabled={isSaving}
-            />
+            >
+              <Text style={[styles.actionButtonText, nearbyEnabled && styles.actionButtonTextActive]}>
+                {nearbyEnabled ? 'Hide me in Nearby' : 'Show me in Nearby'}
+              </Text>
+            </TouchableOpacity>
           </View>
 
           {/* Phase-2: Pause with duration picker */}
@@ -433,84 +611,51 @@ export default function NearbySettingsScreen() {
         {/* Crossed Paths Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Crossed Paths</Text>
-
-          {/* Crossed-path history opt-in */}
-          <View style={styles.toggleRow}>
+          <View style={styles.infoCard}>
+            <Ionicons name="git-compare-outline" size={18} color={COLORS.primary} />
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleTitle}>Save crossed paths</Text>
+              <Text style={styles.toggleTitle}>Follows Nearby visibility</Text>
               <Text style={styles.toggleDescription}>
-                Mira uses approximate location to remember people you crossed paths with while
-                you are using the app. Your exact location is never shown. You can pause this anytime.
+                {nearbyActiveForCrossedPaths && recordCrossedPaths
+                  ? 'Mira saves crossed-path history while Nearby is on. Your exact location is never shown.'
+                  : 'Crossed-path history pauses when Nearby is hidden, paused, or blocked by privacy settings.'}
               </Text>
             </View>
-            <Switch
-              value={recordCrossedPaths}
-              onValueChange={handleRecordCrossedPathsToggle}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-              disabled={isSaving}
-            />
           </View>
         </View>
 
-        {/* ──────────────────────────────────────────────────────────────
-            Phase-2: Background Crossed Paths section.
-            UI/consent foundation only — no OS-permission requests, no
-            background tracking. The "Turn ON" path goes through the
-            explainer modal; the "Turn OFF" path is always reachable.
-            ────────────────────────────────────────────────────────────── */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>{BG_COPY.sectionTitle}</Text>
-          <Text style={styles.bgTagline}>{BG_COPY.sectionTagline}</Text>
-
-          <View style={styles.toggleRow}>
+          <Text style={styles.sectionTitle}>Background</Text>
+          <View style={styles.actionRow}>
             <View style={styles.toggleInfo}>
               <View style={styles.titleRow}>
-                <Text style={styles.toggleTitle}>{BG_COPY.toggleTitle}</Text>
-                {!BG_CROSSED_PATHS_FEATURE_READY && (
-                  <View style={styles.comingSoonBadge}>
-                    <Text style={styles.comingSoonBadgeText}>SOON</Text>
-                  </View>
-                )}
+                <Text style={styles.toggleTitle}>Background detection</Text>
+                <View style={styles.statusBadge}>
+                  <Text style={styles.statusBadgeText}>{bgDisplay.title}</Text>
+                </View>
               </View>
-              <Text style={styles.toggleDescription}>{bgDescription}</Text>
-              <Text style={styles.bgStatusLine}>{bgStatusLine}</Text>
+              <Text style={styles.toggleDescription}>{bgDisplay.subtitle}</Text>
+              {discoveryEnabled && discoveryCountdown ? (
+                <Text style={styles.bgStatusLine}>
+                  {BG_COPY.discoveryActiveLabel} — {discoveryCountdown}
+                </Text>
+              ) : null}
             </View>
-            <Switch
-              value={bgToggleOn}
-              onValueChange={handleBgToggle}
-              trackColor={{ false: COLORS.border, true: COLORS.primary }}
-              thumbColor={COLORS.white}
-              // OFF must always be reachable so existing consent can be
-              // cleared. ON is reachable only when the gate is ready, the
-              // user is not paused, and we are not mid-save. The explainer
-              // modal still gates the actual accept call.
-              disabled={
-                isSaving ||
-                (!BG_CROSSED_PATHS_FEATURE_READY && !bgToggleOn && !bgEnabledServer)
-              }
-            />
+            {bgDisplay.action && (
+              <TouchableOpacity
+                style={styles.actionButton}
+                onPress={handleBackgroundAction}
+                disabled={isSaving}
+              >
+                <Text style={styles.actionButtonText}>{bgDisplay.action}</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
-          {/* Discovery Mode read-out (visible when active). Phase-2 has no
-              start/stop UI here — backend controls and Phase-3 native code
-              own the lifecycle. We only surface the current state. */}
-          {discoveryEnabled && (
-            <View style={styles.bgInfoRow}>
-              <Ionicons name="compass-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.bgInfoText}>
-                {BG_COPY.discoveryActiveLabel}
-                {discoveryCountdown ? ` — ${discoveryCountdown}` : ''}
-              </Text>
-            </View>
-          )}
-
-          {/* Always provide a way back into the explainer for users who want
-              to read the policy without flipping the switch. */}
           <TouchableOpacity
             style={styles.bgLearnMore}
-            onPress={handleOpenBgExplainer}
-            accessibilityLabel="Learn more about background crossed paths"
+            onPress={() => router.push('/(main)/background-crossed-paths-explainer' as any)}
+            accessibilityLabel="Learn more about background detection"
           >
             <Ionicons
               name="information-circle-outline"
@@ -520,7 +665,7 @@ export default function NearbySettingsScreen() {
             <Text style={styles.bgLearnMoreText}>Learn more</Text>
           </TouchableOpacity>
 
-          {bgToggleOn && (
+          {bgServerActive && (
             <Text style={styles.bgRevokeNote}>{BG_COPY.revokeNote}</Text>
           )}
 
@@ -717,6 +862,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 16,
     backgroundColor: COLORS.backgroundDark,
+    maxWidth: 150,
   },
   actionButtonActive: {
     backgroundColor: COLORS.primary,
@@ -725,6 +871,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.text,
+    textAlign: 'center',
   },
   actionButtonTextActive: {
     color: COLORS.white,
@@ -762,6 +909,26 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.white,
     letterSpacing: 0.5,
+  },
+  infoCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  statusBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: COLORS.primarySubtle,
+  },
+  statusBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: COLORS.primary,
+    letterSpacing: 0.4,
   },
   // Phase-2 Background Crossed Paths styles
   bgTagline: {

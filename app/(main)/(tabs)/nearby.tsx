@@ -90,7 +90,6 @@ import { Badge } from '@/components/ui/Badge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
-import { HeaderAvatarButton } from '@/components/ui';
 import { NearbyPreviewCard, NearbyPreviewData } from '@/components/nearby/NearbyPreviewCard';
 import { trackEvent } from '@/lib/analytics';
 
@@ -1571,6 +1570,10 @@ export default function NearbyScreen() {
     safePush(router, '/(main)/crossed-paths' as any, 'nearby->crossed-paths');
   }, [router]);
 
+  const handleOpenNearbySettings = useCallback(() => {
+    safePush(router, '/(main)/nearby-settings' as any, 'nearby->settings');
+  }, [router]);
+
   const handleOpenVerification = useCallback(() => {
     safePush(router, '/(main)/verification' as any, 'nearby->verification');
   }, [router]);
@@ -2441,8 +2444,6 @@ export default function NearbyScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       {/* Header renders immediately (shell pattern) */}
-      {/* Nearby settings entry is intentionally NOT here — users access
-          Nearby settings only via Profile → Privacy → Nearby settings. */}
       <View style={styles.header}>
         <View style={{ width: SIZES.icon.lg }} />
         <Text style={styles.headerTitle} maxFontSizeMultiplier={1.2}>Nearby</Text>
@@ -2460,7 +2461,14 @@ export default function NearbyScreen() {
               )}
             </View>
           </TouchableOpacity>
-          <HeaderAvatarButton />
+          <TouchableOpacity
+            onPress={handleOpenNearbySettings}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Nearby settings"
+            accessibilityHint="Open Nearby settings"
+          >
+            <Ionicons name="settings-outline" size={SIZES.icon.lg} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         {isDemo && (
           <View style={styles.demoBadge}>

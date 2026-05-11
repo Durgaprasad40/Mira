@@ -1,11 +1,11 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { validateAccess } from "./devReset";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateOwnership, validateSessionToken } from "./helpers";
-import { BG_LOCATION_CONSENT_VERSION } from "./crossedPaths";
+import { BG_LOCATION_CONSENT_VERSION, NEARBY_CONSENT_VERSION } from "./crossedPaths";
 import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeRelationshipIntentValues,
@@ -241,7 +241,9 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     incognitoMode: user.incognitoMode,
     nearbyEnabled: user.nearbyEnabled,
     nearbyPausedUntil: user.nearbyPausedUntil,
-    // Phase-2: separate crossed-paths opt-in (undefined treated as true).
+    nearbyConsentAt: user.nearbyConsentAt,
+    nearbyConsentVersion: user.nearbyConsentVersion,
+    // Legacy crossed-paths mirror; current UI makes this follow Nearby.
     recordCrossedPaths: user.recordCrossedPaths,
     // Phase 1 background restore: project background-location fields so the
     // client can render the in-app toggle, the Discovery Mode countdown, and
@@ -977,6 +979,10 @@ export const acceptNearbyConsent = mutation({
     consentVersion: v.string(),
   },
   handler: async (ctx, args) => {
+    if (args.consentVersion !== NEARBY_CONSENT_VERSION) {
+      throw new Error('invalid_nearby_consent_version');
+    }
+
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
     if (!userId) throw new Error('Unauthorized: user not found');
 
@@ -988,9 +994,65 @@ export const acceptNearbyConsent = mutation({
       nearbyConsentAt: now,
       nearbyConsentVersion: args.consentVersion,
       nearbyEnabled: true,
+      recordCrossedPaths: true,
+      nearbyPausedUntil: undefined,
     });
 
     return { success: true, nearbyConsentAt: now };
+  },
+});
+
+export const backfillNearbyConsentForEnabledUsers = internalMutation({
+  args: {
+    limit: v.optional(v.number()),
+    dryRun: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const limit = Math.max(1, Math.min(args.limit ?? 200, 1000));
+    const users = await ctx.db.query("users").collect();
+
+    let scanned = 0;
+    let wouldUpdate = 0;
+    let updated = 0;
+
+    for (const user of users) {
+      scanned += 1;
+      const needsNearbyConsent =
+        user.nearbyEnabled === true &&
+        (
+          typeof user.nearbyConsentAt !== 'number' ||
+          user.nearbyConsentAt <= 0 ||
+          user.nearbyConsentVersion !== NEARBY_CONSENT_VERSION
+        );
+      const needsCrossedPathsRepair =
+        user.nearbyEnabled === true &&
+        user.recordCrossedPaths === false;
+
+      if (!needsNearbyConsent && !needsCrossedPathsRepair) continue;
+      wouldUpdate += 1;
+
+      if (args.dryRun || updated >= limit) continue;
+
+      await ctx.db.patch(user._id, {
+        ...(needsNearbyConsent
+          ? {
+              nearbyConsentAt: now,
+              nearbyConsentVersion: NEARBY_CONSENT_VERSION,
+            }
+          : {}),
+        recordCrossedPaths: true,
+      });
+      updated += 1;
+    }
+
+    return {
+      scanned,
+      wouldUpdate,
+      updated,
+      dryRun: args.dryRun === true,
+      consentVersion: NEARBY_CONSENT_VERSION,
+    };
   },
 });
 
@@ -1001,9 +1063,8 @@ export const updateNearbySettings = mutation({
     hideDistance: v.optional(v.boolean()),
     strongPrivacyMode: v.optional(v.boolean()),
     incognitoMode: v.optional(v.boolean()),
-    // Phase-1: independent opt-in for crossed-paths recording.
-    // Separate from nearbyEnabled, which controls whether the user is surfaced
-    // through Nearby visibility.
+    // Backward-compatible field from the old separate Crossed Paths toggle.
+    // The handler ignores independent writes; it now follows nearbyEnabled.
     recordCrossedPaths: v.optional(v.boolean()),
     // Phase 1 background restore: backgroundLocationEnabled is now accepted
     // again, but writes are gated server-side (see handler) by the user's
@@ -1058,6 +1119,21 @@ export const updateNearbySettings = mutation({
       if (value !== undefined) {
         cleanUpdates[key] = value;
       }
+    }
+
+    // Crossed Paths now follows the master Nearby visibility setting.
+    // Old clients may still send recordCrossedPaths independently; ignore
+    // that unless Nearby is being changed in the same mutation.
+    if (cleanUpdates.nearbyEnabled === true) {
+      cleanUpdates.recordCrossedPaths = true;
+      cleanUpdates.nearbyPausedUntil = undefined;
+    } else if (cleanUpdates.nearbyEnabled === false) {
+      cleanUpdates.recordCrossedPaths = false;
+      cleanUpdates.backgroundLocationEnabled = false;
+      cleanUpdates.discoveryModeEnabled = false;
+      cleanUpdates.discoveryModeExpiresAt = undefined;
+    } else if ('recordCrossedPaths' in cleanUpdates) {
+      delete cleanUpdates.recordCrossedPaths;
     }
 
     if (Object.keys(cleanUpdates).length > 0) {
@@ -1215,7 +1291,7 @@ export const acceptBackgroundLocationConsent = mutation({
     if (
       typeof user.nearbyConsentAt !== 'number' ||
       user.nearbyConsentAt <= 0 ||
-      !user.nearbyConsentVersion
+      user.nearbyConsentVersion !== NEARBY_CONSENT_VERSION
     ) {
       throw new Error('foreground_consent_required');
     }
@@ -1303,7 +1379,12 @@ export const pauseNearby = mutation({
         const clamped = Math.max(ONE_MIN, Math.min(ONE_YEAR, durationMs));
         pauseUntil = Date.now() + clamped;
       }
-      await ctx.db.patch(userId, { nearbyPausedUntil: pauseUntil });
+      await ctx.db.patch(userId, {
+        nearbyPausedUntil: pauseUntil,
+        backgroundLocationEnabled: false,
+        discoveryModeEnabled: false,
+        discoveryModeExpiresAt: undefined,
+      });
     } else {
       // Clear pause
       await ctx.db.patch(userId, {
