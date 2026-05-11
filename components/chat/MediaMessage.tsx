@@ -56,7 +56,7 @@ interface MediaMessageProps {
   /** Called immediately when user releases hold (closes viewer) */
   onHoldEnd?: () => void;
   /** Legacy: Called on tap (when messageId not provided) */
-  onPress?: () => void;
+  onPress?: (resolvedUri?: string) => void;
   /** Optional: is this a "view once" media (future feature) */
   viewOnce?: boolean;
   /**
@@ -203,7 +203,10 @@ export default function MediaMessage({
   // Early return ensures doodles never enter secure/blur flow
   if (type === 'doodle') {
     return (
-      <Pressable style={[styles.legacyContainer, legacyContainerOverlay]} onPress={onPress}>
+      <Pressable
+        style={[styles.legacyContainer, legacyContainerOverlay]}
+        onPress={() => onPress?.(effectiveUri || mediaUrl)}
+      >
         <Image
           source={{ uri: mediaUrl }}
           style={styles.legacyThumbnail}
@@ -320,7 +323,10 @@ export default function MediaMessage({
       return renderLegacyPlaceholder();
     }
     return (
-      <Pressable style={[styles.legacyContainer, legacyContainerOverlay]} onPress={onPress}>
+      <Pressable
+        style={[styles.legacyContainer, legacyContainerOverlay]}
+        onPress={() => onPress?.(effectiveUri || mediaUrl)}
+      >
         <Image
           source={{ uri: effectiveUri || mediaUrl }}
           style={styles.legacyThumbnail}
@@ -338,7 +344,7 @@ export default function MediaMessage({
   // Doodle in secure mode: show normally without blur/hold-to-view
   if (!isSecureMedia) {
     return (
-      <Pressable style={[styles.container, containerOverlay]} onPress={onPress}>
+      <Pressable style={[styles.container, containerOverlay]} onPress={() => onPress?.(mediaUrl)}>
         <Image
           source={{ uri: mediaUrl }}
           style={styles.thumbnail}
@@ -371,7 +377,7 @@ export default function MediaMessage({
         markConsumed(messageId);
       }
       // Open viewer
-      onPress?.();
+      onPress?.(effectiveUri || mediaUrl);
     };
 
     return (

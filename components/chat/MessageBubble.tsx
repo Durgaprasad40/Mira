@@ -127,8 +127,8 @@ interface MessageBubbleProps {
   currentUserId?: string;
   currentUserToken?: string;
   onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
-  onProtectedMediaPress?: (messageId: string) => void;
-  onProtectedMediaHoldStart?: (messageId: string) => void;
+  onProtectedMediaPress?: (messageId: string, localUri?: string) => void;
+  onProtectedMediaHoldStart?: (messageId: string, localUri?: string) => void;
   onProtectedMediaHoldEnd?: (messageId: string) => void;
   onProtectedMediaExpire?: (messageId: string) => void;
   onVoiceDelete?: (messageId: string) => void;
@@ -558,8 +558,8 @@ function MessageBubbleComponent({
             isOwn={isOwn}
             viewOnce={message.viewOnce}
             recipientOpened={message.recipientOpened}
-            onPress={() => onProtectedMediaPress?.(message.id)}
-            onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
+            onPress={(localUri) => onProtectedMediaPress?.(message.id, localUri)}
+            onHoldStart={(localUri) => onProtectedMediaHoldStart?.(message.id, localUri)}
             onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
             onExpire={() => onProtectedMediaExpire?.(message.id)}
           />
@@ -622,7 +622,9 @@ function MessageBubbleComponent({
             <MediaMessage
               mediaUrl={mediaUrl!}
               type={message.type as 'image' | 'video'}
-              onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
+              onPress={(resolvedUri) =>
+                onMediaPress?.(resolvedUri || mediaUrl!, message.type as 'image' | 'video')
+              }
               requireDownloadBeforeOpen={requireMediaDownloadBeforeOpen}
               autoDownload={autoDownloadMedia}
               onDownloaded={(uri) => onMediaDownloaded?.(message.id, uri)}

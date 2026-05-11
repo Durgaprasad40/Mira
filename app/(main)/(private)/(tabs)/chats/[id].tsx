@@ -67,7 +67,7 @@ import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2Protected
 import { popHandoff } from '@/lib/memoryHandoff';
 import { deriveMyRole } from '@/lib/bottleSpin';
 import { uploadMediaToConvexWithProgress } from '@/lib/uploadUtils';
-import { getCachedMediaUri } from '@/lib/mediaCache';
+import { getCachedMediaUri, getMediaUri } from '@/lib/mediaCache';
 // ANON-LOADING-FIX: stable name resolver — never show "Anonymous" while loading.
 import { resolveStableName } from '@/lib/identity';
 
@@ -189,6 +189,48 @@ function NormalMediaModal({
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
+  const isRemote = uri.startsWith('http://') || uri.startsWith('https://');
+  const mediaKind = type === 'video' ? 'video' : 'image';
+  const initialCached = isRemote ? getCachedMediaUri(uri) : uri;
+  const [viewerUri, setViewerUri] = useState<string | null>(initialCached ?? null);
+  const [isPreparing, setIsPreparing] = useState(!initialCached);
+  const [streamingFallback, setStreamingFallback] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cached = isRemote ? getCachedMediaUri(uri) : uri;
+    setViewerUri(cached ?? null);
+    setIsPreparing(!cached);
+    setStreamingFallback(false);
+
+    if (cached) return;
+
+    getMediaUri(uri, mediaKind)
+      .then((resolvedUri) => {
+        if (cancelled) return;
+        if (resolvedUri && resolvedUri !== uri) {
+          setViewerUri(resolvedUri);
+        } else {
+          // Cache failed; keep the viewer usable but make the network fallback
+          // explicit instead of leaving a blank black modal.
+          setViewerUri(uri);
+          setStreamingFallback(true);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setViewerUri(uri);
+        setStreamingFallback(true);
+      })
+      .finally(() => {
+        if (!cancelled) setIsPreparing(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [uri, isRemote, mediaKind]);
+
   return (
     <Modal
       visible
@@ -198,14 +240,26 @@ function NormalMediaModal({
       onRequestClose={onClose}
     >
       <View style={normalStyles.container}>
-        {type === 'image' ? (
+        {viewerUri && type === 'image' ? (
           <Image
-            source={{ uri }}
+            source={{ uri: viewerUri }}
             style={StyleSheet.absoluteFill}
             contentFit="contain"
           />
-        ) : (
-          <NormalMediaVideo uri={uri} />
+        ) : viewerUri && type === 'video' ? (
+          <NormalMediaVideo uri={viewerUri} />
+        ) : null}
+        {(isPreparing || !viewerUri || streamingFallback) && (
+          <View style={normalStyles.loadingOverlay} pointerEvents="none">
+            {isPreparing || !viewerUri ? (
+              <ActivityIndicator size="large" color={COLORS.white} />
+            ) : null}
+            <Text style={normalStyles.loadingText}>
+              {streamingFallback
+                ? `Streaming ${type === 'video' ? 'video' : 'photo'}...`
+                : `Loading ${type === 'video' ? 'video' : 'photo'}...`}
+            </Text>
+          </View>
         )}
         <TouchableOpacity
           style={[normalStyles.closeBtn, { top: insets.top + 8 }]}
@@ -239,6 +293,18 @@ function NormalMediaVideo({ uri }: { uri: string }) {
 
 const normalStyles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  loadingText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '600',
+  },
   closeBtn: {
     position: 'absolute',
     left: 16,

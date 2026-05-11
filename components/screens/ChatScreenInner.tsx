@@ -608,6 +608,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const [pendingMediaType, setPendingMediaType] = useState<'photo' | 'video'>('photo');
   const [pendingIsMirrored, setPendingIsMirrored] = useState(false); // Track front-camera video mirroring
   const [viewerMessageId, setViewerMessageId] = useState<string | null>(null);
+  const [viewerPrefetchedLocalUri, setViewerPrefetchedLocalUri] = useState<string | undefined>(undefined);
   const [viewerIsMirrored, setViewerIsMirrored] = useState(false); // VIDEO-MIRROR-FIX: Track mirrored state for viewer
   const [viewerIsHoldMode, setViewerIsHoldMode] = useState(false); // HOLD-MODE-FIX: Track if viewer was opened via hold
   // SECURE_TIMER: Track whether the current user is the sender of the message
@@ -2553,7 +2554,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     [displayMessages]
   );
 
-  const handleProtectedMediaPress = (messageId: string) => {
+  const handleProtectedMediaPress = (messageId: string, localUri?: string) => {
     if (isDemo) {
       // Demo mode: use Phase2ProtectedMediaViewer (reads from privateChatStore)
       setDemoViewerIsHoldMode(false); // HOLD-MODE-FIX: Tap mode
@@ -2576,13 +2577,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       setViewerIsMirrored(isMirrored);
       setViewerIsSender(isSender);
       setViewerIsHoldMode(false); // HOLD-MODE-FIX: Tap mode
+      setViewerPrefetchedLocalUri(localUri);
       setViewerMessageId(messageId);
     }
   };
 
   // HOLD-MODE-FIX: Hold mode works for both demo and Convex
   // Hold mode: press in => open viewer
-  const handleProtectedMediaHoldStart = (messageId: string) => {
+  const handleProtectedMediaHoldStart = (messageId: string, localUri?: string) => {
     if (isDemo) {
       logSecure('holdStart', { messageId });
       setDemoViewerIsHoldMode(true); // HOLD-MODE-FIX: Hold mode
@@ -2608,6 +2610,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       setViewerIsMirrored(isMirrored);
       setViewerIsSender(isSender);
       setViewerIsHoldMode(true); // HOLD-MODE-FIX: Hold mode
+      setViewerPrefetchedLocalUri(localUri);
       setViewerMessageId(messageId);
     }
   };
@@ -2663,6 +2666,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           });
         }
         setViewerMessageId(null);
+        setViewerPrefetchedLocalUri(undefined);
       }
     }
   };
@@ -3351,12 +3355,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           viewerName={currentUser?.name || otherUserName}
           onClose={() => {
             setViewerMessageId(null);
+            setViewerPrefetchedLocalUri(undefined);
             setViewerIsMirrored(false);
             setViewerIsHoldMode(false);
             setViewerIsSender(false);
           }}
           onReport={() => {
             setViewerMessageId(null);
+            setViewerPrefetchedLocalUri(undefined);
             setViewerIsMirrored(false);
             setViewerIsHoldMode(false);
             setViewerIsSender(false);
@@ -3365,6 +3371,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           isMirrored={viewerIsMirrored}
           isHoldMode={viewerIsHoldMode}
           isSender={viewerIsSender}
+          prefetchedLocalUri={viewerPrefetchedLocalUri}
         />
       )}
 

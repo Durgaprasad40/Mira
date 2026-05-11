@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { View, Text, StyleSheet, PanResponder, GestureResponderEvent, Pressable, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
-import { Video, AVPlaybackStatus } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -10,6 +9,7 @@ import { CHAT_TYPOGRAPHY } from '@/lib/chatTypography';
 import { log } from '@/utils/logger';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 import { useAuthStore } from '@/stores/authStore';
+import { deleteCachedMedia, getMediaUri, type MediaKind } from '@/lib/mediaCache';
 import type { Id } from '@/convex/_generated/dataModel';
 
 // Phase-1 tile sizing (matches MediaMessage.tsx)
@@ -51,8 +51,8 @@ interface ProtectedMediaBubbleProps {
   viewOnce?: boolean;         // Whether this is view-once media
   recipientOpened?: boolean;  // Whether recipient has opened the media
   // Handlers
-  onPress?: () => void;           // Tap mode: open viewer
-  onHoldStart?: () => void;       // Hold mode: press in => open viewer
+  onPress?: (localUri?: string) => void;           // Tap mode: open viewer
+  onHoldStart?: (localUri?: string) => void;       // Hold mode: press in => open viewer
   onHoldEnd?: () => void;         // Hold mode: press out => close viewer
   onExpire?: () => void;          // Called when countdown reaches 0
 }
@@ -110,8 +110,13 @@ export function ProtectedMediaBubble({
       : 'skip'
   );
 
-  // PREFETCH-FIX-V2: Refs for prefetching
-  const hasPrefetchedRef = useRef(false);
+  // LOAD-FIRST: Full app-cache download state. The tile only transitions from
+  // "Loading..." to "Tap/Hold to view" after mediaCache has a local file.
+  const [prefetchedLocalUri, setPrefetchedLocalUri] = useState<string | undefined>(undefined);
+  const [prefetching, setPrefetching] = useState(false);
+  const [prefetchError, setPrefetchError] = useState(false);
+  const [downloadAttempt, setDownloadAttempt] = useState(0);
+  const prefetchedRemoteRef = useRef<string | null>(null);
   const prefetchStartTimeRef = useRef<number>(0);
 
   // P1-FIX: Lock the first valid timer value to prevent jump when query hydrates
@@ -158,7 +163,7 @@ export function ProtectedMediaBubble({
       if (isHoldMode && onHoldStart) {
         holdActiveRef.current = true;
         if (__DEV__) log.info('[SECURE_HOLD]', 'grant (hold start)', { messageRef });
-        onHoldStart();
+        onHoldStart(protectedMedia?.localUri ?? prefetchedLocalUri);
       }
     },
 
@@ -175,7 +180,7 @@ export function ProtectedMediaBubble({
         onHoldEnd();
       } else if (!isHoldMode && onPress && touchDuration < 300) {
         if (__DEV__) log.info('[SECURE_TAP]', 'tap', { messageRef, touchDuration });
-        onPress();
+        onPress(protectedMedia?.localUri ?? prefetchedLocalUri);
       }
     },
 
@@ -186,32 +191,93 @@ export function ProtectedMediaBubble({
         onHoldEnd();
       }
     },
-  }), [isHoldMode, onHoldStart, onHoldEnd, onPress, messageRef]);
+  }), [
+    isHoldMode,
+    onHoldStart,
+    onHoldEnd,
+    onPress,
+    messageRef,
+    protectedMedia?.localUri,
+    prefetchedLocalUri,
+  ]);
 
-  // VIDEO-PREFETCH: Callback when video is preloaded
-  const handleVideoPrefetchLoad = useCallback((status: AVPlaybackStatus) => {
-    if (status.isLoaded) {
-      const prefetchTime = Date.now() - prefetchStartTimeRef.current;
-      if (__DEV__) log.info('[SECURE_BUBBLE]', 'video prefetch complete', { messageRef, prefetchTime });
-    }
-  }, [messageRef]);
-
-  // Prefetch effect
+  // Full-byte preload effect. This replaces metadata-only Image.prefetch /
+  // hidden Video warm-up, so "loaded" now means mediaCache returned a local
+  // app-cache URI. It does not mark viewed or start timers.
   useEffect(() => {
-    if (mediaUrlData?.url && !hasPrefetchedRef.current && !isExpired) {
-      hasPrefetchedRef.current = true;
-      prefetchStartTimeRef.current = Date.now();
+    const remoteUrl = mediaUrlData?.url;
+    if (!remoteUrl || isExpired) return;
+    if (prefetchedRemoteRef.current === remoteUrl && prefetchedLocalUri) return;
 
-      const isVideoMedia = mediaUrlData?.mediaType === 'video';
+    let cancelled = false;
+    const mediaKind: MediaKind = mediaUrlData?.mediaType === 'video' ? 'video' : 'image';
 
-      if (isVideoMedia) {
-        if (__DEV__) log.info('[SECURE_BUBBLE]', 'video prefetch started', { messageRef });
-      } else {
-        Image.prefetch(mediaUrlData.url).catch(() => {});
-        if (__DEV__) log.info('[SECURE_BUBBLE]', 'image prefetch started', { messageRef });
-      }
+    prefetchedRemoteRef.current = remoteUrl;
+    setPrefetching(true);
+    setPrefetchError(false);
+    setPrefetchedLocalUri(undefined);
+    prefetchStartTimeRef.current = Date.now();
+
+    if (__DEV__) {
+      log.info('[SECURE_BUBBLE]', 'media cache download started', { messageRef, mediaKind });
     }
-  }, [mediaUrlData?.url, mediaUrlData?.mediaType, isExpired, messageRef]);
+
+    getMediaUri(remoteUrl, mediaKind)
+      .then((uri) => {
+        if (cancelled) return;
+        const prefetchTime = Date.now() - prefetchStartTimeRef.current;
+        if (!uri || uri === remoteUrl) {
+          setPrefetchError(true);
+          if (__DEV__) {
+            log.warn('[SECURE_BUBBLE]', 'media cache download fell back to remote', {
+              messageRef,
+              prefetchTime,
+            });
+          }
+          return;
+        }
+        setPrefetchedLocalUri(uri);
+        if (__DEV__) {
+          log.info('[SECURE_BUBBLE]', 'media cache download complete', {
+            messageRef,
+            mediaKind,
+            prefetchTime,
+          });
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setPrefetchError(true);
+        if (__DEV__) log.warn('[SECURE_BUBBLE]', 'media cache download failed', { messageRef, err });
+      })
+      .finally(() => {
+        if (!cancelled) setPrefetching(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    mediaUrlData?.url,
+    mediaUrlData?.mediaType,
+    isExpired,
+    messageRef,
+    prefetchedLocalUri,
+    downloadAttempt,
+  ]);
+
+  useEffect(() => {
+    setPrefetchedLocalUri(undefined);
+    setPrefetching(false);
+    setPrefetchError(false);
+    prefetchedRemoteRef.current = null;
+  }, [messageId]);
+
+  const retryDownload = useCallback(() => {
+    prefetchedRemoteRef.current = null;
+    setPrefetchError(false);
+    setDownloadAttempt((value) => value + 1);
+  }, []);
 
   // Calculate remaining time from wall-clock using shared countdown helper
   useEffect(() => {
@@ -233,6 +299,10 @@ export function ProtectedMediaBubble({
 
       if (countdown.expired && onExpire) {
         if (__DEV__) log.info('[SECURE_BUBBLE]', 'timer expired', { messageRef });
+        if (mediaUrlData?.url) {
+          const kind: MediaKind = mediaUrlData.mediaType === 'video' ? 'video' : 'image';
+          deleteCachedMedia(mediaUrlData.url, kind).catch(() => {});
+        }
         onExpire();
       }
     };
@@ -246,7 +316,7 @@ export function ProtectedMediaBubble({
         intervalRef.current = null;
       }
     };
-  }, [timerEndsAt, isExpired, messageRef, onExpire]);
+  }, [timerEndsAt, isExpired, messageRef, onExpire, mediaUrlData?.url, mediaUrlData?.mediaType]);
 
   // Log render for debugging
   useEffect(() => {
@@ -297,12 +367,6 @@ export function ProtectedMediaBubble({
   // ============================================================================
   // END OF HOOKS - Early returns are safe below this point
   // ============================================================================
-
-  // Determine if we should show hidden video prefetcher
-  const shouldPrefetchVideo = mediaUrlData?.url &&
-    mediaUrlData?.mediaType === 'video' &&
-    hasPrefetchedRef.current &&
-    !isExpired;
 
   // Determine timer display using shared countdown formatting
   const hasActiveTimer = remainingSec !== null && remainingSec > 0;
@@ -355,9 +419,9 @@ export function ProtectedMediaBubble({
     );
   }
 
-  // LOAD-FIRST: Receiver loading state — once tapped, show spinner until the
-  // Convex URL query hydrates and the prefetch begins.
-  if (isReceiver && !mediaUrlData) {
+  // LOAD-FIRST: Receiver loading state — once tapped, keep the spinner until
+  // the signed URL is fetched AND the full file is in app cache.
+  if (isReceiver && (!mediaUrlData || prefetching || (!prefetchedLocalUri && !prefetchError))) {
     return (
       <View style={styles.container}>
         <View style={styles.placeholderInner}>
@@ -371,9 +435,26 @@ export function ProtectedMediaBubble({
     );
   }
 
+  if (isReceiver && prefetchError && !prefetchedLocalUri) {
+    return (
+      <Pressable onPress={retryDownload} style={styles.container}>
+        <View style={styles.placeholderInner}>
+          <Ionicons name="refresh" size={26} color="#FFFFFF" />
+          <Text
+            maxFontSizeMultiplier={CHAT_TYPOGRAPHY.mediaCaption.maxFontSizeMultiplier}
+            style={styles.placeholderText}
+          >Tap to retry</Text>
+        </View>
+      </Pressable>
+    );
+  }
+
   // Phase-1 style: Blurred tile matching MediaMessage.tsx exactly
-  const localUri = protectedMedia?.localUri;
-  const isVideo = protectedMedia?.mediaType === 'video';
+  const localUri = protectedMedia?.localUri ?? prefetchedLocalUri;
+  const isVideo =
+    protectedMedia?.mediaType === 'video' ||
+    mediaInfo?.mediaType === 'video' ||
+    mediaUrlData?.mediaType === 'video';
   const canBlur = localUri ? !isContentUri(localUri) : true;
   const isMirrored = protectedMedia?.isMirrored === true;
 
@@ -423,17 +504,6 @@ export function ProtectedMediaBubble({
 
       {/* Semi-transparent overlay */}
       <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
-
-      {/* VIDEO-PREFETCH: Hidden video for preloading */}
-      {shouldPrefetchVideo && (
-        <Video
-          source={{ uri: mediaUrlData!.url }}
-          style={styles.hiddenPrefetch}
-          shouldPlay={false}
-          isMuted={true}
-          onLoad={handleVideoPrefetchLoad}
-        />
-      )}
     </View>
   );
 

@@ -19,7 +19,7 @@ import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
-import { getVideoUri } from '@/lib/videoCache';
+import { deleteCachedMedia, getMediaUri } from '@/lib/mediaCache';
 import type { Id } from '@/convex/_generated/dataModel';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -51,6 +51,10 @@ interface ProtectedMediaViewerProps {
   // so the sender can review their own media without consuming the recipient's
   // timer or globally expiring view-once media.
   isSender?: boolean;
+  // LOAD-FIRST: Local app-cache URI already downloaded by the bubble's load
+  // gate. Optional for backward compatibility; viewer falls back to caching
+  // the signed remote URL on open when absent.
+  prefetchedLocalUri?: string;
 }
 
 export function ProtectedMediaViewer({
@@ -63,12 +67,14 @@ export function ProtectedMediaViewer({
   isMirrored = false,
   isHoldMode = false,
   isSender = false,
+  prefetchedLocalUri,
 }: ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasMarkedViewed = useRef(false);
+  const processedRemoteUrlRef = useRef<string | null>(null);
   // 5-2: Prevent duplicate markExpired calls
   const hasExpired = useRef(false);
   // 5-1: Track mounted state to prevent setState after unmount
@@ -114,6 +120,7 @@ export function ProtectedMediaViewer({
     if (visible) {
       // CACHE-FIX: Check if we have a cached URL for this message
       const cachedUrl = urlCacheRef.current.get(messageId);
+      processedRemoteUrlRef.current = null;
       if (cachedUrl) {
         setMediaUrl(cachedUrl);
         // Still need to go through loading to trigger onLoad callbacks
@@ -139,6 +146,13 @@ export function ProtectedMediaViewer({
   const effectiveIsMirrored = mediaData?.isMirrored ?? isMirrored;
   // ONCE-VIEW-FIX: Detect view-once mode - NO timer, only expire on close
   const isViewOnce = mediaData?.viewOnce === true;
+
+  const cleanupCachedMedia = useCallback(() => {
+    const remoteUrl = mediaData?.url;
+    if (!remoteUrl || !remoteUrl.startsWith('http')) return;
+    const kind = mediaData?.mediaType === 'video' ? 'video' : 'image';
+    void deleteCachedMedia(remoteUrl, kind).catch(() => {});
+  }, [mediaData?.url, mediaData?.mediaType]);
 
   // Screen protection — always block screenshots + screen recording while the
   // viewer is visible (photos AND videos). Enables FLAG_SECURE on Android and
@@ -182,6 +196,7 @@ export function ProtectedMediaViewer({
         messageId: asMessageId(messageId),
         authUserId: userId,
       }).catch(() => {});
+      cleanupCachedMedia();
     } else if (mediaData?.viewOnce && isSender) {
       if (__DEV__) console.log('[SECURE_TIMER] skip_sender_timer', { messageRef, reason: 'viewonce_close' });
     }
@@ -196,7 +211,7 @@ export function ProtectedMediaViewer({
     hasMarkedViewed.current = false;
     hasExpired.current = false; // Reset for next open
     onClose();
-  }, [mediaData, messageId, messageRef, userId, markExpired, onClose, isSender]);
+  }, [mediaData, messageId, messageRef, userId, markExpired, onClose, isSender, cleanupCachedMedia]);
 
   // P1_SECURE_BACK: Android hardware back must close the secure viewer (and
   // funnel through handleClose so view-once expiry / timer cleanup runs)
@@ -213,8 +228,9 @@ export function ProtectedMediaViewer({
     return () => sub.remove();
   }, [visible, handleClose]);
 
-  // SECURE-REWRITE: Process mediaData and set viewerState
-  // Only transition state when data arrives; image load callback handles 'ready'
+  // SECURE-REWRITE: Process mediaData and resolve the render URI.
+  // The bubble may hand us a local cache URI; otherwise we download to app
+  // cache here while the viewer shows an explicit loading state.
   useEffect(() => {
     if (!visible) return;
 
@@ -230,28 +246,27 @@ export function ProtectedMediaViewer({
       return;
     }
 
-    // Handle URL received - stay in loading until image actually loads
-    if (mediaData?.url && !hasMarkedViewed.current) {
-      hasMarkedViewed.current = true;
-      // viewerState stays 'loading' until image onLoad fires
-
-      // VIDEO-CACHE-FIX: Cache video to local file system for instant playback
+    // Handle URL received - stay in loading until image/video is actually ready.
+    if (mediaData?.url && processedRemoteUrlRef.current !== mediaData.url) {
+      processedRemoteUrlRef.current = mediaData.url;
       const processUrl = async () => {
-        let finalUrl = mediaData.url;
+        let finalUrl = prefetchedLocalUri;
 
-        // For videos, use file-based caching
-        if (mediaData.mediaType === 'video') {
+        if (!finalUrl) {
           try {
-            finalUrl = await getVideoUri(mediaData.url);
+            finalUrl = await getMediaUri(
+              mediaData.url,
+              mediaData.mediaType === 'video' ? 'video' : 'image'
+            );
           } catch {
-            // Fallback to original URL
+            finalUrl = mediaData.url;
           }
         }
 
         // CACHE-FIX: Store URL in cache for faster re-opens
-        urlCacheRef.current.set(messageId, finalUrl);
+        urlCacheRef.current.set(messageId, finalUrl || mediaData.url);
         if (mountedRef.current) {
-          setMediaUrl(finalUrl);
+          setMediaUrl(finalUrl || mediaData.url);
         }
       };
 
@@ -266,51 +281,63 @@ export function ProtectedMediaViewer({
         hasExpiresAt: typeof mediaData.expiresAt === 'number',
         viewOnce: mediaData.viewOnce === true,
       });
-
-      if (isSender) {
-        // SECURE_TIMER: sender is reviewing their own media. Do NOT call
-        // markViewed and do NOT set timeLeft. Timer UI stays hidden; sender
-        // can review safely without consuming the recipient's timer or
-        // triggering global expiry.
-        if (__DEV__) console.log('[SECURE_TIMER] skip_sender_timer', { messageRef, reason: 'url_ready' });
-      } else {
-        // MSG-006 FIX: Use authUserId for server-side verification
-        // [P1_MEDIA_FIX] `markViewed` validator accepts only `{ messageId, authUserId }`.
-        if (__DEV__) console.log('[SECURE_TIMER] markViewed', { messageRef });
-        void markViewed({
-          messageId: asMessageId(messageId),
-          authUserId: userId,
-        }).catch(() => {});
-
-        // ONCE-VIEW-FIX: Skip timer for view-once media
-        // View-once media has NO timer - user can view as long as they want
-        // Expiration happens ONLY when user closes the viewer
-        if (mediaData.viewOnce) {
-          if (__DEV__) console.log('[SECURE-VIEWER] view-once mode: no timer', { messageRef });
-          // No timer for view-once - leave timeLeft as null
-        } else if (mediaData.expiresAt) {
-          // TIMER-FIX: Use absolute deadline (expiresAt) instead of resetting to timerSeconds
-          // This ensures timer continues even if viewer is closed and reopened
-          const remainingMs = mediaData.expiresAt - Date.now();
-          const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
-          if (remainingSec > 0) {
-            if (__DEV__) console.log('[SECURE_TIMER] receiver_timer_start', { messageRef, remainingSec });
-            setTimeLeft(remainingSec);
-          } else {
-            // Already expired by deadline
-            setTimeLeft(0);
-          }
-        } else if (mediaData.timerSeconds && mediaData.timerSeconds > 0) {
-          // First open - use timerSeconds (markViewed will set expiresAt on backend)
-          if (__DEV__) console.log('[SECURE_TIMER] receiver_timer_start', {
-            messageRef,
-            remainingSec: mediaData.timerSeconds,
-          });
-          setTimeLeft(mediaData.timerSeconds);
-        }
-      }
     }
-  }, [visible, mediaData, markViewed, messageId, messageRef, userId, isSender]);
+  }, [visible, mediaData, messageId, messageRef, userId, isSender, prefetchedLocalUri]);
+
+  // Start secure view/timer semantics only after the media has actually loaded
+  // into the fullscreen viewer. Preloading/downloading never marks viewed.
+  useEffect(() => {
+    if (!visible || !mediaData?.url || !mediaUrl) return;
+    if (viewerState !== 'ready') return;
+    if (hasMarkedViewed.current) return;
+    hasMarkedViewed.current = true;
+
+    if (isSender) {
+      // SECURE_TIMER: sender is reviewing their own media. Do NOT call
+      // markViewed and do NOT set timeLeft. Timer UI stays hidden; sender
+      // can review safely without consuming the recipient's timer or
+      // triggering global expiry.
+      if (__DEV__) console.log('[SECURE_TIMER] skip_sender_timer', { messageRef, reason: 'media_ready' });
+      return;
+    }
+
+    // MSG-006 FIX: Use authUserId for server-side verification
+    // [P1_MEDIA_FIX] `markViewed` validator accepts only `{ messageId, authUserId }`.
+    if (__DEV__) console.log('[SECURE_TIMER] markViewed', { messageRef });
+    void markViewed({
+      messageId: asMessageId(messageId),
+      authUserId: userId,
+    }).catch(() => {});
+
+    // ONCE-VIEW-FIX: Skip timer for view-once media
+    // View-once media has NO timer - user can view as long as they want
+    // Expiration happens ONLY when user closes the viewer
+    if (mediaData.viewOnce) {
+      if (__DEV__) console.log('[SECURE-VIEWER] view-once mode: no timer', { messageRef });
+      return;
+    }
+
+    if (mediaData.expiresAt) {
+      // TIMER-FIX: Use absolute deadline (expiresAt) instead of resetting to timerSeconds
+      // This ensures timer continues even if viewer is closed and reopened
+      const remainingMs = mediaData.expiresAt - Date.now();
+      const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+      if (remainingSec > 0) {
+        if (__DEV__) console.log('[SECURE_TIMER] receiver_timer_start', { messageRef, remainingSec });
+        setTimeLeft(remainingSec);
+      } else {
+        // Already expired by deadline
+        setTimeLeft(0);
+      }
+    } else if (mediaData.timerSeconds && mediaData.timerSeconds > 0) {
+      // First open - use timerSeconds (markViewed will set expiresAt on backend)
+      if (__DEV__) console.log('[SECURE_TIMER] receiver_timer_start', {
+        messageRef,
+        remainingSec: mediaData.timerSeconds,
+      });
+      setTimeLeft(mediaData.timerSeconds);
+    }
+  }, [visible, mediaData, mediaUrl, viewerState, markViewed, messageId, messageRef, userId, isSender]);
 
   // 6-2: handleExpire now includes handleClose in deps (no stale closure)
   // MSG-006 FIX: Use authUserId for server-side verification
@@ -329,8 +356,9 @@ export function ProtectedMediaViewer({
       messageId: asMessageId(messageId),
       authUserId: userId,
     }).catch(() => {});
+    cleanupCachedMedia();
     handleClose();
-  }, [messageId, messageRef, userId, markExpired, handleClose, isSender]);
+  }, [messageId, messageRef, userId, markExpired, handleClose, isSender, cleanupCachedMedia]);
 
   // STABILITY FIX: C-5 - Fix timer infinite loop by using proper dependency pattern
   // Compute stable boolean outside effect to avoid expression in dependency array
@@ -412,12 +440,17 @@ export function ProtectedMediaViewer({
     }
   }, []);
 
-  // VIDEO-FIX: Separate video load handler using expo-av
+  // VIDEO-FIX: Keep metadata load separate from visual readiness. The spinner
+  // is hidden by onReadyForDisplay, not by this metadata event.
   const handleVideoLoad = useCallback((status: AVPlaybackStatus) => {
-    if (status.isLoaded) {
-      if (mountedRef.current) {
-        setViewerState('ready');
-      }
+    if (status.isLoaded && __DEV__) {
+      console.log('[SECURE-VIEWER] video metadata loaded', { messageRef });
+    }
+  }, [messageRef]);
+
+  const handleVideoReadyForDisplay = useCallback(() => {
+    if (mountedRef.current) {
+      setViewerState('ready');
     }
   }, []);
 
@@ -427,9 +460,76 @@ export function ProtectedMediaViewer({
     }
   }, []);
 
-  // HOLD-MODE-FIX: Close viewer immediately when finger is released in hold mode
-  // This is critical because the Modal captures touch events, preventing the
-  // original PanResponder from receiving onPanResponderRelease
+  const renderMediaLayer = () => {
+    if (!mediaUrl || viewerState === 'error' || viewerState === 'expired') return null;
+
+    if (isVideo) {
+      return (
+        <View style={styles.imageContainer}>
+          <Video
+            source={{ uri: mediaUrl }}
+            style={[styles.videoPlayer, effectiveIsMirrored && styles.mirrored]}
+            resizeMode={ResizeMode.CONTAIN}
+            shouldPlay={true}
+            isLooping={true}
+            isMuted={false}
+            useNativeControls={false}
+            onLoad={handleVideoLoad}
+            onReadyForDisplay={handleVideoReadyForDisplay}
+            onError={handleVideoError}
+          />
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.imageContainer}>
+        {shouldBlur && Platform.OS === 'ios' ? (
+          // Blur overlay when screenshots not allowed (iOS) - IMAGE
+          <View style={styles.blurWrapper}>
+            <Image
+              source={{ uri: mediaUrl }}
+              style={styles.image}
+              contentFit="contain"
+              blurRadius={20}
+              onLoad={handleImageLoad}
+              onError={handleImageError}
+            />
+            {viewerState === 'ready' && (
+              <View style={styles.blurOverlay}>
+                <Ionicons name="eye-off" size={32} color={COLORS.white} />
+                <Text style={styles.blurText}>Screenshot not allowed by sender</Text>
+                {!requestedAccess ? (
+                  <TouchableOpacity
+                    style={styles.requestAccessButton}
+                    onPress={handleRequestAccess}
+                  >
+                    <Text style={styles.requestAccessText}>Request Access</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <Text style={styles.accessRequestedText}>Access requested</Text>
+                )}
+              </View>
+            )}
+          </View>
+        ) : (
+          // Android: FLAG_SECURE blocks screenshot; iOS screenshot allowed: show clear image
+          <Image
+            source={{ uri: mediaUrl }}
+            style={styles.image}
+            contentFit="contain"
+            onLoad={handleImageLoad}
+            onError={handleImageError}
+          />
+        )}
+      </View>
+    );
+  };
+
+  const mediaLayer = renderMediaLayer();
+
+  const showLoadingOverlay = viewerState === 'loading';
+
   const handleHoldModeRelease = useCallback(() => {
     if (isHoldMode) {
       handleClose();
@@ -479,34 +579,14 @@ export function ProtectedMediaViewer({
           </View>
         </View>
 
-        {/* SECURE-REWRITE: State-based content rendering */}
-        {viewerState === 'loading' && (
-          <View style={styles.loadingContainer}>
+        {mediaLayer}
+
+        {showLoadingOverlay && (
+          <View style={styles.loadingOverlay} pointerEvents="none">
             <ActivityIndicator size="large" color={COLORS.primary} />
             <Text style={styles.loadingText}>
               Loading protected {isVideo ? 'video' : 'photo'}...
             </Text>
-            {/* VIDEO-FIX: ONLY use hidden Image preload for IMAGES, never for videos */}
-            {mediaUrl && !isVideo && (
-              <Image
-                source={{ uri: mediaUrl }}
-                style={styles.hiddenImage}
-                contentFit="contain"
-                onLoad={handleImageLoad}
-                onError={handleImageError}
-              />
-            )}
-            {/* VIDEO-FIX: For video, directly transition to ready (no preload needed) */}
-            {mediaUrl && isVideo && (
-              <Video
-                source={{ uri: mediaUrl }}
-                style={styles.hiddenImage}
-                shouldPlay={false}
-                isMuted={true}
-                onLoad={handleVideoLoad}
-                onError={handleVideoError}
-              />
-            )}
           </View>
         )}
 
@@ -535,73 +615,23 @@ export function ProtectedMediaViewer({
           </View>
         )}
 
-        {viewerState === 'ready' && mediaUrl && (
-          <View style={styles.imageContainer}>
-            {/* VIDEO-FIX: Branch rendering based on mediaType */}
-            {isVideo ? (
-              // VIDEO-FIX: Render expo-av Video for video content (stable lifecycle)
-              // VIDEO-MIRROR-FIX: Apply horizontal flip for front-camera videos
-              <Video
-                source={{ uri: mediaUrl }}
-                style={[styles.videoPlayer, effectiveIsMirrored && styles.mirrored]}
-                resizeMode={ResizeMode.CONTAIN}
-                shouldPlay={true}
-                isLooping={true}
-                isMuted={false}
-                useNativeControls={false}
-              />
-            ) : shouldBlur && Platform.OS === 'ios' ? (
-              // Blur overlay when screenshots not allowed (iOS) - IMAGE
-              <View style={styles.blurWrapper}>
-                <Image
-                  source={{ uri: mediaUrl }}
-                  style={styles.image}
-                  contentFit="contain"
-                  blurRadius={20}
-                />
-                <View style={styles.blurOverlay}>
-                  <Ionicons name="eye-off" size={32} color={COLORS.white} />
-                  <Text style={styles.blurText}>Screenshot not allowed by sender</Text>
-                  {!requestedAccess ? (
-                    <TouchableOpacity
-                      style={styles.requestAccessButton}
-                      onPress={handleRequestAccess}
-                    >
-                      <Text style={styles.requestAccessText}>Request Access</Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <Text style={styles.accessRequestedText}>Access requested</Text>
-                  )}
-                </View>
-              </View>
-            ) : (
-              // Android: FLAG_SECURE blocks screenshot; iOS screenshot allowed: show clear image
-              <Image
-                source={{ uri: mediaUrl }}
-                style={styles.image}
-                contentFit="contain"
-              />
-            )}
-
-            {/* Watermark overlay */}
-            {watermarkText && (
-              <View style={styles.watermarkContainer} pointerEvents="none">
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Text
-                    key={i}
-                    style={[
-                      styles.watermarkText,
-                      {
-                        top: 80 + i * 140,
-                        transform: [{ rotate: '-30deg' }],
-                      },
-                    ]}
-                  >
-                    {watermarkText}
-                  </Text>
-                ))}
-              </View>
-            )}
+        {/* Watermark overlay */}
+        {viewerState === 'ready' && watermarkText && (
+          <View style={styles.watermarkContainer} pointerEvents="none">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Text
+                key={i}
+                style={[
+                  styles.watermarkText,
+                  {
+                    top: 80 + i * 140,
+                    transform: [{ rotate: '-30deg' }],
+                  },
+                ]}
+              >
+                {watermarkText}
+              </Text>
+            ))}
           </View>
         )}
 
@@ -695,11 +725,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
-  loadingContainer: {
-    flex: 1,
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
+    backgroundColor: 'rgba(0,0,0,0.35)',
   },
   loadingText: {
     fontSize: 14,
@@ -750,13 +781,6 @@ const styles = StyleSheet.create({
   // VIDEO-MIRROR-FIX: Horizontal flip for front-camera videos
   mirrored: {
     transform: [{ scaleX: -1 }],
-  },
-  // SECURE-REWRITE: Hidden image for background loading
-  hiddenImage: {
-    width: 1,
-    height: 1,
-    position: 'absolute',
-    opacity: 0,
   },
   blurOverlay: {
     ...StyleSheet.absoluteFillObject,
