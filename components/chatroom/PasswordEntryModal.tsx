@@ -29,6 +29,7 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { isChatRoomTermsRequiredError } from '@/lib/chatRoomSafetyMessages';
 import * as Haptics from 'expo-haptics';
 
 const C = INCOGNITO_COLORS;
@@ -40,6 +41,7 @@ interface PasswordEntryModalProps {
   authUserId: string;
   onSuccess: () => void;
   onCancel: () => void;
+  onTermsRequired?: () => void;
 }
 
 export default function PasswordEntryModal({
@@ -49,6 +51,7 @@ export default function PasswordEntryModal({
   authUserId,
   onSuccess,
   onCancel,
+  onTermsRequired,
 }: PasswordEntryModalProps) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -164,6 +167,10 @@ export default function PasswordEntryModal({
 
       // Handle failure responses
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      if (isChatRoomTermsRequiredError(result.message)) {
+        onTermsRequired?.();
+        return;
+      }
 
       if (result.blocked) {
         setIsBlocked(true);
@@ -192,7 +199,9 @@ export default function PasswordEntryModal({
 
       // Map error messages to user-friendly text
       const message = err.message || 'Failed to join room';
-      if (message.includes('Room not found')) {
+      if (isChatRoomTermsRequiredError(err)) {
+        onTermsRequired?.();
+      } else if (message.includes('Room not found')) {
         setError('This room is no longer available.');
       } else if (message.includes('expired')) {
         setError('This room has expired.');
@@ -203,7 +212,7 @@ export default function PasswordEntryModal({
         setError(message);
       }
     }
-  }, [password, isLoading, isBlocked, cooldownMs, roomId, authUserId, joinRoomWithPasswordMut, onSuccess, stage]);
+  }, [password, isLoading, isBlocked, cooldownMs, roomId, authUserId, joinRoomWithPasswordMut, onSuccess, onTermsRequired, stage]);
 
   const handleCancel = useCallback(() => {
     if (isLoading) return;

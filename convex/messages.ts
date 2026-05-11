@@ -8,6 +8,12 @@ import {
   isChatRoomPrivateDmConversation,
   isChatRoomPrivateDmExpired,
 } from './chatRoomDmRetention';
+import { awardWalletCoins } from './wallet';
+import {
+  formatChatRoomContentPolicyError,
+  validateChatRoomMessageContent,
+} from './lib/chatRoomContentPolicy';
+import { requireChatRoomTermsAccepted, requirePrivateRoomAdult } from './lib/userPolicyGates';
 
 const PHASE1_TEXT_MESSAGE_MAX_LENGTH = 400;
 const SHARED_DM_MESSAGE_MAX_LENGTH = 5000;
@@ -148,6 +154,74 @@ const UNREAD_RECOMPUTE_SCAN_LIMIT = 1000;
 const CHAT_ROOM_PRIVATE_DM_CLEANUP_CONVERSATION_BATCH = 25;
 const CHAT_ROOM_PRIVATE_DM_CLEANUP_MESSAGE_BATCH = 100;
 const DELIVERY_ACK_LIMIT = 200;
+
+function isRealUserDmMessage(type: string, content: string): boolean {
+  if (!COUNTABLE_MESSAGE_TYPES.includes(type)) {
+    return false;
+  }
+  return type !== 'text' && type !== 'template' ? true : content.trim().length > 0;
+}
+
+async function maybeAwardChatRoomDmMutualReplyCoins(
+  ctx: MutationCtx,
+  conversation: Doc<'conversations'>,
+  conversationId: Id<'conversations'>,
+  senderId: Id<'users'>,
+  peerUserId: Id<'users'> | undefined,
+  type: string,
+  content: string,
+  now: number
+): Promise<void> {
+  if (!peerUserId || peerUserId === senderId) return;
+  if (!isChatRoomPrivateDmConversation(conversation)) return;
+  if (conversation.firstMutualReplyAt) return;
+  if (!isRealUserDmMessage(type, content)) return;
+
+  const previousPeerMessage = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
+    .filter((q) =>
+      q.and(
+        q.eq(q.field('senderId'), peerUserId),
+        q.lt(q.field('createdAt'), now),
+        q.or(
+          q.eq(q.field('type'), 'text'),
+          q.eq(q.field('type'), 'image'),
+          q.eq(q.field('type'), 'video'),
+          q.eq(q.field('type'), 'voice'),
+          q.eq(q.field('type'), 'template'),
+          q.eq(q.field('type'), 'dare')
+        )
+      )
+    )
+    .first();
+
+  if (!previousPeerMessage || !isRealUserDmMessage(previousPeerMessage.type, previousPeerMessage.content)) {
+    return;
+  }
+
+  await awardWalletCoins(ctx, {
+    userId: senderId,
+    delta: 1,
+    reason: 'cr_dm_mutual_reply',
+    sourceType: 'chat_room_dm',
+    sourceId: conversationId as string,
+    peerUserId,
+    dedupeKey: `cr_dm_mutual_reply:${conversationId}:${senderId}`,
+    createdAt: now,
+  });
+  await awardWalletCoins(ctx, {
+    userId: peerUserId,
+    delta: 1,
+    reason: 'cr_dm_mutual_reply',
+    sourceType: 'chat_room_dm',
+    sourceId: conversationId as string,
+    peerUserId: senderId,
+    dedupeKey: `cr_dm_mutual_reply:${conversationId}:${peerUserId}`,
+    createdAt: now,
+  });
+  await ctx.db.patch(conversationId, { firstMutualReplyAt: now });
+}
 
 // C1/C2/C3-REPAIR: Helper to compute unread count from source of truth (messages table)
 // Used for: race-safe updates, fallback when participant rows are missing, backfill
@@ -424,6 +498,10 @@ export const sendMessage = mutation({
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) throw new Error('Conversation not found');
+    const isChatRoomDm = isChatRoomPrivateDmConversation(conversation);
+    if (isChatRoomDm) {
+      await requireChatRoomTermsAccepted(ctx, senderId);
+    }
 
     // Verify sender is part of conversation
     if (!conversation.participants.includes(senderId)) {
@@ -480,6 +558,16 @@ export const sendMessage = mutation({
       throw new Error('This chat expired');
     }
 
+    if (isChatRoomDm && sourceRoomId) {
+      const senderBan = await ctx.db
+        .query('chatRoomBans')
+        .withIndex('by_room_user', (q) => q.eq('roomId', sourceRoomId).eq('userId', senderId))
+        .first();
+      if (senderBan) {
+        throw new Error('You can no longer message members of this room.');
+      }
+    }
+
     if ((type === 'text' || type === 'template') && normalizedContent.length === 0) {
       throw new Error('Message cannot be empty');
     }
@@ -502,6 +590,18 @@ export const sendMessage = mutation({
       .take(10);
     if (recentMessages.length >= 10) {
       throw new Error('You are sending messages too quickly');
+    }
+
+    if (isChatRoomDm) {
+      const contentPolicy = validateChatRoomMessageContent({
+        text: normalizedContent,
+        context: 'dm',
+        recentMessages,
+        allowMentions: false,
+      });
+      if (contentPolicy.ok === false) {
+        throw new Error(formatChatRoomContentPolicyError(contentPolicy));
+      }
     }
 
     const sender = await ctx.db.get(senderId);
@@ -553,6 +653,17 @@ export const sendMessage = mutation({
       clientMessageId, // For retry idempotency
       createdAt: now,
     });
+
+    await maybeAwardChatRoomDmMutualReplyCoins(
+      ctx,
+      conversation,
+      conversationId,
+      senderId,
+      recipientId,
+      type,
+      maskedContent,
+      now
+    );
 
     // Update conversation last message time
     await ctx.db.patch(conversationId, {
@@ -1127,6 +1238,15 @@ export const getDmMessages = query({
       }
       if (isChatRoomPrivateDmExpired(conversation)) {
         return { page: [], isDone: true, continueCursor: null, expired: true as const };
+      }
+      if (conversation.sourceRoomId) {
+        const sourceRoom = await ctx.db.get(conversation.sourceRoomId);
+        if (!sourceRoom) {
+          return { page: [], isDone: true, continueCursor: null };
+        }
+        if (!sourceRoom.isPublic) {
+          await requirePrivateRoomAdult(ctx, userId);
+        }
       }
 
       const hideReadFromSender = await recipientHidesReadReceiptsFromSender(ctx, conversation, userId);

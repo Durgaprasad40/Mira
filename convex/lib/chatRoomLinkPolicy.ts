@@ -1,7 +1,9 @@
 export type ChatRoomLinkBlockCategory =
   | 'external_url'
+  | 'generic'
   | 'telegram'
   | 'whatsapp'
+  | 'social'
   | 'payment'
   | 'crypto'
   | 'shortener'
@@ -34,8 +36,20 @@ const ALLOWED_MIRA_HOSTS = new Set([
   'policies.mira.app',
 ]);
 
-const TELEGRAM_HOSTS = new Set(['t.me', 'telegram.me']);
-const WHATSAPP_HOSTS = new Set(['wa.me', 'chat.whatsapp.com']);
+const TELEGRAM_HOSTS = new Set(['t.me', 'telegram.me', 'telegram.dog']);
+const WHATSAPP_HOSTS = new Set(['wa.me', 'whatsapp.com', 'chat.whatsapp.com', 'api.whatsapp.com']);
+const SOCIAL_HOSTS = new Set([
+  'instagram.com',
+  'facebook.com',
+  'fb.com',
+  'fb.me',
+  'snapchat.com',
+  'snap.com',
+  'discord.gg',
+  'discord.com',
+  'signal.org',
+  'signal.me',
+]);
 const PAYMENT_HOSTS = new Set(['paytm.me']);
 const SHORTENER_HOSTS = new Set([
   'bit.ly',
@@ -56,6 +70,8 @@ const YOUTUBE_HOSTS = new Set([
   'youtube.com',
   'www.youtube.com',
   'm.youtube.com',
+  'youtube-nocookie.com',
+  'www.youtube-nocookie.com',
   'youtu.be',
 ]);
 const YOUTUBE_VIDEO_ID = /^[A-Za-z0-9_-]{6,20}$/;
@@ -182,6 +198,11 @@ function isAllowedYouTubeUrl(host: string, path: string): boolean {
     return YOUTUBE_VIDEO_ID.test(trimmed);
   }
 
+  if (cleaned === 'youtube-nocookie.com' || cleaned === 'www.youtube-nocookie.com') {
+    const embedMatch = /^\/embed\/([A-Za-z0-9_-]+)\/?$/.exec(pathname);
+    return !!embedMatch && YOUTUBE_VIDEO_ID.test(embedMatch[1]);
+  }
+
   // youtube.com / www.youtube.com / m.youtube.com
   if (pathname === '/watch' || pathname === '/watch/') {
     const v = extractQueryParam(query, 'v');
@@ -251,6 +272,10 @@ export function validateChatRoomMessageLinks(text: string): ChatRoomLinkPolicyRe
     return blocked('whatsapp');
   }
 
+  if (containsHost(normalized, SOCIAL_HOSTS)) {
+    return blocked('social');
+  }
+
   if (containsHost(normalized, PAYMENT_HOSTS) || containsPaymentHandle(normalized)) {
     return blocked('payment');
   }
@@ -268,13 +293,13 @@ export function validateChatRoomMessageLinks(text: string): ChatRoomLinkPolicyRe
   }
 
   if (containsBlockedExternalUrl(normalized)) {
-    return blocked(hadDotObfuscation ? 'obfuscated' : 'external_url');
+    return blocked(hadDotObfuscation ? 'obfuscated' : 'generic');
   }
 
   if (containsRawUrlPrefix(normalized)) {
     const urls = collectUrls(normalized);
     if (urls.length === 0 || urls.some((u) => !isAllowedExternalUrl(u))) {
-      return blocked('external_url');
+      return blocked('generic');
     }
   }
 

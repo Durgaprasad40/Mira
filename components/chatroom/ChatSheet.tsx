@@ -52,11 +52,13 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { CHAT_ROOM_KEYBOARD_GAP, moderateScale } from '@/lib/responsive';
 
 const C = INCOGNITO_COLORS;
 
 // Resting sheet height as percentage of screen
 const RESTING_HEIGHT_RATIO = 0.55;
+const RESTING_HEIGHT_MAX = moderateScale(480, 0.3);
 
 // Threshold to consider keyboard "open" (accounts for minor fluctuations)
 const KEYBOARD_OPEN_THRESHOLD = 50;
@@ -79,7 +81,7 @@ const KEYBOARD_OPEN_THRESHOLD = 50;
 // At runtime the effective gap is `KEYBOARD_BOTTOM_GAP + insets.bottom`
 // (the latter is the gesture-nav area, which on devices with a software
 // nav button is 0). Applied as a HEIGHT reduction (not a transform).
-const KEYBOARD_BOTTOM_GAP = 40;
+const KEYBOARD_BOTTOM_GAP = CHAT_ROOM_KEYBOARD_GAP;
 
 function getScreenBottomY(): number {
   return Dimensions.get('screen').height;
@@ -123,7 +125,7 @@ export default function ChatSheet({
   const insets = useSafeAreaInsets();
 
   // Heights
-  const restingHeight = getScreenBottomY() * RESTING_HEIGHT_RATIO;
+  const restingHeight = Math.min(getScreenBottomY() * RESTING_HEIGHT_RATIO, RESTING_HEIGHT_MAX);
 
   // State
   const [isVisible, setIsVisible] = useState(false);
@@ -237,6 +239,16 @@ export default function ChatSheet({
   // Always use absolute positioning for consistent behavior.
   // In resting mode: position at bottom with fixed height.
   // In keyboard mode: shrink height so sheet bottom stays above keyboard.
+  //
+  // KEYBOARD-REGRESSION-FIX: Previously this branch was gated behind
+  // `Platform.OS !== 'android'`, which left the Android sheet anchored at the
+  // screen bottom when the keyboard opened. Because PrivateChatView is rendered
+  // with `isModal={true}` inside this sheet (see chat-rooms/[roomId].tsx and
+  // chat-rooms/dm/[dmId].tsx), it has NO KeyboardAvoidingView in that path —
+  // the sheet's own lift IS the only thing that brings the composer/messages
+  // above the IME. Re-enabling the lift on Android restores Samsung/OnePlus
+  // WhatsApp-style behavior without double-applying (no KAV in the modal path
+  // means no second offset).
   const animatedSheetStyle = useAnimatedStyle(() => {
     const keyboardTop = keyboardTopY.value;
     const screenBottom = screenBottomY.value;

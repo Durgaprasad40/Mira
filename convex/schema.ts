@@ -506,6 +506,8 @@ export default defineSchema({
 
     // 8C: Consent timestamp (required before permissions/photo upload)
     consentAcceptedAt: v.optional(v.number()),
+    termsAcceptedAt: v.optional(v.number()),
+    communityGuidelinesAcceptedAt: v.optional(v.number()),
 
     // Privacy
     showLastSeen: v.optional(v.boolean()),
@@ -722,6 +724,7 @@ export default defineSchema({
     participants: v.array(v.id('users')),
     isPreMatch: v.boolean(),
     lastMessageAt: v.optional(v.number()),
+    firstMutualReplyAt: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // Only set for confession-based threads (24h after creation)
     // PRIVACY FIX: Track which participant should be shown anonymously in confession chats
@@ -1383,12 +1386,15 @@ export default defineSchema({
     createdAt: v.number(),
     // Optional: chat room context for in-room reports
     roomId: v.optional(v.string()),
+    messageId: v.optional(v.string()),
+    reportType: v.optional(v.union(v.literal('user'), v.literal('content'))),
   })
     .index('by_reported_user', ['reportedUserId'])
     .index('by_reporter', ['reporterId'])
     .index('by_reporter_reported_created', ['reporterId', 'reportedUserId', 'createdAt'])
     .index('by_status', ['status'])
-    .index('by_room', ['roomId']),
+    .index('by_room', ['roomId'])
+    .index('by_message', ['messageId']),
 
   // Blocks table
   blocks: defineTable({
@@ -2411,6 +2417,7 @@ export default defineSchema({
     readAt: v.optional(v.number()),
   })
     .index('by_mentioned_user_created', ['mentionedUserId', 'createdAt'])
+    .index('by_mentioned_user_readAt', ['mentionedUserId', 'readAt'])
     .index('by_message', ['messageId']),
 
   // Per-room mute of another member's messages (viewer-specific)

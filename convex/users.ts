@@ -2124,10 +2124,10 @@ export const completeOnboarding = mutation({
       throw new Error("User not found");
     }
 
-    // P1 SECURITY FIX: Enforce consent acceptance before allowing onboarding completion
-    // This ensures users have explicitly accepted terms before entering the app
-    if (!user.consentAcceptedAt) {
-      throw new Error("Consent required: please accept the data consent agreement before completing onboarding");
+    // Store-policy gate: users must explicitly accept Privacy, Terms, and
+    // Community Guidelines before completing onboarding or posting UGC.
+    if (!user.consentAcceptedAt || !user.termsAcceptedAt || !user.communityGuidelinesAcceptedAt) {
+      throw new Error("TERMS_REQUIRED");
     }
 
     // PRODUCT REQUIREMENT: Face verification is NON-BLOCKING for onboarding completion

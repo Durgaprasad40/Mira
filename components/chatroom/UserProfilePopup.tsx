@@ -10,7 +10,9 @@ import {
   Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { INCOGNITO_COLORS, lineHeight } from '@/lib/constants';
+import { CHAT_FONTS, CHAT_ROOM_MAX_FONT_SCALE, SPACING, SIZES } from '@/lib/responsive';
 import { DemoOnlineUser } from '@/lib/demoData';
 import type { Id } from '@/convex/_generated/dataModel';
 
@@ -47,6 +49,7 @@ export default function UserProfilePopup({
   isPrivateRoom,
   onKickOut,
 }: UserProfilePopupProps) {
+  const insets = useSafeAreaInsets();
   const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
   // Backdrop only active after open animation finishes (prevents opening touch from closing)
   const [backdropActive, setBackdropActive] = useState(false);
@@ -117,7 +120,7 @@ export default function UserProfilePopup({
           }
         }}
       />
-      <Animated.View style={[styles.sheet, { transform: [{ translateY }] }]}>
+      <Animated.View style={[styles.sheet, { paddingBottom: SPACING.xl + insets.bottom, transform: [{ translateY }] }]}>
         <View style={styles.handle} />
 
         {/* Profile header */}
@@ -126,12 +129,12 @@ export default function UserProfilePopup({
             <Image source={{ uri: user.avatar }} style={styles.avatar} />
           ) : (
             <View style={styles.avatarPlaceholder}>
-              <Ionicons name="person" size={32} color={C.textLight} />
+              <Ionicons name="person" size={SIZES.icon.xl} color={C.textLight} />
             </View>
           )}
           <View style={styles.profileInfo}>
             <View style={styles.nameRow}>
-              <Text style={styles.userName}>{user.username}</Text>
+              <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.userName}>{user.username}</Text>
               <View
                 style={[
                   styles.statusDot,
@@ -139,6 +142,7 @@ export default function UserProfilePopup({
                 ]}
               />
               <Text
+                maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE}
                 style={[
                   styles.statusLabel,
                   { color: user.isOnline ? '#00B894' : C.textLight },
@@ -149,7 +153,7 @@ export default function UserProfilePopup({
               </Text>
             </View>
             {(user.age || user.gender) && (
-              <Text style={styles.meta}>
+              <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.meta}>
                 {user.age && `${user.age} years`}
                 {user.age && user.gender && ' · '}
                 {user.gender && (user.gender === 'male' ? 'Male' : user.gender === 'female' ? 'Female' : 'Other')}
@@ -168,8 +172,8 @@ export default function UserProfilePopup({
               onViewProfile?.(user.id);
             }}
           >
-            <Ionicons name="eye-outline" size={20} color={C.text} />
-            <Text style={styles.actionText}>View Profile</Text>
+            <Ionicons name="eye-outline" size={SIZES.icon.md} color={C.text} />
+            <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.actionText}>View Profile</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -179,8 +183,8 @@ export default function UserProfilePopup({
               onClose();
             }}
           >
-            <Ionicons name="chatbubble-outline" size={20} color={C.text} />
-            <Text style={styles.actionText}>Private Message</Text>
+            <Ionicons name="chatbubble-outline" size={SIZES.icon.md} color={C.text} />
+            <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.actionText}>Private Message</Text>
           </TouchableOpacity>
 
           {showKick ? (
@@ -190,8 +194,8 @@ export default function UserProfilePopup({
                 onKickOut?.(user.id);
               }}
             >
-              <Ionicons name="person-remove-outline" size={20} color="#E53935" />
-              <Text style={[styles.actionText, { color: '#E53935' }]}>Kick Out</Text>
+              <Ionicons name="person-remove-outline" size={SIZES.icon.md} color="#E53935" />
+              <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={[styles.actionText, { color: '#E53935' }]}>Kick Out</Text>
             </TouchableOpacity>
           ) : (
             <TouchableOpacity
@@ -203,10 +207,10 @@ export default function UserProfilePopup({
             >
               <Ionicons
                 name={isMuted ? 'volume-high-outline' : 'volume-mute-outline'}
-                size={20}
+                size={SIZES.icon.md}
                 color={isMuted ? '#00B894' : C.text}
               />
-              <Text style={[styles.actionText, isMuted && { color: '#00B894' }]}>
+              <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={[styles.actionText, isMuted && { color: '#00B894' }]}>
                 {isMuted ? 'Unmute User' : 'Mute User'}
               </Text>
             </TouchableOpacity>
@@ -220,8 +224,8 @@ export default function UserProfilePopup({
               onReport?.(user.id);
             }}
           >
-            <Ionicons name="flag-outline" size={20} color={C.primary} />
-            <Text style={[styles.actionText, { color: C.primary }]}>Report</Text>
+            <Ionicons name="flag-outline" size={SIZES.icon.md} color={C.primary} />
+            <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={[styles.actionText, { color: C.primary }]}>Report</Text>
           </TouchableOpacity>
         </View>
 
@@ -232,7 +236,7 @@ export default function UserProfilePopup({
             onClose();
           }}
         >
-          <Text style={styles.closeText}>Close</Text>
+          <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.closeText}>Close</Text>
         </TouchableOpacity>
       </Animated.View>
     </View>
@@ -251,35 +255,34 @@ const styles = StyleSheet.create({
   },
   sheet: {
     backgroundColor: C.surface,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingHorizontal: 24,
-    paddingBottom: 40,
-    paddingTop: 12,
+    borderTopLeftRadius: SIZES.radius.lg,
+    borderTopRightRadius: SIZES.radius.lg,
+    paddingHorizontal: SPACING.xl,
+    paddingTop: SPACING.md,
   },
   handle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
+    width: SIZES.avatar.sm + SPACING.xs,
+    height: SPACING.xs,
+    borderRadius: SIZES.radius.xxs,
     backgroundColor: C.accent,
     alignSelf: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.base,
   },
   profileHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
-    marginBottom: 20,
+    gap: SPACING.md,
+    marginBottom: SPACING.lg,
   },
   avatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: SIZES.avatar.lg,
+    height: SIZES.avatar.lg,
+    borderRadius: SIZES.avatar.lg / 2,
   },
   avatarPlaceholder: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: SIZES.avatar.lg,
+    height: SIZES.avatar.lg,
+    borderRadius: SIZES.avatar.lg / 2,
     backgroundColor: C.accent,
     alignItems: 'center',
     justifyContent: 'center',
@@ -290,55 +293,60 @@ const styles = StyleSheet.create({
   nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.sm,
   },
   userName: {
-    fontSize: 18,
+    fontSize: CHAT_FONTS.panelTitle,
     fontWeight: '700',
+    lineHeight: lineHeight(CHAT_FONTS.panelTitle, 1.2),
     color: C.text,
   },
   statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: SPACING.sm,
+    height: SPACING.sm,
+    borderRadius: SPACING.sm / 2,
   },
   statusLabel: {
-    fontSize: 12,
+    fontSize: CHAT_FONTS.secondary,
     fontWeight: '500',
+    lineHeight: lineHeight(CHAT_FONTS.secondary, 1.2),
   },
   meta: {
-    fontSize: 13,
+    fontSize: CHAT_FONTS.label,
+    lineHeight: lineHeight(CHAT_FONTS.label, 1.35),
     color: C.textLight,
-    marginTop: 3,
+    marginTop: SPACING.xxs,
   },
   actions: {
-    gap: 2,
+    gap: SPACING.xxs,
   },
   actionButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 4,
+    gap: SPACING.md,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xs,
     borderBottomWidth: 1,
     borderBottomColor: C.accent,
   },
   actionText: {
-    fontSize: 15,
+    fontSize: CHAT_FONTS.buttonText,
     fontWeight: '500',
+    lineHeight: lineHeight(CHAT_FONTS.buttonText, 1.2),
     color: C.text,
   },
   closeButton: {
     alignSelf: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 32,
-    borderRadius: 20,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xxl,
+    borderRadius: SIZES.radius.lg,
     backgroundColor: C.accent,
-    marginTop: 20,
+    marginTop: SPACING.lg,
   },
   closeText: {
-    fontSize: 14,
+    fontSize: CHAT_FONTS.buttonText,
     fontWeight: '600',
+    lineHeight: lineHeight(CHAT_FONTS.buttonText, 1.2),
     color: C.text,
   },
 });

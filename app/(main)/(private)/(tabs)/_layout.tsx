@@ -12,9 +12,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { getTabLabelFontSize, SCREEN } from '@/lib/responsive';
+import {
+  CHAT_ROOM_BADGE_FONT,
+  CHAT_ROOM_BADGE_SIZE,
+  getTabLabelFontSize,
+  SCREEN,
+} from '@/lib/responsive';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
-import { useDemoDmStore, computeUnreadDmCountsByRoom } from '@/stores/demoDmStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import type { ConnectionSource, IncognitoConversation } from '@/types';
@@ -172,23 +176,18 @@ export default function PrivateTabsLayout() {
   }, [pendingConnectRequests]);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // BADGE 3: Chat Rooms - rooms with unread DMs
-  // Demo mode uses store, production would need backend query
-  // For now, use demo store as fallback (production backend query TBD)
+  // BADGE 3: Chat Rooms - backend unread DMs + unread mentions
   // ═══════════════════════════════════════════════════════════════════════════
-  const dmConversations = useDemoDmStore((s) => s.conversations);
-  const dmMeta = useDemoDmStore((s) => s.meta);
-
-  const roomsWithUnread = useMemo(() => {
-    try {
-      // Use demo store computation for now
-      // Production: Will add api.messages.getUnreadDmCountsByRoom when userId resolution is ready
-      const result = computeUnreadDmCountsByRoom({ conversations: dmConversations, meta: dmMeta }, currentUserId);
-      return result.roomsWithUnread;
-    } catch {
-      return 0;
-    }
-  }, [dmConversations, dmMeta, currentUserId]);
+  const chatRoomUnreadDmCounts = useQuery(
+    api.chatRooms.getUnreadDmCountsByRoom,
+    authUserId && !isDemoMode ? { authUserId } : 'skip'
+  );
+  const chatRoomUnreadMentionCounts = useQuery(
+    api.chatRooms.getUnreadMentionCount,
+    authUserId && !isDemoMode ? { authUserId } : 'skip'
+  );
+  const chatRoomsBadgeCount = (chatRoomUnreadDmCounts?.totalUnread ?? 0) +
+    (chatRoomUnreadMentionCounts?.totalUnread ?? 0);
 
   // Tab bar height calculation for Android
   const TAB_BAR_CONTENT_HEIGHT = 56;
@@ -242,9 +241,9 @@ export default function PrivateTabsLayout() {
           tabBarBadge: todPendingCount > 0 ? todPendingCount : undefined,
           tabBarBadgeStyle: {
             backgroundColor: '#E94560',
-            fontSize: 10,
-            minWidth: 18,
-            height: 18,
+            fontSize: CHAT_ROOM_BADGE_FONT,
+            minWidth: CHAT_ROOM_BADGE_SIZE,
+            height: CHAT_ROOM_BADGE_SIZE,
           },
         }}
       />
@@ -255,12 +254,12 @@ export default function PrivateTabsLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="chatbubbles" size={size} color={color} />
           ),
-          tabBarBadge: roomsWithUnread > 0 ? roomsWithUnread : undefined,
+          tabBarBadge: chatRoomsBadgeCount > 0 ? chatRoomsBadgeCount : undefined,
           tabBarBadgeStyle: {
             backgroundColor: C.primary,
-            fontSize: 10,
-            minWidth: 18,
-            height: 18,
+            fontSize: CHAT_ROOM_BADGE_FONT,
+            minWidth: CHAT_ROOM_BADGE_SIZE,
+            height: CHAT_ROOM_BADGE_SIZE,
           },
         }}
       />
@@ -274,9 +273,9 @@ export default function PrivateTabsLayout() {
           tabBarBadge: messagesBadgeCount > 0 ? messagesBadgeCount : undefined,
           tabBarBadgeStyle: {
             backgroundColor: C.primary,
-            fontSize: 10,
-            minWidth: 18,
-            height: 18,
+            fontSize: CHAT_ROOM_BADGE_FONT,
+            minWidth: CHAT_ROOM_BADGE_SIZE,
+            height: CHAT_ROOM_BADGE_SIZE,
           },
         }}
         listeners={{

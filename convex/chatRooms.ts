@@ -6,11 +6,19 @@ import { asUserId } from './id';
 import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
 import { resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2ChatRoomsNotification } from './phase2NotificationPrefs';
-import { validateChatRoomMessageLinks } from './lib/chatRoomLinkPolicy';
+import {
+  formatChatRoomContentPolicyError,
+  validateChatRoomMessageContent,
+} from './lib/chatRoomContentPolicy';
 import {
   isChatRoomPrivateDmConversation,
   isChatRoomPrivateDmExpired,
 } from './chatRoomDmRetention';
+import {
+  isUserAdultForPrivateRooms,
+  requireChatRoomTermsAccepted,
+  requirePrivateRoomAdult,
+} from './lib/userPolicyGates';
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -761,6 +769,30 @@ async function findRecentRoomUserReport(
   );
 }
 
+async function findRecentRoomContentReport(
+  ctx: QueryCtx | MutationCtx,
+  reporterId: Id<'users'>,
+  messageId: string,
+  now: number
+): Promise<Doc<'reports'> | null> {
+  const cutoff = now - ROOM_REPORT_DEDUP_WINDOW_MS;
+  const reports = await ctx.db
+    .query('reports')
+    .withIndex('by_message', (q) => q.eq('messageId', messageId))
+    .collect();
+
+  return (
+    reports
+      .filter(
+        (report) =>
+          String(report.reporterId) === String(reporterId) &&
+          report.reportType === 'content' &&
+          report.createdAt > cutoff
+      )
+      .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
+  );
+}
+
 async function hasActiveSevereRoomReportBetweenUsers(
   ctx: QueryCtx | MutationCtx,
   userId1: Id<'users'>,
@@ -1077,6 +1109,149 @@ async function upsertConversationParticipant(
   }
 }
 
+function chatRoomPrivateDmPairKey(
+  userId: Id<'users'>,
+  peerUserId: Id<'users'>
+): string {
+  return [userId as string, peerUserId as string].sort().join(':');
+}
+
+function isExactParticipantPair(
+  conversation: Doc<'conversations'>,
+  pairKey: string
+): boolean {
+  if (conversation.participants.length !== 2) return false;
+  return conversation.participants.map((id) => id as string).sort().join(':') === pairKey;
+}
+
+function getChatRoomPrivateDmSortTime(conversation: Doc<'conversations'>): number {
+  const updatedAt = (conversation as { updatedAt?: number }).updatedAt;
+  return conversation.lastMessageAt ?? updatedAt ?? conversation.createdAt ?? conversation._creationTime;
+}
+
+function compareChatRoomPrivateDmByNewestActivity(
+  a: Doc<'conversations'>,
+  b: Doc<'conversations'>
+): number {
+  const activityDiff = getChatRoomPrivateDmSortTime(b) - getChatRoomPrivateDmSortTime(a);
+  if (activityDiff !== 0) return activityDiff;
+  return b._creationTime - a._creationTime;
+}
+
+async function findActiveChatRoomPrivateDmConversationsForPair(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<'users'>,
+  peerUserId: Id<'users'>,
+  now: number
+): Promise<Array<Doc<'conversations'>>> {
+  const pairKey = chatRoomPrivateDmPairKey(userId, peerUserId);
+  const participantRows = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .collect();
+
+  const seen = new Set<string>();
+  const conversations: Array<Doc<'conversations'>> = [];
+  for (const row of participantRows) {
+    const conversationId = row.conversationId as string;
+    if (seen.has(conversationId)) continue;
+    seen.add(conversationId);
+
+    const conversation = await ctx.db.get(row.conversationId);
+    if (!conversation) continue;
+    if (!isChatRoomPrivateDmConversation(conversation)) continue;
+    if (isChatRoomPrivateDmExpired(conversation, now)) continue;
+    if (!isExactParticipantPair(conversation, pairKey)) continue;
+    conversations.push(conversation);
+  }
+
+  return conversations.sort(compareChatRoomPrivateDmByNewestActivity);
+}
+
+async function deleteEmptyChatRoomPrivateDmConversationIfSafe(
+  ctx: MutationCtx,
+  conversation: Doc<'conversations'>
+): Promise<boolean> {
+  const message = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversation._id))
+    .first();
+  if (message) {
+    return false;
+  }
+
+  const media = await ctx.db
+    .query('media')
+    .withIndex('by_chat', (q) => q.eq('chatId', conversation._id))
+    .first();
+  if (media) {
+    return false;
+  }
+
+  const securityEvent = await ctx.db
+    .query('securityEvents')
+    .withIndex('by_chat', (q) => q.eq('chatId', conversation._id))
+    .first();
+  if (securityEvent) {
+    return false;
+  }
+
+  const typingRows = await ctx.db
+    .query('typingStatus')
+    .withIndex('by_conversation', (q) => q.eq('conversationId', conversation._id))
+    .collect();
+  for (const typing of typingRows) {
+    await ctx.db.delete(typing._id);
+  }
+
+  for (const participantId of conversation.participants) {
+    const hidden = await ctx.db
+      .query('chatRoomHiddenDmConversations')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', participantId).eq('conversationId', conversation._id)
+      )
+      .first();
+    if (hidden) {
+      await ctx.db.delete(hidden._id);
+    }
+  }
+
+  const participantRows = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_conversation', (q) => q.eq('conversationId', conversation._id))
+    .collect();
+  for (const participant of participantRows) {
+    await ctx.db.delete(participant._id);
+  }
+
+  await ctx.db.delete(conversation._id);
+  return true;
+}
+
+async function cleanupDuplicateActiveChatRoomPrivateDmsForPair(
+  ctx: MutationCtx,
+  userId: Id<'users'>,
+  peerUserId: Id<'users'>,
+  now: number
+): Promise<Id<'conversations'> | null> {
+  const activeConversations = await findActiveChatRoomPrivateDmConversationsForPair(
+    ctx,
+    userId,
+    peerUserId,
+    now
+  );
+  const [keep, ...duplicates] = activeConversations;
+  if (!keep) return null;
+
+  // Keep the newest active row so the canonical conversation matches the
+  // inbox card users already see. Only empty duplicates are deleted here.
+  for (const duplicate of duplicates) {
+    await deleteEmptyChatRoomPrivateDmConversationIfSafe(ctx, duplicate);
+  }
+
+  return keep._id;
+}
+
 /**
  * Requires valid room membership for READ access.
  *
@@ -1113,6 +1288,10 @@ async function requireRoomReadAccess(
   const now = Date.now();
   if (room.expiresAt && room.expiresAt <= now) {
     throw new Error('Room has expired');
+  }
+
+  if (!room.isPublic) {
+    await requirePrivateRoomAdult(ctx, userId);
   }
 
   // 4. Check user is not banned from this room
@@ -1447,6 +1626,12 @@ export const getRoom = query({
         return room;
       }
 
+      const viewer = await ctx.db.get(userId);
+      if (!isUserAdultForPrivateRooms(viewer)) {
+        console.log('GET ROOM RESULT', null);
+        return null;
+      }
+
       let ban = null as Doc<'chatRoomBans'> | null;
       try {
         ban = await ctx.db
@@ -1564,6 +1749,13 @@ export const listMessages = query({
     }
 
     if (!room.isPublic) {
+      try {
+        await requirePrivateRoomAdult(ctx, userId);
+      } catch (err) {
+        console.error('LIST_MESSAGES FAIL AT_PRIVATE_ROOM_AGE_CHECK', err);
+        return empty;
+      }
+
       let ban: Doc<'chatRoomBans'> | null = null;
       try {
         ban = await ctx.db
@@ -1977,6 +2169,15 @@ export const joinRoom = mutation({
       throw new Error('Access denied: you are banned from this room');
     }
 
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+    if (!room.isPublic) {
+      await requireChatRoomTermsAccepted(ctx, userId);
+      await requirePrivateRoomAdult(ctx, userId);
+    }
+
     const now = Date.now();
 
     // MEMBER-STRIP FIX: Always update lastActive so user appears online in room
@@ -2152,6 +2353,7 @@ export const sendMessage = mutation({
     // SEND-FIX: Use resolved userId as senderId (removed mismatch check)
     // The authenticated user IS the sender - no need for separate senderId param
     const senderId = userId;
+    await requireChatRoomTermsAccepted(ctx, senderId);
 
     // 1. Idempotency check via clientId
     if (clientId) {
@@ -2164,21 +2366,6 @@ export const sendMessage = mutation({
       if (existing) {
         return existing._id; // Return existing message ID (deduplicated)
       }
-    }
-
-    // MVP room safety: block links, payment handles, phone numbers, and common
-    // scam contact routes in Phase-2 group chat rooms before persistence.
-    const linkPolicyText = [
-      text ?? '',
-      ...(mentions ?? []).map((mention) => mention.nickname),
-    ].join(' ');
-    const linkPolicy = validateChatRoomMessageLinks(linkPolicyText);
-    if (!linkPolicy.ok) {
-      throw new ConvexError({
-        code: linkPolicy.code,
-        category: linkPolicy.category,
-        message: 'Links and payment contact details are not allowed in chat rooms.',
-      });
     }
 
     // 2. Rate limiting: max 10 messages per minute per user per room
@@ -2195,6 +2382,28 @@ export const sendMessage = mutation({
         )
       )
       .take(10);
+
+    // Room safety: block scam/contact/unsafe content and repeated copy-paste
+    // before persistence. This lives in the mutation so direct clients cannot
+    // bypass it.
+    const contentPolicyText = [
+      text ?? '',
+      ...(mentions ?? []).map((mention) => mention.nickname),
+    ].join(' ');
+    const contentPolicy = validateChatRoomMessageContent({
+      text: contentPolicyText,
+      context: 'room',
+      recentMessages,
+      mentions,
+      allowMentions: true,
+    });
+    if (contentPolicy.ok === false) {
+      throw new ConvexError({
+        code: contentPolicy.code,
+        category: contentPolicy.category,
+        message: formatChatRoomContentPolicyError(contentPolicy),
+      });
+    }
 
     if (recentMessages.length >= 10) {
       throw new Error('Rate limit exceeded: max 10 messages per minute');
@@ -2678,6 +2887,10 @@ export const createPrivateRoom = mutation({
 
     // Check if demo user (for coin bypass)
     const isDemoUser = isDemo === true && !!demoUserId;
+    if (!isDemoUser) {
+      await requireChatRoomTermsAccepted(ctx, createdBy);
+      await requirePrivateRoomAdult(ctx, createdBy);
+    }
 
     // 2. Check wallet balance (skip for demo users)
     let currentCoins = 0;
@@ -2807,6 +3020,10 @@ export const joinRoomByCode = mutation({
     }
     if (roomId && room._id !== roomId) {
       throw new Error('This code does not match the selected room.');
+    }
+    if (!room.isPublic) {
+      await requireChatRoomTermsAccepted(ctx, userId);
+      await requirePrivateRoomAdult(ctx, userId);
     }
 
     // 4. Check if room is expired
@@ -4349,6 +4566,11 @@ export const checkRoomAccess = query({
       return { status: 'expired' as const };
     }
 
+    const user = await ctx.db.get(userId);
+    if (!isUserAdultForPrivateRooms(user)) {
+      return { status: 'age_restricted' as const };
+    }
+
     // Check if banned/kicked
     const ban = await ctx.db
       .query('chatRoomBans')
@@ -4453,6 +4675,8 @@ export const requestJoinPrivateRoom = mutation({
     if (room.isPublic) {
       throw new Error('This is a public room. No password required.');
     }
+    await requireChatRoomTermsAccepted(ctx, userId);
+    await requirePrivateRoomAdult(ctx, userId);
 
     // 4. Check if expired
     const now = Date.now();
@@ -4650,6 +4874,8 @@ export const approveJoinRequest = mutation({
     if (ban) {
       throw new Error('User is banned from this room');
     }
+    await requireChatRoomTermsAccepted(ctx, targetUserId);
+    await requirePrivateRoomAdult(ctx, targetUserId);
 
     // 4. Find and update request
     const request = await ctx.db
@@ -5105,8 +5331,10 @@ export const submitChatRoomReport = mutation({
       v.literal('selling')
     ),
     details: v.optional(v.string()),
+    messageId: v.optional(v.string()),
+    reportType: v.optional(v.union(v.literal('user'), v.literal('content'))),
   },
-  handler: async (ctx, { authUserId, reportedUserId, roomId, reason, details }) => {
+  handler: async (ctx, { authUserId, reportedUserId, roomId, reason, details, messageId, reportType }) => {
     // 1. SECURITY: Authenticate the reporter
     if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
@@ -5116,8 +5344,30 @@ export const submitChatRoomReport = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
+    const effectiveReportType = reportType ?? 'user';
+    let reportedId = await resolveUserIdByAuthId(ctx, reportedUserId);
+    let effectiveMessageId: string | undefined;
+
+    if (effectiveReportType === 'content') {
+      if (!messageId) {
+        throw new Error('Message not found');
+      }
+      const normalizedMessageId = ctx.db.normalizeId('chatRoomMessages', messageId);
+      if (!normalizedMessageId) {
+        throw new Error('Message not found');
+      }
+      const message = await ctx.db.get(normalizedMessageId);
+      if (!message || message.deletedAt) {
+        throw new Error('Message not found');
+      }
+      if (roomId && String(message.roomId) !== roomId) {
+        throw new Error('Message not found');
+      }
+      reportedId = message.senderId;
+      effectiveMessageId = String(message._id);
+    }
+
     // 2. Resolve reported user ID
-    const reportedId = await resolveUserIdByAuthId(ctx, reportedUserId);
     if (!reportedId) {
       throw new Error('Reported user not found');
     }
@@ -5129,7 +5379,21 @@ export const submitChatRoomReport = mutation({
 
     // 4. Dedup same reporter → reported user → room reports for 24h.
     const now = Date.now();
-    if (roomId) {
+    if (effectiveReportType === 'content' && effectiveMessageId) {
+      const existingRecentReport = await findRecentRoomContentReport(
+        ctx,
+        reporterId,
+        effectiveMessageId,
+        now
+      );
+      if (existingRecentReport) {
+        return {
+          success: true,
+          duplicate: true,
+          message: 'You already reported this message recently.',
+        };
+      }
+    } else if (roomId) {
       const existingRecentReport = await findRecentRoomUserReport(
         ctx,
         reporterId,
@@ -5155,6 +5419,8 @@ export const submitChatRoomReport = mutation({
       status: 'pending',
       createdAt: now,
       roomId: roomId ?? undefined,
+      messageId: effectiveMessageId,
+      reportType: effectiveReportType,
     });
 
     // 6. Also mark the room as reported (for quick lookups)
@@ -5794,7 +6060,7 @@ export const getDmThreads = query({
       unreadCount: number;
     };
 
-    const threadsByRoomPeer = new Map<string, ThreadRow>();
+    const threadsByPeer = new Map<string, ThreadRow>();
 
     for (const row of participantRows) {
       try {
@@ -5811,14 +6077,19 @@ export const getDmThreads = query({
           .order('desc')
           .first();
 
+        const updatedAt = (conversation as { updatedAt?: number }).updatedAt;
         const lastMessageAt =
-          lastMsg?.createdAt ?? conversation.lastMessageAt ?? conversation.createdAt;
+          lastMsg?.createdAt ??
+          conversation.lastMessageAt ??
+          updatedAt ??
+          conversation.createdAt ??
+          conversation._creationTime;
         const hiddenAt = hiddenAtByConversationId.get(conversation._id as string);
         if (hiddenAt !== undefined && hiddenAt >= lastMessageAt) continue;
 
         const peerId = conversation.participants.find((p) => p !== userId);
         if (!peerId) continue;
-        const dedupeKey = `${conversation.sourceRoomId as string}:${peerId as string}`;
+        const dedupeKey = peerId as string;
 
         const peer = await ctx.db.get(peerId);
         if (!peer) continue;
@@ -5853,9 +6124,9 @@ export const getDmThreads = query({
         }
 
         const unreadCount = row.unreadCount ?? 0;
-        const existingThread = threadsByRoomPeer.get(dedupeKey);
+        const existingThread = threadsByPeer.get(dedupeKey);
         if (!existingThread) {
-          threadsByRoomPeer.set(dedupeKey, {
+          threadsByPeer.set(dedupeKey, {
             id: conversation._id as string,
             peerId: peerId as string,
             peerName,
@@ -5883,7 +6154,7 @@ export const getDmThreads = query({
       }
     }
 
-    const threads = Array.from(threadsByRoomPeer.values());
+    const threads = Array.from(threadsByPeer.values());
     threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
     return threads;
   },
@@ -5959,6 +6230,43 @@ export const getUserMentions = query({
     } catch {
       return [];
     }
+  },
+});
+
+export const getUnreadMentionCount = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { totalUnread: 0, perRoom: {} as Record<string, number> };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { totalUnread: 0, perRoom: {} as Record<string, number> };
+    }
+
+    const rows = await ctx.db
+      .query('chatRoomMentionNotifications')
+      .withIndex('by_mentioned_user_readAt', (q) =>
+        q.eq('mentionedUserId', userId).eq('readAt', undefined)
+      )
+      .collect();
+
+    const perRoom: Record<string, number> = {};
+    let totalUnread = 0;
+    for (const row of rows) {
+      if (row.readAt != null) continue;
+      const roomId = row.roomId as string;
+      perRoom[roomId] = (perRoom[roomId] ?? 0) + 1;
+      totalUnread += 1;
+    }
+
+    return {
+      totalUnread,
+      perRoom,
+    };
   },
 });
 
@@ -6273,6 +6581,7 @@ export const getOrCreateDmThread = mutation({
   },
   handler: async (ctx, { authUserId, peerUserId, sourceRoomId }) => {
     const userId = await requireAuthenticatedUser(ctx, authUserId);
+    await requireChatRoomTermsAccepted(ctx, userId);
     if (userId === peerUserId) {
       throw new Error('Invalid recipient');
     }
@@ -6313,39 +6622,13 @@ export const getOrCreateDmThread = mutation({
         ? [userId, peerUserId]
         : [peerUserId, userId];
 
-    let found: Id<'conversations'> | null = null;
-
-    if (sourceRoomId) {
-      const candidates = await ctx.db
-        .query('conversations')
-        .withIndex('by_source_room', (q) => q.eq('sourceRoomId', sourceRoomId))
-        .collect();
-      for (const c of candidates) {
-        if (c.participants.length !== 2) continue;
-        if (!c.participants.includes(userId) || !c.participants.includes(peerUserId)) {
-          continue;
-        }
-        if (isChatRoomPrivateDmExpired(c, now)) {
-          continue;
-        }
-        found = c._id;
-        break;
-      }
-    } else {
-      const mine = await ctx.db
-        .query('conversationParticipants')
-        .withIndex('by_user', (q) => q.eq('userId', userId))
-        .collect();
-      for (const row of mine) {
-        const c = await ctx.db.get(row.conversationId);
-        if (!c || c.participants.length !== 2) continue;
-        if (!c.participants.includes(peerUserId)) continue;
-        if (!isChatRoomPrivateDmConversation(c)) continue;
-        if (isChatRoomPrivateDmExpired(c, now)) continue;
-        found = c._id;
-        break;
-      }
-    }
+    const [activeConversation] = await findActiveChatRoomPrivateDmConversationsForPair(
+      ctx,
+      userId,
+      peerUserId,
+      now
+    );
+    const found = activeConversation?._id ?? null;
 
     if (!found) {
       const conversationId = await ctx.db.insert('conversations', {
@@ -6368,7 +6651,14 @@ export const getOrCreateDmThread = mutation({
         unreadCount: 0,
       });
 
-      return { threadId: conversationId };
+      const canonicalConversationId = await cleanupDuplicateActiveChatRoomPrivateDmsForPair(
+        ctx,
+        userId,
+        peerUserId,
+        now
+      );
+
+      return { threadId: canonicalConversationId ?? conversationId };
     }
 
     await upsertConversationParticipant(ctx, found, userId);
@@ -6603,6 +6893,15 @@ export const joinRoomWithPassword = mutation({
       const userId = await resolveUserIdByAuthId(ctx, authUserId);
       if (!userId) {
         return { success: false, message: 'User not found' };
+      }
+      try {
+        await requireChatRoomTermsAccepted(ctx, userId);
+        await requirePrivateRoomAdult(ctx, userId);
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : 'AGE_RESTRICTED_PRIVATE_ROOM',
+        };
       }
 
       // P1: Check chatRoomBans table (source of truth), not the legacy

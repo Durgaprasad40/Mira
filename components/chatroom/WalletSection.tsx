@@ -1,7 +1,8 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import { INCOGNITO_COLORS, lineHeight } from '@/lib/constants';
+import { CHAT_FONTS, CHAT_ROOM_MAX_FONT_SCALE, SPACING, SIZES, normalizeFont } from '@/lib/responsive';
 
 const C = INCOGNITO_COLORS;
 
@@ -13,17 +14,17 @@ export default function WalletSection({ coins }: WalletSectionProps) {
   return (
     <View style={styles.container}>
       <View style={styles.row}>
-        <Ionicons name="wallet-outline" size={20} color={C.text} />
-        <Text style={styles.label}>Wallet</Text>
+        <Ionicons name="wallet-outline" size={SIZES.icon.md} color={C.text} />
+        <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.label}>Wallet</Text>
       </View>
       <View style={styles.balanceRow}>
         <View style={styles.coinIcon}>
-          <Ionicons name="ellipse" size={16} color="#FFD700" />
+          <Ionicons name="ellipse" size={SIZES.icon.sm} color="#FFD700" />
         </View>
-        <Text style={styles.coins}>{coins}</Text>
-        <Text style={styles.coinLabel}>coins</Text>
+        <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.coins}>{coins}</Text>
+        <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.coinLabel}>coins</Text>
       </View>
-      <Text style={styles.hint}>Earn coins through genuine conversations.</Text>
+      <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.hint}>Earn coins through genuine conversations.</Text>
     </View>
   );
 }
@@ -31,43 +32,47 @@ export default function WalletSection({ coins }: WalletSectionProps) {
 const styles = StyleSheet.create({
   container: {
     backgroundColor: C.background,
-    borderRadius: 12,
-    padding: 16,
-    gap: 8,
+    borderRadius: SIZES.radius.md,
+    padding: SPACING.base,
+    gap: SPACING.sm,
   },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.sm,
   },
   label: {
-    fontSize: 14,
+    fontSize: CHAT_FONTS.buttonText,
     fontWeight: '700',
+    lineHeight: lineHeight(CHAT_FONTS.buttonText, 1.2),
     color: C.text,
   },
   balanceRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: SPACING.xs + SPACING.xxs,
   },
   coinIcon: {
-    width: 20,
-    height: 20,
+    width: SIZES.icon.md,
+    height: SIZES.icon.md,
     alignItems: 'center',
     justifyContent: 'center',
   },
   coins: {
-    fontSize: 24,
+    fontSize: normalizeFont(24, { minSize: 22, maxSize: 26 }),
     fontWeight: '800',
+    lineHeight: lineHeight(normalizeFont(24, { minSize: 22, maxSize: 26 }), 1.1),
     color: '#FFD700',
   },
   coinLabel: {
-    fontSize: 14,
+    fontSize: CHAT_FONTS.buttonText,
+    lineHeight: lineHeight(CHAT_FONTS.buttonText, 1.2),
     color: C.textLight,
-    marginTop: 2,
+    marginTop: SPACING.xxs,
   },
   hint: {
-    fontSize: 11,
+    fontSize: CHAT_FONTS.secondary,
+    lineHeight: lineHeight(CHAT_FONTS.secondary, 1.35),
     color: C.textLight,
     fontStyle: 'italic',
   },

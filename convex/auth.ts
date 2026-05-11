@@ -1395,6 +1395,9 @@ export const canUserInteractFull = query({
 export const acceptConsent = mutation({
   args: {
     userId: v.id("users"),
+    acceptedTerms: v.optional(v.boolean()),
+    acceptedPrivacy: v.optional(v.boolean()),
+    acceptedCommunityGuidelines: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { userId } = args;
@@ -1405,14 +1408,32 @@ export const acceptConsent = mutation({
       throw new Error("User not found");
     }
 
-    // Already accepted
-    if (user.consentAcceptedAt) {
+    const explicitPolicyAcceptance =
+      args.acceptedTerms === true &&
+      args.acceptedPrivacy === true &&
+      args.acceptedCommunityGuidelines === true;
+
+    const updates: {
+      consentAcceptedAt?: number;
+      termsAcceptedAt?: number;
+      communityGuidelinesAcceptedAt?: number;
+    } = {};
+
+    if (!user.consentAcceptedAt) {
+      updates.consentAcceptedAt = now;
+    }
+    if (explicitPolicyAcceptance && !user.termsAcceptedAt) {
+      updates.termsAcceptedAt = now;
+    }
+    if (explicitPolicyAcceptance && !user.communityGuidelinesAcceptedAt) {
+      updates.communityGuidelinesAcceptedAt = now;
+    }
+
+    if (Object.keys(updates).length === 0) {
       return { success: true, alreadyAccepted: true };
     }
 
-    await ctx.db.patch(userId, {
-      consentAcceptedAt: now,
-    });
+    await ctx.db.patch(userId, updates);
 
     return { success: true };
   },
@@ -1432,6 +1453,13 @@ export const getConsentStatus = query({
     return {
       accepted: !!user.consentAcceptedAt,
       acceptedAt: user.consentAcceptedAt,
+      termsAcceptedAt: user.termsAcceptedAt,
+      communityGuidelinesAcceptedAt: user.communityGuidelinesAcceptedAt,
+      requiredPoliciesAccepted: !!(
+        user.consentAcceptedAt &&
+        user.termsAcceptedAt &&
+        user.communityGuidelinesAcceptedAt
+      ),
     };
   },
 });

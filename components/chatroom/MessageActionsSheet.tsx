@@ -16,7 +16,7 @@ const C = INCOGNITO_COLORS;
 const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // Popup dimensions for positioning calculations
-const POPUP_WIDTH = 140;
+const POPUP_WIDTH = 184;
 const REACTION_BAR_WIDTH = 256; // 6 emojis × 40px + padding
 const REACTION_BAR_HEIGHT = 56;
 const POPUP_HEIGHT = 88; // 2 actions × 44px each (Delete + Report)
@@ -206,7 +206,7 @@ export default function MessageActionsSheet({
           {showReport && (
             <TouchableOpacity style={styles.action} onPress={handleReport}>
               <Ionicons name="flag-outline" size={18} color={C.primary} />
-              <Text style={[styles.actionText, { color: C.primary }]}>Report</Text>
+              <Text style={[styles.actionText, { color: C.primary }]}>Report this message</Text>
             </TouchableOpacity>
           )}
         </View>

@@ -27,6 +27,7 @@ const REPORT_REASONS = [
 ] as const;
 
 export type ReportReason = (typeof REPORT_REASONS)[number]['id'];
+export type ReportType = 'user' | 'content';
 
 interface ReportUserModalProps {
   visible: boolean;
@@ -34,11 +35,15 @@ interface ReportUserModalProps {
   reportedUserId: string;
   reportedUserName: string;
   roomId?: string;
+  messageId?: string;
+  reportType?: ReportType;
   onSubmit: (data: {
     reportedUserId: string;
     reason: ReportReason;
     details?: string;
     roomId?: string;
+    messageId?: string;
+    reportType?: ReportType;
   }) => void;
 }
 
@@ -48,10 +53,13 @@ export default function ReportUserModal({
   reportedUserId,
   reportedUserName,
   roomId,
+  messageId,
+  reportType = 'user',
   onSubmit,
 }: ReportUserModalProps) {
   const [selectedReason, setSelectedReason] = useState<ReportReason | null>(null);
   const [detailsText, setDetailsText] = useState('');
+  const isContentReport = reportType === 'content';
 
   const handleSubmit = () => {
     if (!selectedReason) return;
@@ -61,6 +69,8 @@ export default function ReportUserModal({
       reason: selectedReason,
       details: detailsText.trim() || undefined,
       roomId,
+      messageId,
+      reportType,
     });
     // Reset state
     setSelectedReason(null);
@@ -93,9 +103,13 @@ export default function ReportUserModal({
         <View style={styles.sheet}>
           <View style={styles.handle} />
 
-          <Text style={styles.title}>Report {reportedUserName}</Text>
+          <Text style={styles.title}>
+            {isContentReport ? 'Report this message' : `Report ${reportedUserName}`}
+          </Text>
           <Text style={styles.subtitle}>
-            Why are you reporting this user? Your report is anonymous.
+            {isContentReport
+              ? 'Why are you reporting this message? Your report is anonymous.'
+              : 'Why are you reporting this user? Your report is anonymous.'}
           </Text>
 
           <ScrollView

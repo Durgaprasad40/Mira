@@ -540,6 +540,19 @@ export default function ReviewScreen() {
       router.push("/(onboarding)/tutorial" as any);
     } catch (error: any) {
       console.error("Onboarding error:", error);
+      if (String(error?.message ?? error).includes("TERMS_REQUIRED")) {
+        Alert.alert(
+          "Agreement Required",
+          "Please accept Mira’s Terms of Service, Privacy Policy, and Community Guidelines before continuing.",
+          [
+            {
+              text: "Review Policies",
+              onPress: () => router.push("/(onboarding)/consent?returnTo=review" as any),
+            },
+          ]
+        );
+        return;
+      }
       Alert.alert("Error", error.message || "Failed to complete onboarding");
     } finally {
       setIsSubmitting(false);

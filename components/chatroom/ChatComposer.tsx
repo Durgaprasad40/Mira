@@ -14,7 +14,17 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { SPACING, CHAT_SIZES } from '@/lib/responsive';
+import {
+  CHAT_FONTS,
+  CHAT_ROOM_COMPOSER_VERTICAL_PADDING,
+  CHAT_ROOM_ICON_BUTTON_SIZE,
+  CHAT_ROOM_ICON_SIZE,
+  CHAT_ROOM_INPUT_HEIGHT_MAX,
+  CHAT_ROOM_INPUT_HEIGHT_MIN,
+  CHAT_ROOM_MAX_FONT_SCALE,
+  SPACING,
+  SIZES,
+} from '@/lib/responsive';
 import MentionSuggestions, { MentionMember } from './MentionSuggestions';
 
 // Re-export for convenience
@@ -22,8 +32,8 @@ export type { MentionMember };
 
 const C = INCOGNITO_COLORS;
 
-const MIN_INPUT_HEIGHT = 40;
-const MAX_INPUT_HEIGHT = 120;
+const MIN_INPUT_HEIGHT = CHAT_ROOM_INPUT_HEIGHT_MIN;
+const MAX_INPUT_HEIGHT = CHAT_ROOM_INPUT_HEIGHT_MAX;
 
 export type ComposerPanel = 'none';
 
@@ -65,6 +75,8 @@ interface ChatComposerProps {
   mentionMembersLoading?: boolean;
   /** Called when mentions change (for tracking structured mention data) */
   onMentionsChange?: (mentions: MentionData[]) => void;
+  /** Inline safety copy shown above the input row when backend blocks a send. */
+  safetyMessage?: string | null;
 }
 
 /** Format milliseconds as M:SS */
@@ -89,6 +101,7 @@ export default function ChatComposer({
   mentionMembers = [],
   mentionMembersLoading = false,
   onMentionsChange,
+  safetyMessage,
 }: ChatComposerProps) {
   const inputRef = useRef<TextInput>(null);
   const hasText = value.trim().length > 0;
@@ -288,11 +301,16 @@ export default function ChatComposer({
           <View style={styles.replyContent}>
             <View style={styles.replyAccent} />
             <View style={styles.replyTextContainer}>
-              <Text style={styles.replyName} numberOfLines={1}>
+              <Text
+                maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE}
+                style={styles.replyName}
+                numberOfLines={1}
+              >
                 {replyPreview.senderNickname}
               </Text>
               {/* REPLY-UI-FIX: Use 1 line for cleaner preview */}
               <Text
+                maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE}
                 style={styles.replySnippet}
                 numberOfLines={1}
                 ellipsizeMode="tail"
@@ -306,15 +324,30 @@ export default function ChatComposer({
             style={styles.replyCancelBtn}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
-            <Ionicons name="close" size={18} color={C.textLight} />
+            <Ionicons name="close" size={SIZES.icon.sm} color={C.textLight} />
           </TouchableOpacity>
         </View>
       )}
 
+      {safetyMessage ? (
+        <View style={styles.safetyMessage} accessibilityLiveRegion="polite">
+          <View style={styles.safetyIconWrap}>
+            <Ionicons name="shield-checkmark-outline" size={SIZES.icon.sm} color="#A78BFA" />
+          </View>
+          <Text
+            maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE}
+            style={styles.safetyMessageText}
+            numberOfLines={2}
+          >
+            {safetyMessage}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.container}>
         {/* + Attachments */}
         <TouchableOpacity onPress={onPlusPress} style={styles.iconBtn} activeOpacity={0.6}>
-          <Ionicons name="add" size={24} color={C.textLight} />
+          <Ionicons name="add" size={CHAT_ROOM_ICON_SIZE} color={C.textLight} />
         </TouchableOpacity>
 
       {/* Multiline text input */}
@@ -339,6 +372,7 @@ export default function ChatComposer({
           autoComplete="off"
           importantForAutofill="no"
           textContentType="none"
+          maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE}
         />
       </View>
 
@@ -346,11 +380,11 @@ export default function ChatComposer({
       {isRecording ? (
         <TouchableOpacity onPress={onMicPress} style={styles.recordingBtn} activeOpacity={0.7}>
           <View style={styles.recordingIndicator} />
-          <Text style={styles.recordingTimer}>{formatElapsed(elapsedMs)}</Text>
+          <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.recordingTimer}>{formatElapsed(elapsedMs)}</Text>
         </TouchableOpacity>
       ) : (
         <TouchableOpacity onPress={onMicPress} style={styles.iconBtn} activeOpacity={0.6}>
-          <Ionicons name="mic" size={22} color={C.textLight} />
+          <Ionicons name="mic" size={SIZES.icon.md} color={C.textLight} />
         </TouchableOpacity>
       )}
 
@@ -365,7 +399,7 @@ export default function ChatComposer({
           {isSending ? (
             <ActivityIndicator size="small" color="#FFFFFF" />
           ) : (
-            <Ionicons name="send" size={18} color="#FFFFFF" />
+            <Ionicons name="send" size={SIZES.icon.sm} color="#FFFFFF" />
           )}
         </TouchableOpacity>
       )}
@@ -408,37 +442,68 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   replyName: {
-    fontSize: 12,
+    fontSize: CHAT_FONTS.label,
     fontWeight: '600',
     color: '#6D28D9',
-    marginBottom: 2,
+    marginBottom: SPACING.xxs,
   },
   replySnippet: {
     // REPLY-UI-FIX: Clean single-line preview with proper sizing
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: CHAT_FONTS.roomActivity,
+    lineHeight: CHAT_FONTS.roomActivity + SPACING.xs,
     color: C.textLight,
   },
   replyCancelBtn: {
-    width: 28,
-    height: 28,
+    width: SIZES.icon.xl,
+    height: SIZES.icon.xl,
     alignItems: 'center',
     justifyContent: 'center',
-    marginLeft: 8,
+    marginLeft: SPACING.sm,
   },
   container: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: C.surface,
     paddingHorizontal: SPACING.xs + 2,
-    paddingVertical: SPACING.xs + 2,
+    paddingVertical: CHAT_ROOM_COMPOSER_VERTICAL_PADDING,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.1)',
     gap: SPACING.xs,
   },
+  safetyMessage: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: SPACING.sm,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(167, 139, 250, 0.32)',
+    backgroundColor: 'rgba(109, 40, 217, 0.12)',
+    gap: SPACING.sm,
+  },
+  safetyIconWrap: {
+    width: SIZES.icon.lg,
+    height: SIZES.icon.lg,
+    borderRadius: SIZES.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(167, 139, 250, 0.14)',
+    flexShrink: 0,
+  },
+  safetyMessageText: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: CHAT_FONTS.secondary,
+    fontWeight: '600',
+    lineHeight: CHAT_FONTS.secondary + SPACING.xs,
+    color: C.text,
+  },
   iconBtn: {
-    width: 40,
-    height: 40,
+    width: CHAT_ROOM_ICON_BUTTON_SIZE,
+    height: CHAT_ROOM_ICON_BUTTON_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -446,10 +511,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 18,
-    gap: 8,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.lg,
+    gap: SPACING.sm,
   },
   recordingIndicator: {
     width: 10,
@@ -458,32 +523,32 @@ const styles = StyleSheet.create({
     backgroundColor: '#EF4444',
   },
   recordingTimer: {
-    fontSize: 14,
+    fontSize: CHAT_FONTS.buttonText,
     fontWeight: '600',
     color: '#EF4444',
-    minWidth: 36,
+    minWidth: CHAT_ROOM_ICON_BUTTON_SIZE - SPACING.xs,
   },
   inputRow: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: C.background,
-    borderRadius: 20,
+    borderRadius: SIZES.radius.xl,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
-    paddingHorizontal: 14,
+    paddingHorizontal: SPACING.md,
   },
   input: {
     flex: 1,
-    fontSize: 15,
+    fontSize: CHAT_FONTS.inputText,
     color: C.text,
-    paddingTop: 10,
-    paddingBottom: 10,
+    paddingTop: CHAT_ROOM_COMPOSER_VERTICAL_PADDING,
+    paddingBottom: CHAT_ROOM_COMPOSER_VERTICAL_PADDING,
   },
   sendCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: CHAT_ROOM_ICON_BUTTON_SIZE,
+    height: CHAT_ROOM_ICON_BUTTON_SIZE,
+    borderRadius: CHAT_ROOM_ICON_BUTTON_SIZE / 2,
     backgroundColor: '#6D28D9',
     alignItems: 'center',
     justifyContent: 'center',

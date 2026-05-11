@@ -72,6 +72,25 @@ const GUIDELINES: GuidelineSection[] = [
     ],
   },
   {
+    icon: 'time',
+    title: 'How We Handle Reports',
+    items: [
+      'Reports are reviewed as quickly as possible',
+      'Our target response is within 24 hours for serious reports',
+      'Severe reports may trigger automatic restrictions while review is pending',
+      'Contact support if you believe action was taken by mistake',
+    ],
+  },
+  {
+    icon: 'shield',
+    title: 'Child Safety',
+    items: [
+      'Mira has zero tolerance for child sexual abuse material or exploitation',
+      'Underage sexual content, grooming, or attempts to involve minors are prohibited',
+      'We may restrict accounts and report to appropriate authorities where required by law',
+    ],
+  },
+  {
     icon: 'warning',
     title: 'Enforcement',
     items: [

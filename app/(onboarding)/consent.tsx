@@ -17,7 +17,7 @@ import {
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
@@ -32,12 +32,19 @@ import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader"
 import { useScreenTrace } from "@/lib/devTrace";
 
 const PRIVACY_POLICY_URL = "https://mira.app/privacy"; // Placeholder
+const TERMS_OF_SERVICE_URL = "https://mira.app/terms";
 
 export default function ConsentScreen() {
   useScreenTrace("ONB_CONSENT");
   const { setStep } = useOnboardingStore();
   const { userId } = useAuthStore();
   const router = useRouter();
+  const params = useLocalSearchParams<{
+    returnTo?: string;
+    roomId?: string;
+    roomName?: string;
+    isPrivate?: string;
+  }>();
   const [isAgreed, setIsAgreed] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -56,12 +63,20 @@ export default function ConsentScreen() {
       Alert.alert("Error", "Unable to open privacy policy link");
     });
   };
+  const handleTermsOfService = () => {
+    Linking.openURL(TERMS_OF_SERVICE_URL).catch(() => {
+      Alert.alert("Error", "Unable to open terms link");
+    });
+  };
+  const handleCommunityGuidelines = () => {
+    router.push("/(main)/community-guidelines" as any);
+  };
 
   const handleContinue = async () => {
     if (!isAgreed) {
       Alert.alert(
         "Consent Required",
-        "Please agree to the data collection terms to continue."
+        "Please agree to Mira’s Terms of Service, Privacy Policy, and Community Guidelines to continue."
       );
       return;
     }
@@ -72,19 +87,42 @@ export default function ConsentScreen() {
         // Demo mode: update local store
         const demoStore = useDemoStore.getState();
         if (userId) {
+          const acceptedAt = Date.now();
           demoStore.saveDemoProfile(userId, {
-            consentAcceptedAt: Date.now(),
-          });
+            consentAcceptedAt: acceptedAt,
+            termsAcceptedAt: acceptedAt,
+            communityGuidelinesAcceptedAt: acceptedAt,
+          } as any);
         }
       } else {
         // Live mode: save consent via Convex
         if (userId) {
-          await acceptConsent({ userId: userId as Id<"users"> });
+          await acceptConsent({
+            userId: userId as Id<"users">,
+            acceptedTerms: true,
+            acceptedPrivacy: true,
+            acceptedCommunityGuidelines: true,
+          });
         }
       }
 
-      setStep("prompts");
-      router.push("/(onboarding)/prompts" as any);
+      if (params.returnTo === "review") {
+        setStep("review" as any);
+        router.replace("/(onboarding)/review" as any);
+      } else if (params.returnTo === "chatRoom" && typeof params.roomId === "string") {
+        router.replace({
+          pathname: `/(main)/(private)/(tabs)/chat-rooms/${params.roomId}`,
+          params: {
+            ...(typeof params.roomName === "string" ? { roomName: params.roomName } : {}),
+            ...(typeof params.isPrivate === "string" ? { isPrivate: params.isPrivate } : {}),
+          },
+        } as any);
+      } else if (params.returnTo === "chatRooms") {
+        router.replace("/(main)/(private)/(tabs)/chat-rooms" as any);
+      } else {
+        setStep("prompts");
+        router.push("/(onboarding)/prompts" as any);
+      }
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to save consent");
     } finally {
@@ -99,7 +137,7 @@ export default function ConsentScreen() {
       <View style={styles.content}>
         <Text style={styles.title}>Data & Privacy</Text>
         <Text style={styles.subtitle}>
-          Before we continue, please review how Mira uses your data.
+          Before we continue, please review and accept Mira’s policies.
         </Text>
 
         <View style={styles.card}>
@@ -148,10 +186,17 @@ export default function ConsentScreen() {
             )}
           </View>
           <Text style={styles.checkboxLabel}>
-            I agree to the collection and use of my data as described above and in
-            the{" "}
+            I agree to Mira’s{" "}
+            <Text style={styles.link} onPress={handleTermsOfService}>
+              Terms of Service
+            </Text>
+            ,{" "}
             <Text style={styles.link} onPress={handlePrivacyPolicy}>
               Privacy Policy
+            </Text>
+            , and{" "}
+            <Text style={styles.link} onPress={handleCommunityGuidelines}>
+              Community Guidelines
             </Text>
             .
           </Text>

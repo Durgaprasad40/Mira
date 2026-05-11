@@ -28,6 +28,11 @@ import {
   lineHeight,
   moderateScale,
 } from '@/lib/constants';
+import {
+  CHAT_ROOM_BADGE_FONT,
+  CHAT_ROOM_BADGE_SIZE,
+  CHAT_ROOM_MAX_FONT_SCALE,
+} from '@/lib/responsive';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
@@ -36,9 +41,13 @@ import * as Haptics from 'expo-haptics';
 import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
 import ChatRoomIdentitySetup from '@/components/chatroom/ChatRoomIdentitySetup';
 import PasswordEntryModal from '@/components/chatroom/PasswordEntryModal';
+import {
+  CHAT_ROOM_TERMS_REQUIRED_MESSAGE,
+  isChatRoomTermsRequiredError,
+} from '@/lib/chatRoomSafetyMessages';
 
 const C = INCOGNITO_COLORS;
-const TEXT_MAX_SCALE = 1.2;
+const TEXT_MAX_SCALE = CHAT_ROOM_MAX_FONT_SCALE;
 const ROOM_ICON_SIZE = moderateScale(46, 0.25);
 const ROOM_ACTIVE_DOT_SIZE = moderateScale(12, 0.25);
 const SEARCH_ICON_SIZE = moderateScale(18, 0.3);
@@ -48,7 +57,7 @@ const SMALL_BADGE_ICON_SIZE = moderateScale(10, 0.3);
 const ROOM_CARD_RADIUS = moderateScale(14, 0.25);
 const CTA_CONTAINER_SIZE = moderateScale(24, 0.25);
 const PRIVATE_BADGE_SIZE = moderateScale(20, 0.25);
-const UNREAD_BADGE_HEIGHT = moderateScale(18, 0.25);
+const UNREAD_BADGE_HEIGHT = CHAT_ROOM_BADGE_SIZE;
 const LIVE_INDICATOR_SIZE = moderateScale(6, 0.25);
 const HEADER_BOTTOM_PADDING = moderateScale(18, 0.4);
 
@@ -227,6 +236,19 @@ export default function ChatRoomsScreen() {
   } | null>(null);
   const [joinCodeValue, setJoinCodeValue] = useState('');
   const [isJoiningByCode, setIsJoiningByCode] = useState(false);
+
+  const routeToPolicyConsent = useCallback(() => {
+    Alert.alert('Agreement Required', CHAT_ROOM_TERMS_REQUIRED_MESSAGE, [
+      {
+        text: 'Review Policies',
+        onPress: () =>
+          router.push({
+            pathname: '/(onboarding)/consent',
+            params: { returnTo: 'chatRooms' },
+          } as any),
+      },
+    ]);
+  }, [router]);
 
   // Navigation readiness check - prevent "navigate before mounting Root Layout" warning
   const rootNavState = useRootNavigationState();
@@ -555,9 +577,14 @@ export default function ChatRoomsScreen() {
     api.chatRooms.getUnreadDmCountsByRoom,
     userId ? { authUserId: userId } : 'skip'
   );
+  const unreadMentionsByRoom = useQuery(
+    api.chatRooms.getUnreadMentionCount,
+    userId ? { authUserId: userId } : 'skip'
+  );
 
   // Use backend counts, or empty object if not available
-  const unreadCounts: Record<string, number> = unreadDmsByRoom?.byRoomId ?? {};
+  const unreadDmCounts: Record<string, number> = unreadDmsByRoom?.byRoomId ?? {};
+  const unreadMentionCounts: Record<string, number> = unreadMentionsByRoom?.perRoom ?? {};
 
   // Rooms list from Convex backend
   // Filter out "English" room - users can chat in English inside Global
@@ -761,6 +788,10 @@ export default function ChatRoomsScreen() {
       );
     } catch (error: any) {
       // Keep inputs on error so user can edit
+      if (isChatRoomTermsRequiredError(error)) {
+        routeToPolicyConsent();
+        return;
+      }
       Alert.alert('Error', error.message || 'Failed to create room');
     } finally {
       // UNMOUNT-GUARD: Check mounted before setState in finally
@@ -768,7 +799,7 @@ export default function ChatRoomsScreen() {
         setIsCreating(false);
       }
     }
-  }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router]);
+  }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router, routeToPolicyConsent]);
 
   // LOCKED-ROOM-FIX: Handle successful password entry
   const handlePasswordSuccess = useCallback(() => {
@@ -845,13 +876,17 @@ export default function ChatRoomsScreen() {
         isNavigatingToRoomRef.current = false;
       }, NAV_SETTLE_DELAY_MS);
     } catch (error: any) {
+      if (isChatRoomTermsRequiredError(error)) {
+        routeToPolicyConsent();
+        return;
+      }
       Alert.alert('Unable to Join', error?.message || 'Could not join this private room.');
     } finally {
       if (mountedRef.current) {
         setIsJoiningByCode(false);
       }
     }
-  }, [isJoiningByCode, joinCodeModalRoom, joinCodeValue, joinRoomByCodeMut, markRoomVisited, router, userId]);
+  }, [isJoiningByCode, joinCodeModalRoom, joinCodeValue, joinRoomByCodeMut, markRoomVisited, routeToPolicyConsent, router, userId]);
 
   // Room Card component with simple opacity press feedback
   const RoomCard = useCallback(
@@ -861,8 +896,8 @@ export default function ChatRoomsScreen() {
       const localAsset = ROOM_ICON_ASSETS[iconKey];
       const fallbackColor = ROOM_FALLBACK_COLORS[iconKey];
 
-      // Get unread count for this room
-      const unreadCount = unreadCounts[item.id] ?? 0;
+      // Get unread DM + @mention count for this room from backend source of truth.
+      const unreadCount = (unreadDmCounts[item.id] ?? 0) + (unreadMentionCounts[item.id] ?? 0);
 
       // Determine activity state for styling
       const isActive = item.activeUserCount > 0;
@@ -996,7 +1031,7 @@ export default function ChatRoomsScreen() {
         </Pressable>
       );
     },
-    [handleOpenRoom, unreadCounts]
+    [handleOpenRoom, unreadDmCounts, unreadMentionCounts]
   );
 
   // ROOM SEARCH: Filter rooms by search query (case-insensitive)
@@ -1338,6 +1373,7 @@ export default function ChatRoomsScreen() {
         authUserId={userId ?? ''}
         onSuccess={handlePasswordSuccess}
         onCancel={handlePasswordCancel}
+        onTermsRequired={routeToPolicyConsent}
       />
     </View>
   );
@@ -1547,9 +1583,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: moderateScale(5, 0.3),
   },
   unreadText: {
-    fontSize: FONT_SIZE.xs,
+    fontSize: CHAT_ROOM_BADGE_FONT,
     fontWeight: '700',
-    lineHeight: lineHeight(FONT_SIZE.xs, 1.2),
+    lineHeight: lineHeight(CHAT_ROOM_BADGE_FONT, 1.2),
     color: '#FFFFFF',
   },
   // ─── ACTIVITY STATUS ───

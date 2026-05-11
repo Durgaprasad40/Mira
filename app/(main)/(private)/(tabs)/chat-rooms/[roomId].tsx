@@ -26,7 +26,12 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { INCOGNITO_COLORS, FONT_SIZE, lineHeight, moderateScale } from '@/lib/constants';
 // P2-001/002: Import responsive utilities
-import { SPACING, SIZES } from '@/lib/responsive';
+import {
+  CHAT_ROOM_ICON_BUTTON_SIZE,
+  CHAT_ROOM_MAX_FONT_SCALE,
+  SPACING,
+  SIZES,
+} from '@/lib/responsive';
 import { useChatThemeColors } from '@/stores/chatThemeStore';
 // Public room uses a constant premium background (NOT theme-controlled).
 // Theme picker continues to apply to private DM only.
@@ -55,7 +60,7 @@ import ReactionChips, { ReactionGroup } from '@/components/chatroom/ReactionChip
 // COIN-FLASH-FIX: CoinFeedback import removed - was causing yellow flash during send
 import UserProfilePopup from '@/components/chatroom/UserProfilePopup';
 import ViewProfileModal from '@/components/chatroom/ViewProfileModal';
-import ReportUserModal, { ReportReason } from '@/components/chatroom/ReportUserModal';
+import ReportUserModal, { ReportReason, ReportType } from '@/components/chatroom/ReportUserModal';
 import AttachmentPopup from '@/components/chatroom/AttachmentPopup';
 import { Toast } from '@/components/ui/Toast';
 import DoodleCanvas from '@/components/chatroom/DoodleCanvas';
@@ -79,14 +84,19 @@ import { Image as ExpoImage } from 'expo-image';
 import { buildCacheBustedAvatarUrl } from '@/lib/avatarUtils';
 // GROUP-TIMESTAMP: Import timestamp utility
 import { shouldShowTimestamp } from '@/utils/chatTime';
+import {
+  CHAT_ROOM_TERMS_REQUIRED_MESSAGE,
+  describeChatRoomBlockReason,
+  isChatRoomTermsRequiredError,
+} from '@/lib/chatRoomSafetyMessages';
 
 const C = INCOGNITO_COLORS;
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
-const TEXT_MAX_SCALE = 1.2;
+const TEXT_MAX_SCALE = CHAT_ROOM_MAX_FONT_SCALE;
 const ROOM_STATUS_ICON_SIZE = moderateScale(38, 0.25);
 const EMPTY_STATE_ICON_SIZE = moderateScale(28, 0.25);
 const FAILED_STATUS_TEXT_SIZE = FONT_SIZE.caption;
-const MENTION_INDICATOR_SIZE = moderateScale(36, 0.25);
+const MENTION_INDICATOR_SIZE = CHAT_ROOM_ICON_BUTTON_SIZE;
 const MENTION_INDICATOR_OFFSET = moderateScale(34, 0.25);
 const EMPTY_ICON_WRAPPER_SIZE = moderateScale(68, 0.25);
 
@@ -314,43 +324,6 @@ function mergeMessagesById(messages: DemoChatMessage[]): DemoChatMessage[] {
   return Array.from(byId.values()).sort((a, b) => a.createdAt - b.createdAt);
 }
 
-// LINK_BLOCKED UX helpers — read structured ConvexError payload thrown by
-// convex/chatRooms.ts sendMessage when the link/contact/payment policy
-// rejects a message. Surfaces a clean, category-aware copy and avoids
-// retry loops for blocked content. The original blocked text is never
-// echoed back to the UI.
-interface LinkBlockedInfo {
-  category: string;
-}
-
-function extractLinkBlockedInfo(error: unknown): LinkBlockedInfo | null {
-  const data = (error as { data?: { code?: unknown; category?: unknown } } | null | undefined)
-    ?.data;
-  if (!data || data.code !== 'LINK_BLOCKED') return null;
-  const category = typeof data.category === 'string' ? data.category : 'external_url';
-  return { category };
-}
-
-function getLinkBlockedCopy(category: string): string {
-  switch (category) {
-    case 'telegram':
-      return 'Telegram links are not allowed in chat rooms.';
-    case 'whatsapp':
-      return 'WhatsApp links are not allowed in chat rooms.';
-    case 'payment':
-      return 'Payment details are not allowed in chat rooms.';
-    case 'crypto':
-      return 'Crypto/payment wallet details are not allowed in chat rooms.';
-    case 'phone':
-      return 'Phone numbers are not allowed in chat rooms.';
-    case 'shortener':
-    case 'external_url':
-    case 'obfuscated':
-    default:
-      return 'Links, phone numbers, payment details, and outside contact details are not allowed in chat rooms.';
-  }
-}
-
 // Build list items with date separators (normal order, NOT reversed)
 // P1 CR-006: Use index in date separator ID to avoid key collisions
 // AVATAR-STABILITY: Pre-compute showAvatar for each message based on grouping rule:
@@ -449,6 +422,24 @@ export default function ChatRoomScreen() {
   const isValidRoomId =
     typeof roomIdStr === 'string' &&
     roomIdStr.length > 10;
+
+  const routeToPolicyConsent = useCallback(() => {
+    Alert.alert('Agreement Required', CHAT_ROOM_TERMS_REQUIRED_MESSAGE, [
+      {
+        text: 'Review Policies',
+        onPress: () =>
+          router.push({
+            pathname: '/(onboarding)/consent',
+            params: {
+              returnTo: roomIdStr ? 'chatRoom' : 'chatRooms',
+              ...(roomIdStr ? { roomId: roomIdStr } : {}),
+              ...(typeof routeRoomName === 'string' ? { roomName: routeRoomName } : {}),
+              ...(typeof routeIsPrivate === 'string' ? { isPrivate: routeIsPrivate } : {}),
+            },
+          } as any),
+      },
+    ]);
+  }, [roomIdStr, routeIsPrivate, routeRoomName, router]);
 
   // For demo mode: any non-empty string is valid (demo rooms use simple IDs like "room_global")
   // For Convex mode: must pass isValidConvexId check
@@ -1659,37 +1650,33 @@ export default function ChatRoomScreen() {
   // INPUT STATE
   // ─────────────────────────────────────────────────────────────────────────
   const [inputText, setInputText] = useState('');
-  // LINK_BLOCKED inline composer notice — premium replacement for Alert.alert.
-  // Auto-dismisses after a few seconds and clears as soon as the user edits the
-  // composer or sends a successful message. The category drives the copy.
-  const [linkBlockedNotice, setLinkBlockedNotice] = useState<{
-    category: string;
-    issuedAt: number;
-  } | null>(null);
-  const linkBlockedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clearLinkBlockedNotice = useCallback(() => {
-    if (linkBlockedTimerRef.current) {
-      clearTimeout(linkBlockedTimerRef.current);
-      linkBlockedTimerRef.current = null;
+  // Inline composer safety notice. Auto-dismisses after a few seconds and
+  // clears as soon as the user edits or sends successfully.
+  const [composerSafetyMessage, setComposerSafetyMessage] = useState<string | null>(null);
+  const composerSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearComposerSafetyMessage = useCallback(() => {
+    if (composerSafetyTimerRef.current) {
+      clearTimeout(composerSafetyTimerRef.current);
+      composerSafetyTimerRef.current = null;
     }
-    setLinkBlockedNotice(null);
+    setComposerSafetyMessage(null);
   }, []);
-  const showLinkBlockedNotice = useCallback((category: string) => {
-    if (linkBlockedTimerRef.current) {
-      clearTimeout(linkBlockedTimerRef.current);
-      linkBlockedTimerRef.current = null;
+  const showComposerSafetyMessage = useCallback((message: string) => {
+    if (composerSafetyTimerRef.current) {
+      clearTimeout(composerSafetyTimerRef.current);
+      composerSafetyTimerRef.current = null;
     }
-    setLinkBlockedNotice({ category, issuedAt: Date.now() });
-    linkBlockedTimerRef.current = setTimeout(() => {
-      linkBlockedTimerRef.current = null;
-      setLinkBlockedNotice(null);
-    }, 3500);
+    setComposerSafetyMessage(message);
+    composerSafetyTimerRef.current = setTimeout(() => {
+      composerSafetyTimerRef.current = null;
+      setComposerSafetyMessage(null);
+    }, 4000);
   }, []);
   useEffect(() => {
     return () => {
-      if (linkBlockedTimerRef.current) {
-        clearTimeout(linkBlockedTimerRef.current);
-        linkBlockedTimerRef.current = null;
+      if (composerSafetyTimerRef.current) {
+        clearTimeout(composerSafetyTimerRef.current);
+        composerSafetyTimerRef.current = null;
       }
     };
   }, []);
@@ -2108,7 +2095,26 @@ export default function ChatRoomScreen() {
     api.chatRooms.getDmThreads,
     authUserId && hasMemberAccess ? { authUserId } : 'skip'
   ) as ConvexDmThread[] | undefined;
-  const dmThreads: ConvexDmThread[] = dmThreadsQuery ?? [];
+  const dmThreads: ConvexDmThread[] = useMemo(() => {
+    const byPeer = new Map<string, ConvexDmThread>();
+    for (const thread of dmThreadsQuery ?? []) {
+      const existing = byPeer.get(thread.peerId);
+      if (!existing) {
+        byPeer.set(thread.peerId, { ...thread });
+        continue;
+      }
+
+      existing.unreadCount += thread.unreadCount;
+      if (thread.lastMessageAt > existing.lastMessageAt) {
+        byPeer.set(thread.peerId, {
+          ...thread,
+          unreadCount: existing.unreadCount,
+        });
+      }
+    }
+
+    return Array.from(byPeer.values()).sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+  }, [dmThreadsQuery]);
   const unreadDMs = dmThreads.filter((dm) => dm.unreadCount > 0).length;
 
   // DM-ID-FIX: Convert Convex DM threads to format compatible with MessagesPopover
@@ -2136,6 +2142,7 @@ export default function ChatRoomScreen() {
     authUserId && hasMemberAccess ? { authUserId, limit: 50 } : 'skip'
   );
   const mentions = (mentionsQuery ?? []) as MentionItem[];
+  const autoReadMentionIdsRef = useRef<Set<string>>(new Set());
 
   // Mutations for marking mentions as read
   const markMentionReadMutation = useMutation(api.chatRooms.markMentionRead);
@@ -2195,6 +2202,7 @@ export default function ChatRoomScreen() {
   // COIN-FLASH-FIX: Coin feedback state removed - was causing yellow flash during send
   const [viewProfileUser, setViewProfileUser] = useState<DemoOnlineUser | null>(null);
   const [reportTargetUser, setReportTargetUser] = useState<DemoOnlineUser | null>(null);
+  const [reportContext, setReportContext] = useState<{ reportType: ReportType; messageId?: string } | null>(null);
 
   // Secure media viewer state (hold-to-view)
   const [secureMediaState, setSecureMediaState] = useState<{
@@ -2503,23 +2511,27 @@ export default function ChatRoomScreen() {
           // COIN-FLASH-FIX: Coin feedback animation removed
           // Clear mentions after successful send
           setCurrentMentions([]);
-          // LINK_BLOCKED: clear any visible safety notice once a message goes
-          // through cleanly so the composer returns to the neutral state.
-          clearLinkBlockedNotice();
+          clearComposerSafetyMessage();
         }
       } catch (error: any) {
         console.log('SEND_MUTATION_CALL_FAIL', { errorMessage: error?.message, errorStack: error?.stack?.slice?.(0, 500) });
-        const linkBlocked = extractLinkBlockedInfo(error);
-        if (linkBlocked) {
-          // LINK_BLOCKED: drop the pending bubble (no infinite tap-to-retry),
-          // restore original text into the composer if empty so the user can
-          // edit it, and surface a premium inline safety notice instead of a
-          // disruptive system alert. Never echo the raw ConvexError payload
-          // or the blocked content.
+        if (isChatRoomTermsRequiredError(error)) {
           if (mountedRef.current) {
             setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
             setInputText((prev) => (prev && prev.length > 0 ? prev : textToRestore));
-            showLinkBlockedNotice(linkBlocked.category);
+          }
+          routeToPolicyConsent();
+          return;
+        }
+        const safetyMessage = describeChatRoomBlockReason(error);
+        if (safetyMessage) {
+          // Drop the pending bubble for backend safety blocks, restore the
+          // original text so the user can edit it, and show friendly inline
+          // copy instead of a modal.
+          if (mountedRef.current) {
+            setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+            setInputText((prev) => (prev && prev.length > 0 ? prev : textToRestore));
+            showComposerSafetyMessage(safetyMessage);
           }
         } else {
           // P0-005 FINAL FIX: Mark message as failed instead of removing
@@ -2537,7 +2549,7 @@ export default function ChatRoomScreen() {
         isSendingRef.current = false;
       }
     }
-  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight, clearLinkBlockedNotice, showLinkBlockedNotice]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // P0-005 FINAL FIX: Retry handler for failed messages
@@ -2568,23 +2580,31 @@ export default function ChatRoomScreen() {
         // Success: remove pending message (server message will appear)
         if (mountedRef.current) {
           setPendingMessages((prev) => prev.filter((m) => m.id !== failedMsg.id));
-          // LINK_BLOCKED: clear any visible safety notice on a successful retry.
-          clearLinkBlockedNotice();
+          clearComposerSafetyMessage();
         }
       } catch (error: any) {
-        const linkBlocked = extractLinkBlockedInfo(error);
-        if (linkBlocked) {
-          // LINK_BLOCKED on retry: drop the failed bubble to break the retry
-          // loop, restore the original text into the composer (only if the
-          // composer is empty) so the user can edit before sending again, and
-          // surface the premium inline safety notice in place of a system alert.
+        if (isChatRoomTermsRequiredError(error)) {
           if (mountedRef.current) {
             setPendingMessages((prev) => prev.filter((m) => m.id !== failedMsg.id));
             const textToRestore = failedMsg._retryText ?? '';
             if (textToRestore) {
               setInputText((prev) => (prev && prev.length > 0 ? prev : textToRestore));
             }
-            showLinkBlockedNotice(linkBlocked.category);
+          }
+          routeToPolicyConsent();
+          return;
+        }
+        const safetyMessage = describeChatRoomBlockReason(error);
+        if (safetyMessage) {
+          // Safety block on retry: drop the failed bubble to break the retry
+          // loop, restore the original text, and show the inline notice.
+          if (mountedRef.current) {
+            setPendingMessages((prev) => prev.filter((m) => m.id !== failedMsg.id));
+            const textToRestore = failedMsg._retryText ?? '';
+            if (textToRestore) {
+              setInputText((prev) => (prev && prev.length > 0 ? prev : textToRestore));
+            }
+            showComposerSafetyMessage(safetyMessage);
           }
           return;
         }
@@ -2599,7 +2619,7 @@ export default function ChatRoomScreen() {
         Alert.alert('Retry Failed', error?.message || 'Could not send message. Please try again.');
       }
     },
-    [roomIdStr, authUserId, sendMessageMutation, clearLinkBlockedNotice, showLinkBlockedNotice]
+    [roomIdStr, authUserId, sendMessageMutation, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
   );
 
   const handleRetryMediaMessage = useCallback(
@@ -2672,7 +2692,11 @@ export default function ChatRoomScreen() {
           if (mountedRef.current) {
             setPendingMediaMessages((prev) => prev.filter((m) => m.id !== msg.id));
           }
-        } catch {
+        } catch (err: any) {
+          if (isChatRoomTermsRequiredError(err)) {
+            routeToPolicyConsent();
+            return;
+          }
           if (mountedRef.current) {
             setPendingMediaMessages((prev) =>
               prev.map((m) =>
@@ -2702,7 +2726,11 @@ export default function ChatRoomScreen() {
           if (mountedRef.current) {
             setPendingMediaMessages((prev) => prev.filter((m) => m.id !== msg.id));
           }
-        } catch {
+        } catch (err: any) {
+          if (isChatRoomTermsRequiredError(err)) {
+            routeToPolicyConsent();
+            return;
+          }
           if (mountedRef.current) {
             setPendingMediaMessages((prev) =>
               prev.map((m) =>
@@ -2713,7 +2741,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [authUserId, generateUploadUrlMutation, hasValidRoomId, isDemoMode, roomIdStr, sendMessageMutation]
+    [authUserId, generateUploadUrlMutation, hasValidRoomId, isDemoMode, roomIdStr, sendMessageMutation, routeToPolicyConsent]
   );
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
@@ -2865,10 +2893,19 @@ export default function ChatRoomScreen() {
           // Success: remove pending media message (server message will appear)
           if (mountedRef.current) {
             setPendingMediaMessages((prev) => prev.filter((m) => m.id !== pendingId));
+            clearComposerSafetyMessage();
           }
         }
       } catch (err: any) {
         console.error('[ChatRoom] Media upload/send failed:', err);
+        if (isChatRoomTermsRequiredError(err)) {
+          routeToPolicyConsent();
+          return;
+        }
+        const safetyMessage = describeChatRoomBlockReason(err);
+        if (safetyMessage) {
+          showComposerSafetyMessage(safetyMessage);
+        }
 
         // MEDIA-RELIABILITY: Show specific error messages based on error type
         if (err instanceof UploadError) {
@@ -2902,7 +2939,7 @@ export default function ChatRoomScreen() {
         uploadingMediaUriRef.current = null;
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -2968,8 +3005,18 @@ export default function ChatRoomScreen() {
             audioStorageId: storageId, // CR-009: Pass storage ID, not local URI
             clientId,
           });
+          clearComposerSafetyMessage();
         } catch (err: any) {
           console.error('[ChatRoom] Audio upload/send failed:', err);
+          if (isChatRoomTermsRequiredError(err)) {
+            routeToPolicyConsent();
+            return;
+          }
+          const safetyMessage = describeChatRoomBlockReason(err);
+          if (safetyMessage) {
+            showComposerSafetyMessage(safetyMessage);
+            return;
+          }
           // MEDIA-RELIABILITY: Better error handling with UploadError type checks
           if (err instanceof UploadError) {
             const title = err.type === 'FILE_TOO_LARGE' ? 'File Too Large' :
@@ -2986,7 +3033,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
   );
 
   const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({
@@ -3114,6 +3161,23 @@ export default function ChatRoomScreen() {
     if (!roomIdStr) return [];
     return mentions.filter(m => !m.isRead && m.roomId === roomIdStr);
   }, [mentions, roomIdStr]);
+
+  useEffect(() => {
+    if (!authUserId || currentRoomUnreadMentions.length === 0) return;
+
+    for (const mention of currentRoomUnreadMentions) {
+      const mentionId = mention.id as string;
+      if (autoReadMentionIdsRef.current.has(mentionId)) continue;
+      autoReadMentionIdsRef.current.add(mentionId);
+      markMentionReadMutation({
+        authUserId,
+        mentionId: mention.id as Id<'chatRoomMentionNotifications'>,
+      }).catch((err) => {
+        autoReadMentionIdsRef.current.delete(mentionId);
+        console.warn('[CHAT_MENTION_AUTO_READ] Failed to mark mention as read:', err);
+      });
+    }
+  }, [authUserId, currentRoomUnreadMentions, markMentionReadMutation]);
 
   const handleMentionIndicatorTap = useCallback(() => {
     // Find the newest unread mention in current room
@@ -3246,16 +3310,26 @@ export default function ChatRoomScreen() {
       setSelectedUser(null);
       setOverlay('none');
     } catch (error: any) {
+      if (isChatRoomTermsRequiredError(error)) {
+        routeToPolicyConsent();
+        return;
+      }
       if (__DEV__) console.error('[CHAT_DM_ERROR]', error);
-      Alert.alert('Error', error?.message || 'Failed to open private chat. Please try again.');
+      const safetyMessage = describeChatRoomBlockReason(error);
+      if (safetyMessage) {
+        Alert.alert('Message unavailable', safetyMessage);
+      } else {
+        Alert.alert('Error', error?.message || 'Failed to open private chat. Please try again.');
+      }
     }
-  }, [authUserId, selectedUser, roomIdStr, getOrCreateDmThread, setActiveDm]);
+  }, [authUserId, selectedUser, roomIdStr, getOrCreateDmThread, setActiveDm, routeToPolicyConsent]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // REPORT (Convex-backed persistence)
   // ─────────────────────────────────────────────────────────────────────────
   const handleReport = useCallback(() => {
     setReportTargetUser(selectedUser);
+    setReportContext({ reportType: 'user' });
     setOverlay('report');
   }, [selectedUser]);
 
@@ -3290,7 +3364,14 @@ export default function ChatRoomScreen() {
 
   // Store report in Convex (reports table with full details)
   const handleSubmitReport = useCallback(
-    async (data: { reportedUserId: string; reason: ReportReason; details?: string; roomId?: string }) => {
+    async (data: {
+      reportedUserId: string;
+      reason: ReportReason;
+      details?: string;
+      roomId?: string;
+      messageId?: string;
+      reportType?: ReportType;
+    }) => {
       if (!authUserId) {
         Alert.alert('Error', 'You must be signed in to submit a report.', [{ text: 'OK' }]);
         return;
@@ -3304,12 +3385,15 @@ export default function ChatRoomScreen() {
           roomId: roomIdStr ?? undefined,
           reason: mapReportReasonForBackend(data.reason),
           details: data.details,
+          messageId: data.messageId,
+          reportType: data.reportType ?? 'user',
         });
 
         // UNMOUNT-GUARD: Check mounted before setState after async
         if (mountedRef.current) {
           setOverlay('none');
           setReportTargetUser(null);
+          setReportContext(null);
         }
         Alert.alert('Report submitted', 'Thank you. We will review this report.', [{ text: 'OK' }]);
       } catch (error: any) {
@@ -3382,6 +3466,7 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const handleReportMessage = useCallback(() => {
     if (!selectedMessage) return;
+    const messageId = selectedMessage.id;
     // Find the user who sent the message to open report modal
     // SAFETY: Use empty array if roomMembers undefined
     const senderUser = (roomMembers ?? []).find((u) => u.id === selectedMessage.senderId);
@@ -3395,6 +3480,7 @@ export default function ChatRoomScreen() {
         isOnline: false,
       });
     }
+    setReportContext({ reportType: 'content', messageId });
     setSelectedMessage(null);
     setOverlay('report');
   }, [selectedMessage, roomMembers]);
@@ -3859,13 +3945,15 @@ export default function ChatRoomScreen() {
     !isDemoMode &&
     (convexRoom === null || accessStatus === 'not_found' || accessStatus === 'expired');
   // PRIVATE-ROOM-ACCESS-FIX: Access denied check uses actual backend statuses
-  // Backend returns: unauthenticated, not_found, member, expired, banned, pending, rejected, approved_pending_entry, none
+  // Backend returns: unauthenticated, not_found, member, expired, banned,
+  // age_restricted, pending, rejected, approved_pending_entry, none
   const isAccessDenied =
     !isDemoMode &&
     (
       (joinAttempted && joinFailed) ||
       accessStatus === 'banned' ||
       accessStatus === 'rejected' ||
+      accessStatus === 'age_restricted' ||
       accessStatus === 'unauthenticated'
     );
 
@@ -3893,6 +3981,8 @@ export default function ChatRoomScreen() {
         ? 'You are banned from this room.'
         : accessStatus === 'rejected'
           ? 'Your join request was rejected.'
+          : accessStatus === 'age_restricted'
+            ? 'Private rooms are 18+ only.'
           : accessStatus === 'unauthenticated'
             ? 'Please sign in to access this room.'
             : 'You do not have access to this room.'
@@ -4196,34 +4286,6 @@ export default function ChatRoomScreen() {
                 </TouchableOpacity>
               )}
 
-              {/* LINK_BLOCKED: premium inline safety notice. Replaces the
-                  cheap Alert.alert popup. Sits ABOVE the composer so typing is
-                  never interrupted, auto-dismisses after a few seconds, and
-                  clears the moment the user edits the input or successfully
-                  sends a message. The blocked text itself is never echoed. */}
-              {linkBlockedNotice ? (
-                <View style={styles.linkBlockedNotice} accessibilityLiveRegion="polite">
-                  <View style={styles.linkBlockedIconWrap}>
-                    <Ionicons name="shield-outline" size={SIZES.icon.sm} color="#F87171" />
-                  </View>
-                  <View style={styles.linkBlockedTextWrap}>
-                    <Text
-                      maxFontSizeMultiplier={TEXT_MAX_SCALE}
-                      style={styles.linkBlockedTitle}
-                    >
-                      Message blocked
-                    </Text>
-                    <Text
-                      maxFontSizeMultiplier={TEXT_MAX_SCALE}
-                      style={styles.linkBlockedBody}
-                      numberOfLines={3}
-                    >
-                      {getLinkBlockedCopy(linkBlockedNotice.category)}
-                    </Text>
-                  </View>
-                </View>
-              ) : null}
-
               {/* Phase-2: Show send-blocked notice if user has penalty */}
               {hasSendPenalty ? (
                 <View style={styles.readOnlyNotice}>
@@ -4237,10 +4299,8 @@ export default function ChatRoomScreen() {
                   value={inputText}
                   onChangeText={(text) => {
                     setInputText(text);
-                    // LINK_BLOCKED: dismiss the inline safety notice the moment
-                    // the user starts editing so the composer feels responsive.
-                    if (linkBlockedNotice) {
-                      clearLinkBlockedNotice();
+                    if (composerSafetyMessage) {
+                      clearComposerSafetyMessage();
                     }
                     // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity heartbeat on typing removed, using timer-based only
                   }}
@@ -4258,6 +4318,7 @@ export default function ChatRoomScreen() {
                   onCancelReply={handleCancelReply}
                   mentionMembers={mentionMembers}
                   onMentionsChange={setCurrentMentions}
+                  safetyMessage={composerSafetyMessage}
                 />
               )}
             </View>
@@ -4401,10 +4462,12 @@ export default function ChatRoomScreen() {
 
       <ReportUserModal
         visible={overlay === 'report'}
-        onClose={() => { closeOverlay(); setReportTargetUser(null); }}
+        onClose={() => { closeOverlay(); setReportTargetUser(null); setReportContext(null); }}
         reportedUserId={reportTargetUser?.id || ''}
         reportedUserName={reportTargetUser?.username || ''}
         roomId={roomIdStr}
+        messageId={reportContext?.messageId}
+        reportType={reportContext?.reportType ?? 'user'}
         onSubmit={handleSubmitReport}
       />
 
@@ -4587,46 +4650,6 @@ const styles = StyleSheet.create({
     color: C.text,
     fontWeight: '600',
     lineHeight: lineHeight(FONT_SIZE.caption, 1.2),
-  },
-  // LINK_BLOCKED: premium inline safety notice that replaces the system Alert.
-  // Soft red surface with shield icon, sits above the composer, never blocks
-  // typing, and auto-dismisses (handled in JS).
-  linkBlockedNotice: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: SPACING.sm,
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.base,
-    backgroundColor: 'rgba(239, 68, 68, 0.10)',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(239, 68, 68, 0.22)',
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(239, 68, 68, 0.18)',
-  },
-  linkBlockedIconWrap: {
-    width: SIZES.icon.lg,
-    height: SIZES.icon.lg,
-    borderRadius: SIZES.radius.full,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(239, 68, 68, 0.16)',
-    marginTop: 1,
-  },
-  linkBlockedTextWrap: {
-    flex: 1,
-    gap: 2,
-  },
-  linkBlockedTitle: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: '700',
-    lineHeight: lineHeight(FONT_SIZE.body2, 1.2),
-    color: '#F87171',
-  },
-  linkBlockedBody: {
-    fontSize: FONT_SIZE.caption,
-    fontWeight: '500',
-    lineHeight: lineHeight(FONT_SIZE.caption, 1.35),
-    color: C.text,
   },
   // P2-012: Improved read-only notice styling
   readOnlyNotice: {

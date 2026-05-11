@@ -429,6 +429,32 @@ export const CHAT_FONTS = {
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CHAT ROOMS UI NORMALIZATION TOKENS
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const CHAT_ROOM_HEADER_HEIGHT = moderateScale(52, 0.3);
+export const CHAT_ROOM_HEADER_AVATAR_SIZE = CHAT_SIZES.headerAvatar;
+export const CHAT_ROOM_MESSAGE_AVATAR_SIZE = CHAT_SIZES.messageAvatar;
+export const CHAT_ROOM_BUBBLE_PADDING_H = SPACING.md;
+export const CHAT_ROOM_BUBBLE_PADDING_V = SPACING.sm;
+export const CHAT_ROOM_BUBBLE_RADIUS = CHAT_SIZES.bubbleRadius;
+export const CHAT_ROOM_BUBBLE_MAX_WIDTH = CHAT_SIZES.bubbleMaxWidth;
+export const CHAT_ROOM_MESSAGE_ROW_GAP = SPACING.xs;
+export const CHAT_ROOM_COMPOSER_VERTICAL_PADDING = SPACING.sm;
+export const CHAT_ROOM_INPUT_HEIGHT_MIN = moderateScale(40, 0.3);
+export const CHAT_ROOM_INPUT_HEIGHT_MAX = moderateScale(120, 0.3);
+export const CHAT_ROOM_ICON_BUTTON_SIZE = moderateScale(40, 0.3);
+export const CHAT_ROOM_ICON_SIZE = SIZES.icon.lg;
+export const CHAT_ROOM_BADGE_SIZE = moderateScale(18, 0.25);
+export const CHAT_ROOM_BADGE_FONT = normalizeFont(10, { minSize: 9, maxSize: 11 });
+export const CHAT_ROOM_KEYBOARD_GAP = 40;
+export const CHAT_ROOM_MAX_FONT_SCALE = 1.2;
+
+export function getChatRoomClosedBottomInset(insetsBottom?: number | null): number {
+  return Math.min(insetsBottom ?? 0, SPACING.md);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // P2-003: AVATAR STYLING CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════
 

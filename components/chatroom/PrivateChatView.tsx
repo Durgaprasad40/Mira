@@ -22,11 +22,27 @@ import {
   Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useConvex, useQuery, useMutation } from 'convex/react';
-import { INCOGNITO_COLORS } from '@/lib/constants';
-import { GENDER_COLORS } from '@/lib/responsive';
+import { INCOGNITO_COLORS, lineHeight } from '@/lib/constants';
+import {
+  CHAT_FONTS,
+  CHAT_ROOM_BUBBLE_MAX_WIDTH,
+  CHAT_ROOM_BUBBLE_PADDING_H,
+  CHAT_ROOM_BUBBLE_PADDING_V,
+  CHAT_ROOM_BUBBLE_RADIUS,
+  CHAT_ROOM_HEADER_AVATAR_SIZE,
+  CHAT_ROOM_HEADER_HEIGHT,
+  CHAT_ROOM_MAX_FONT_SCALE,
+  CHAT_ROOM_MESSAGE_AVATAR_SIZE,
+  CHAT_ROOM_MESSAGE_ROW_GAP,
+  GENDER_COLORS,
+  SPACING,
+  SIZES,
+  getChatRoomClosedBottomInset,
+} from '@/lib/responsive';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useChatThemeColors } from '@/stores/chatThemeStore';
@@ -44,14 +60,13 @@ import { useVoiceRecorder, VoiceRecorderResult } from '@/hooks/useVoiceRecorder'
 import { preloadVideos } from '@/lib/videoCache';
 import { Image as ExpoImage } from 'expo-image';
 import type { Id } from '@/convex/_generated/dataModel';
+import {
+  CHAT_ROOM_TERMS_REQUIRED_MESSAGE,
+  describeChatRoomBlockReason,
+  isChatRoomTermsRequiredError,
+} from '@/lib/chatRoomSafetyMessages';
 
 const C = INCOGNITO_COLORS;
-
-// Backend error fragment thrown by convex/messages.ts sendMessage when the
-// recipient has muted the sender in the originating Chat Room. Convex wraps
-// thrown errors with a prefix, so we substring-match instead of equality.
-const MUTED_BY_RECIPIENT_ERROR_FRAGMENT =
-  "You can't message this user right now";
 
 // DM info for display (peer details)
 interface DmInfo {
@@ -146,10 +161,12 @@ export default function PrivateChatView({
   const flatListRef = useRef<FlatList>(null);
   const [headerHeight, setHeaderHeight] = useState(0);
   const insets = useSafeAreaInsets();
+  const router = useRouter();
 
   const [inputText, setInputText] = useState('');
   const [attachmentVisible, setAttachmentVisible] = useState(false);
   const [doodleVisible, setDoodleVisible] = useState(false);
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
   const [olderMessages, setOlderMessages] = useState<DmMessage[]>([]);
@@ -157,10 +174,38 @@ export default function PrivateChatView({
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
   const [loadOlderError, setLoadOlderError] = useState<string | null>(null);
-  // Inline notice when the recipient has muted the sender in the source
-  // Chat Room. Driven by sendMessage rejection; cleared on peer change,
-  // retry attempt, and successful send.
-  const [mutedByPeer, setMutedByPeer] = useState(false);
+  const [composerSafetyMessage, setComposerSafetyMessage] = useState<string | null>(null);
+  const composerSafetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearComposerSafetyMessage = useCallback(() => {
+    if (composerSafetyTimerRef.current) {
+      clearTimeout(composerSafetyTimerRef.current);
+      composerSafetyTimerRef.current = null;
+    }
+    setComposerSafetyMessage(null);
+  }, []);
+  const showComposerSafetyMessage = useCallback((message: string) => {
+    if (composerSafetyTimerRef.current) {
+      clearTimeout(composerSafetyTimerRef.current);
+      composerSafetyTimerRef.current = null;
+    }
+    setComposerSafetyMessage(message);
+    composerSafetyTimerRef.current = setTimeout(() => {
+      composerSafetyTimerRef.current = null;
+      setComposerSafetyMessage(null);
+    }, 4000);
+  }, []);
+  const routeToPolicyConsent = useCallback(() => {
+    Alert.alert('Agreement Required', CHAT_ROOM_TERMS_REQUIRED_MESSAGE, [
+      {
+        text: 'Review Policies',
+        onPress: () =>
+          router.push({
+            pathname: '/(onboarding)/consent',
+            params: { returnTo: 'chatRooms' },
+          } as any),
+      },
+    ]);
+  }, [router]);
 
   // Auth
   const authUserId = useAuthStore((s) => s.userId);
@@ -205,8 +250,13 @@ export default function PrivateChatView({
   // Track if user is currently dragging (manual scroll in progress)
   const isDraggingRef = useRef(false);
 
+  // Keyboard transitions trigger layout/scroll events that should not be
+  // interpreted as the user intentionally scrolling away from the newest item.
+  const isKeyboardTransitioningRef = useRef(false);
+
   // Refs for scroll-related timeouts
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const keyboardTransitionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Threshold: how close to bottom counts as "at bottom" (in pixels)
   const NEAR_BOTTOM_THRESHOLD = 50;
@@ -283,8 +333,17 @@ export default function PrivateChatView({
   // This ensures text isn't carried across different chat partners
   useEffect(() => {
     setInputText('');
-    setMutedByPeer(false);
-  }, [dm.peerId]);
+    clearComposerSafetyMessage();
+  }, [dm.peerId, clearComposerSafetyMessage]);
+
+  useEffect(() => {
+    return () => {
+      if (composerSafetyTimerRef.current) {
+        clearTimeout(composerSafetyTimerRef.current);
+        composerSafetyTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // THREAD-REOPEN: Reset scroll state when DM changes (new thread or reopen)
   useEffect(() => {
@@ -342,6 +401,17 @@ export default function PrivateChatView({
     return distanceFromBottom <= NEAR_BOTTOM_THRESHOLD;
   }, [NEAR_BOTTOM_THRESHOLD]);
 
+  const markKeyboardTransitioning = useCallback(() => {
+    isKeyboardTransitioningRef.current = true;
+    if (keyboardTransitionTimeoutRef.current) {
+      clearTimeout(keyboardTransitionTimeoutRef.current);
+    }
+    keyboardTransitionTimeoutRef.current = setTimeout(() => {
+      isKeyboardTransitioningRef.current = false;
+      keyboardTransitionTimeoutRef.current = null;
+    }, 350);
+  }, []);
+
   // ==========================================================================
   // CORE: Scroll to latest message
   // ==========================================================================
@@ -374,7 +444,13 @@ export default function PrivateChatView({
   // ==========================================================================
   // HELPER: Retry scroll until dimensions are valid
   // ==========================================================================
-  const scrollWithRetry = useCallback((animated: boolean, force: boolean, maxAttempts: number = 10) => {
+  const scrollWithRetry = useCallback((
+    animated: boolean,
+    force: boolean,
+    maxAttempts: number = 10,
+    retryDelay: number = 80,
+    initialDelay: number = 30
+  ) => {
     // Clear any pending scroll
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current);
@@ -383,7 +459,7 @@ export default function PrivateChatView({
     const attempt = (n: number) => {
       const success = scrollToLatest(animated, force);
       if (!success && n < maxAttempts) {
-        scrollTimeoutRef.current = setTimeout(() => attempt(n + 1), 80);
+        scrollTimeoutRef.current = setTimeout(() => attempt(n + 1), retryDelay);
       } else if (success && !hasInitialScrolledRef.current) {
         // Verification scroll for initial
         scrollTimeoutRef.current = setTimeout(() => {
@@ -395,7 +471,7 @@ export default function PrivateChatView({
 
     // Start after interactions settle
     InteractionManager.runAfterInteractions(() => {
-      scrollTimeoutRef.current = setTimeout(() => attempt(1), 30);
+      scrollTimeoutRef.current = setTimeout(() => attempt(1), initialDelay);
     });
   }, [scrollToLatest]);
 
@@ -416,12 +492,20 @@ export default function PrivateChatView({
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
 
     const sub = Keyboard.addListener(showEvent, () => {
-      // Scroll if not scrolled away (don't force)
-      scrollWithRetry(false, false, 5);
+      setIsKeyboardVisible(true);
+      markKeyboardTransitioning();
+      userScrolledAwayRef.current = false;
+      scrollWithRetry(
+        false,
+        true,
+        Platform.OS === 'android' ? 10 : 5,
+        Platform.OS === 'android' ? 120 : 80,
+        Platform.OS === 'android' ? 120 : 30
+      );
     });
 
     return () => sub.remove();
-  }, [scrollWithRetry]);
+  }, [markKeyboardTransitioning, scrollWithRetry]);
 
   // ==========================================================================
   // EVENT: Keyboard close - scroll to keep latest visible
@@ -430,17 +514,25 @@ export default function PrivateChatView({
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
 
     const sub = Keyboard.addListener(hideEvent, () => {
+      setIsKeyboardVisible(false);
+      markKeyboardTransitioning();
       // Wait for sheet animation, then scroll if not scrolled away
       InteractionManager.runAfterInteractions(() => {
         if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
         scrollTimeoutRef.current = setTimeout(() => {
-          scrollWithRetry(true, false, 8);
-        }, 150);
+          scrollWithRetry(
+            true,
+            false,
+            Platform.OS === 'android' ? 10 : 8,
+            Platform.OS === 'android' ? 120 : 80,
+            30
+          );
+        }, Platform.OS === 'android' ? 220 : 150);
       });
     });
 
     return () => sub.remove();
-  }, [scrollWithRetry]);
+  }, [markKeyboardTransitioning, scrollWithRetry]);
 
   // ==========================================================================
   // Cleanup on unmount
@@ -451,6 +543,10 @@ export default function PrivateChatView({
         clearTimeout(scrollTimeoutRef.current);
         scrollTimeoutRef.current = null;
       }
+      if (keyboardTransitionTimeoutRef.current) {
+        clearTimeout(keyboardTransitionTimeoutRef.current);
+        keyboardTransitionTimeoutRef.current = null;
+      }
     };
   }, []);
 
@@ -459,18 +555,20 @@ export default function PrivateChatView({
   // ==========================================================================
   const handleContentSizeChange = useCallback((width: number, height: number) => {
     const prevHeight = contentHeightRef.current;
+    const wasNearBottom = isNearBottom();
     contentHeightRef.current = height;
 
     // If content grew (new messages) and we haven't scrolled away, scroll to bottom
-    if (height > prevHeight && !userScrolledAwayRef.current) {
-      scrollToLatest(false, false);
+    if (height > prevHeight && (!userScrolledAwayRef.current || wasNearBottom)) {
+      userScrolledAwayRef.current = false;
+      scrollToLatest(false, true);
     }
 
     // Handle initial scroll if dimensions just became valid
     if (!hasInitialScrolledRef.current && height > 0 && layoutHeightRef.current > 0) {
       scrollToLatest(false, true);
     }
-  }, [scrollToLatest]);
+  }, [isNearBottom, scrollToLatest]);
 
   // ==========================================================================
   // HANDLER: Layout change - visible area may have changed
@@ -478,18 +576,20 @@ export default function PrivateChatView({
   const handleLayout = useCallback((e: LayoutChangeEvent) => {
     const newHeight = e.nativeEvent.layout.height;
     const prevHeight = layoutHeightRef.current;
+    const wasNearBottom = isNearBottom();
     layoutHeightRef.current = newHeight;
 
     // If layout changed and we're not scrolled away, maintain bottom anchor
-    if (prevHeight > 0 && newHeight !== prevHeight && !userScrolledAwayRef.current) {
-      scrollToLatest(false, false);
+    if (prevHeight > 0 && newHeight !== prevHeight && (!userScrolledAwayRef.current || wasNearBottom)) {
+      userScrolledAwayRef.current = false;
+      scrollToLatest(false, true);
     }
 
     // Handle initial scroll if dimensions just became valid
     if (prevHeight === 0 && newHeight > 0 && contentHeightRef.current > 0 && !hasInitialScrolledRef.current) {
       scrollToLatest(false, true);
     }
-  }, [scrollToLatest]);
+  }, [isNearBottom, scrollToLatest]);
 
   // ==========================================================================
   // HANDLER: Scroll events - track position and detect manual scroll
@@ -497,6 +597,9 @@ export default function PrivateChatView({
   const handleScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const offset = e.nativeEvent.contentOffset.y;
     scrollOffsetRef.current = offset;
+    if (isKeyboardTransitioningRef.current) {
+      return;
+    }
 
     // If user is dragging, check if they've scrolled away from bottom
     if (isDraggingRef.current) {
@@ -514,6 +617,9 @@ export default function PrivateChatView({
   // HANDLER: Drag begin - user started manual scroll
   // ==========================================================================
   const handleScrollBeginDrag = useCallback(() => {
+    if (isKeyboardTransitioningRef.current) {
+      return;
+    }
     isDraggingRef.current = true;
   }, []);
 
@@ -521,6 +627,10 @@ export default function PrivateChatView({
   // HANDLER: Drag end - user finished manual scroll
   // ==========================================================================
   const handleScrollEndDrag = useCallback(() => {
+    if (isKeyboardTransitioningRef.current) {
+      isDraggingRef.current = false;
+      return;
+    }
     isDraggingRef.current = false;
 
     // Final check: if user ended near bottom, reset scrolled-away state
@@ -550,9 +660,7 @@ export default function PrivateChatView({
     }
 
     setInputText('');
-    // Optimistic clear: hide any prior muted notice while we attempt to send.
-    // It will reappear in the catch block if the backend still rejects.
-    setMutedByPeer(false);
+    clearComposerSafetyMessage();
 
     try {
       await sendConversationMessage({
@@ -568,27 +676,28 @@ export default function PrivateChatView({
       // UNIFIED-SCROLL: User sent a message = they want to see it
       // Reset scrolled-away state and force scroll to latest
       userScrolledAwayRef.current = false;
-
-      InteractionManager.runAfterInteractions(() => {
-        // Force scroll to show sent message (with retry)
-        const attemptSendScroll = (attempt: number) => {
-          const success = scrollToLatest(false, true); // force=true
-          if (!success && attempt < 5) {
-            setTimeout(() => attemptSendScroll(attempt + 1), 50);
-          }
-        };
-        setTimeout(() => attemptSendScroll(1), 50);
-      });
+      scrollWithRetry(
+        false,
+        true,
+        Platform.OS === 'android' ? 10 : 5,
+        Platform.OS === 'android' ? 120 : 50,
+        50
+      );
     } catch (error) {
       if (__DEV__) console.error('[DM] Failed to send message:', error);
-      const message = String((error as { message?: unknown })?.message ?? '');
-      if (message.includes(MUTED_BY_RECIPIENT_ERROR_FRAGMENT)) {
-        setMutedByPeer(true);
+      if (isChatRoomTermsRequiredError(error)) {
+        routeToPolicyConsent();
+        setInputText(trimmed);
+        return;
+      }
+      const safetyMessage = describeChatRoomBlockReason(error);
+      if (safetyMessage) {
+        showComposerSafetyMessage(safetyMessage);
       }
       // Restore input on error
       setInputText(trimmed);
     }
-  }, [inputText, isExpiredThread, threadId, authUserId, sendConversationMessage, onSendComplete, scrollToLatest]);
+  }, [inputText, isExpiredThread, threadId, authUserId, sendConversationMessage, onSendComplete, scrollWithRetry, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]);
 
   // DM-MEDIA-FIX: Full media upload implementation for DMs
   const handleSendMedia = useCallback(
@@ -599,8 +708,7 @@ export default function PrivateChatView({
         return;
       }
 
-      // Optimistic clear: hide any prior muted notice while we attempt to send.
-      setMutedByPeer(false);
+      clearComposerSafetyMessage();
 
       try {
         // Step 1: Upload media to Convex storage
@@ -632,19 +740,30 @@ export default function PrivateChatView({
         );
 
         // Scroll to show the new message
-        scrollToLatest(true, true);
+        userScrolledAwayRef.current = false;
+        scrollWithRetry(
+          true,
+          true,
+          Platform.OS === 'android' ? 10 : 5,
+          Platform.OS === 'android' ? 120 : 50,
+          50
+        );
 
         // Notify parent if needed (e.g., for ChatSheet keyboard handling)
         onSendComplete?.();
       } catch (error) {
         if (__DEV__) console.error('[DM] Media send failed:', error);
-        const message = String((error as { message?: unknown })?.message ?? '');
-        if (message.includes(MUTED_BY_RECIPIENT_ERROR_FRAGMENT)) {
-          setMutedByPeer(true);
+        if (isChatRoomTermsRequiredError(error)) {
+          routeToPolicyConsent();
+          return;
+        }
+        const safetyMessage = describeChatRoomBlockReason(error);
+        if (safetyMessage) {
+          showComposerSafetyMessage(safetyMessage);
         }
       }
     },
-    [threadId, authUserId, generateUploadUrl, sendConversationMessage, scrollToLatest, onSendComplete, isExpiredThread]
+    [threadId, authUserId, generateUploadUrl, sendConversationMessage, scrollWithRetry, onSendComplete, isExpiredThread, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -714,6 +833,8 @@ export default function PrivateChatView({
 
   const keyExtractor = useCallback((item: EnrichedMessage) => item.id, []);
   const isLoading = messagesResult === undefined && !!threadId;
+  const effectiveKeyboardVisible = isKeyboardVisible || isKeyboardOpen;
+  const composerBottomInset = effectiveKeyboardVisible ? 0 : getChatRoomClosedBottomInset(insets.bottom);
 
   const historyHeader = useMemo(() => {
     if (isLoading) {
@@ -723,28 +844,28 @@ export default function PrivateChatView({
       return (
         <View style={styles.historyStatus}>
           <ActivityIndicator size="small" color={C.accent} />
-          <Text style={styles.historyStatusText}>Loading earlier messages…</Text>
+          <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.historyStatusText}>Loading earlier messages…</Text>
         </View>
       );
     }
     if (loadOlderError) {
       return (
         <TouchableOpacity style={styles.historyButton} onPress={handleLoadOlderMessages}>
-          <Text style={styles.historyButtonText}>Retry loading earlier messages</Text>
+          <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.historyButtonText}>Retry loading earlier messages</Text>
         </TouchableOpacity>
       );
     }
     if (hasOlderMessages) {
       return (
         <TouchableOpacity style={styles.historyButton} onPress={handleLoadOlderMessages}>
-          <Text style={styles.historyButtonText}>Load earlier messages</Text>
+          <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.historyButtonText}>Load earlier messages</Text>
         </TouchableOpacity>
       );
     }
     if (messages.length > 0) {
       return (
         <View style={styles.historyStatus}>
-          <Text style={styles.historyStatusText}>Beginning of conversation</Text>
+          <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.historyStatusText}>Beginning of conversation</Text>
         </View>
       );
     }
@@ -800,6 +921,7 @@ export default function PrivateChatView({
         }
         return (
           <Text
+            maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE}
             style={[
               isMe ? styles.bubbleMeText : styles.bubbleOtherText,
               { color: isMe ? themeColors.bubbleMeText : themeColors.bubbleOtherText },
@@ -833,7 +955,7 @@ export default function PrivateChatView({
             <Image source={{ uri: dm.peerAvatar }} style={styles.avatar} />
           ) : (
             <View style={[styles.avatarPlaceholder, { backgroundColor: themeColors.surface }]}>
-              <Ionicons name="person" size={12} color={themeColors.textLight} />
+              <Ionicons name="person" size={SIZES.icon.xs} color={themeColors.textLight} />
             </View>
           )}
           {isAudio ? (
@@ -871,7 +993,7 @@ export default function PrivateChatView({
             onPress={onBack}
             hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
           >
-            <Ionicons name="arrow-back" size={24} color={C.text} />
+            <Ionicons name="arrow-back" size={SIZES.icon.lg} color={C.text} />
           </TouchableOpacity>
         )}
         {dm.peerAvatar ? (
@@ -889,10 +1011,10 @@ export default function PrivateChatView({
               { borderColor: GENDER_COLORS[dm.peerGender || 'other'] },
             ]}
           >
-            <Ionicons name="person" size={16} color={C.textLight} />
+            <Ionicons name="person" size={SIZES.icon.sm} color={C.textLight} />
           </View>
         )}
-        <Text style={styles.headerName} numberOfLines={1}>{dm.peerName}</Text>
+        <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.headerName} numberOfLines={1}>{dm.peerName}</Text>
         <View style={{ flex: 1 }} />
 
         {/* X close button - only when in sheet mode */}
@@ -902,7 +1024,7 @@ export default function PrivateChatView({
             onPress={onSheetClose}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
-            <Ionicons name="close" size={20} color={C.textLight} />
+            <Ionicons name="close" size={SIZES.icon.md} color={C.textLight} />
           </TouchableOpacity>
         )}
       </View>
@@ -929,8 +1051,8 @@ export default function PrivateChatView({
                 contentContainerStyle={{
                   flexGrow: 1,
                   justifyContent: 'flex-end' as const,
-                  paddingHorizontal: 12,
-                  paddingTop: 6,
+                  paddingHorizontal: SPACING.md,
+                  paddingTop: SPACING.sm,
                 }}
                 onLayout={handleLayout}
                 onContentSizeChange={handleContentSizeChange}
@@ -950,10 +1072,10 @@ export default function PrivateChatView({
                   <View style={styles.emptyContainer}>
                     <Ionicons
                       name={isExpiredThread ? 'time-outline' : 'chatbubble-outline'}
-                      size={40}
+                      size={SIZES.icon.xl}
                       color={C.textLight}
                     />
-                    <Text style={styles.emptyText}>
+                    <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.emptyText}>
                       {isExpiredThread ? 'This chat expired.' : 'No messages yet. Start the conversation.'}
                     </Text>
                   </View>
@@ -970,39 +1092,29 @@ export default function PrivateChatView({
           <View
             ref={onComposerRef}
             onLayout={onComposerLayout}
-            style={styles.inputWrapper}
+            style={[styles.inputWrapper, { paddingBottom: composerBottomInset }]}
           >
             {isExpiredThread ? (
               <View style={styles.expiredNotice}>
-                <Ionicons name="time-outline" size={16} color={C.textLight} />
-                <Text style={styles.expiredNoticeText}>This chat expired.</Text>
+                <Ionicons name="time-outline" size={SIZES.icon.sm} color={C.textLight} />
+                <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.expiredNoticeText}>This chat expired.</Text>
               </View>
             ) : (
               <>
-                {mutedByPeer && (
-                  <View style={styles.mutedNotice}>
-                    <Ionicons
-                      name="volume-mute-outline"
-                      size={16}
-                      color="#FFB74D"
-                      style={styles.mutedNoticeIcon}
-                    />
-                    <View style={styles.mutedNoticeTextWrap}>
-                      <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
-                      <Text style={styles.mutedNoticeBody}>
-                        You can&apos;t message this person until they unmute you.
-                      </Text>
-                    </View>
-                  </View>
-                )}
                 <ChatComposer
                   value={inputText}
-                  onChangeText={setInputText}
+                  onChangeText={(text) => {
+                    setInputText(text);
+                    if (composerSafetyMessage) {
+                      clearComposerSafetyMessage();
+                    }
+                  }}
                   onSend={handleSend}
                   onPlusPress={() => setAttachmentVisible(true)}
                   onMicPress={toggleRecording}
                   isRecording={isRecording}
                   elapsedMs={elapsedMs}
+                  safetyMessage={composerSafetyMessage}
                 />
               </>
             )}
@@ -1011,8 +1123,8 @@ export default function PrivateChatView({
       ) : (
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          keyboardVerticalOffset={headerHeight}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? headerHeight : 0}
         >
           {isLoading ? (
             <View style={styles.loadingContainer}>
@@ -1027,7 +1139,7 @@ export default function PrivateChatView({
               contentContainerStyle={{
                 flexGrow: 1,
                 justifyContent: 'flex-end' as const,
-                paddingTop: 6,
+                paddingTop: SPACING.sm,
                 paddingBottom: 0,
               }}
               onLayout={handleLayout}
@@ -1049,48 +1161,38 @@ export default function PrivateChatView({
                 <View style={styles.emptyContainer}>
                   <Ionicons
                     name={isExpiredThread ? 'time-outline' : 'chatbubble-outline'}
-                    size={40}
+                    size={SIZES.icon.xl}
                     color={C.textLight}
                   />
-                  <Text style={styles.emptyText}>
+                  <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.emptyText}>
                     {isExpiredThread ? 'This chat expired.' : 'No messages yet. Start the conversation.'}
                   </Text>
                 </View>
               }
             />
           )}
-          <View style={{ paddingBottom: insets.bottom }}>
+          <View style={{ paddingBottom: composerBottomInset }}>
             {isExpiredThread ? (
               <View style={styles.expiredNotice}>
-                <Ionicons name="time-outline" size={16} color={C.textLight} />
-                <Text style={styles.expiredNoticeText}>This chat expired.</Text>
+                <Ionicons name="time-outline" size={SIZES.icon.sm} color={C.textLight} />
+                <Text maxFontSizeMultiplier={CHAT_ROOM_MAX_FONT_SCALE} style={styles.expiredNoticeText}>This chat expired.</Text>
               </View>
             ) : (
               <>
-                {mutedByPeer && (
-                  <View style={styles.mutedNotice}>
-                    <Ionicons
-                      name="volume-mute-outline"
-                      size={16}
-                      color="#FFB74D"
-                      style={styles.mutedNoticeIcon}
-                    />
-                    <View style={styles.mutedNoticeTextWrap}>
-                      <Text style={styles.mutedNoticeTitle}>You have been muted</Text>
-                      <Text style={styles.mutedNoticeBody}>
-                        You can&apos;t message this person until they unmute you.
-                      </Text>
-                    </View>
-                  </View>
-                )}
                 <ChatComposer
                   value={inputText}
-                  onChangeText={setInputText}
+                  onChangeText={(text) => {
+                    setInputText(text);
+                    if (composerSafetyMessage) {
+                      clearComposerSafetyMessage();
+                    }
+                  }}
                   onSend={handleSend}
                   onPlusPress={() => setAttachmentVisible(true)}
                   onMicPress={toggleRecording}
                   isRecording={isRecording}
                   elapsedMs={elapsedMs}
+                  safetyMessage={composerSafetyMessage}
                 />
               </>
             )}
@@ -1179,185 +1281,161 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    minHeight: CHAT_ROOM_HEADER_HEIGHT,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
     backgroundColor: C.surface,
     borderBottomWidth: 1,
     borderBottomColor: C.accent,
-    gap: 10,
+    gap: SPACING.sm,
   },
   // Sheet-specific header: slightly more padding at top for visual balance
   // Solid background to prevent bleed-through near X button
   sheetHeader: {
-    paddingTop: 12,
-    paddingBottom: 10,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.sm,
+    borderTopLeftRadius: CHAT_ROOM_BUBBLE_RADIUS,
+    borderTopRightRadius: CHAT_ROOM_BUBBLE_RADIUS,
     backgroundColor: C.surface,
     overflow: 'hidden',
   },
   // X close button in header (right side)
   sheetCloseButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: SIZES.avatar.sm,
+    height: SIZES.avatar.sm,
+    borderRadius: SIZES.avatar.sm / 2,
     backgroundColor: 'rgba(255,255,255,0.1)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   headerAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: CHAT_ROOM_HEADER_AVATAR_SIZE,
+    height: CHAT_ROOM_HEADER_AVATAR_SIZE,
+    borderRadius: CHAT_ROOM_HEADER_AVATAR_SIZE / 2,
     borderWidth: 2,
   },
   headerAvatarPlaceholder: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: CHAT_ROOM_HEADER_AVATAR_SIZE,
+    height: CHAT_ROOM_HEADER_AVATAR_SIZE,
+    borderRadius: CHAT_ROOM_HEADER_AVATAR_SIZE / 2,
     borderWidth: 2,
     backgroundColor: C.accent,
     alignItems: 'center',
     justifyContent: 'center',
   },
   headerName: {
-    fontSize: 16,
+    fontSize: CHAT_FONTS.headerTitle,
     fontWeight: '700',
+    lineHeight: lineHeight(CHAT_FONTS.headerTitle, 1.2),
     color: C.text,
   },
   rowOther: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginBottom: 8,
+    marginBottom: CHAT_ROOM_MESSAGE_ROW_GAP,
     maxWidth: '85%',
   },
   avatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    marginRight: 8,
+    width: CHAT_ROOM_MESSAGE_AVATAR_SIZE,
+    height: CHAT_ROOM_MESSAGE_AVATAR_SIZE,
+    borderRadius: CHAT_ROOM_MESSAGE_AVATAR_SIZE / 2,
+    marginRight: SPACING.sm,
   },
   avatarPlaceholder: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: CHAT_ROOM_MESSAGE_AVATAR_SIZE,
+    height: CHAT_ROOM_MESSAGE_AVATAR_SIZE,
+    borderRadius: CHAT_ROOM_MESSAGE_AVATAR_SIZE / 2,
     backgroundColor: C.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 8,
+    marginRight: SPACING.sm,
   },
   bubbleOther: {
     backgroundColor: C.surface,
-    borderRadius: 14,
+    borderRadius: CHAT_ROOM_BUBBLE_RADIUS,
     borderTopLeftRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: CHAT_ROOM_BUBBLE_PADDING_H,
+    paddingVertical: CHAT_ROOM_BUBBLE_PADDING_V,
+    maxWidth: CHAT_ROOM_BUBBLE_MAX_WIDTH,
     flexShrink: 1,
   },
   bubbleOtherText: {
-    fontSize: 15,
-    lineHeight: 20,
+    fontSize: CHAT_FONTS.messageText,
+    lineHeight: lineHeight(CHAT_FONTS.messageText, 1.35),
     color: C.text,
   },
   // DM-UX-FIX: timeOther removed - no timestamps in 1-on-1 DM
   rowMe: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    marginBottom: 8,
+    marginBottom: CHAT_ROOM_MESSAGE_ROW_GAP,
   },
   bubbleMe: {
     backgroundColor: C.accent,
-    borderRadius: 14,
+    borderRadius: CHAT_ROOM_BUBBLE_RADIUS,
     borderTopRightRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    maxWidth: '80%',
+    paddingHorizontal: CHAT_ROOM_BUBBLE_PADDING_H,
+    paddingVertical: CHAT_ROOM_BUBBLE_PADDING_V,
+    maxWidth: CHAT_ROOM_BUBBLE_MAX_WIDTH,
   },
   bubbleMeText: {
-    fontSize: 15,
-    lineHeight: 20,
+    fontSize: CHAT_FONTS.messageText,
+    lineHeight: lineHeight(CHAT_FONTS.messageText, 1.35),
     color: C.text,
   },
   // DM-UX-FIX: timeMe removed - no timestamps in 1-on-1 DM
   historyStatus: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 10,
-    gap: 6,
+    paddingVertical: SPACING.sm,
+    gap: SPACING.xs,
   },
   historyStatusText: {
-    fontSize: 12,
+    fontSize: CHAT_FONTS.secondary,
+    lineHeight: lineHeight(CHAT_FONTS.secondary, 1.35),
     color: C.textLight,
   },
   historyButton: {
     alignSelf: 'center',
-    marginVertical: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
+    marginVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.sm,
     borderWidth: 1,
     borderColor: C.accent,
     backgroundColor: C.surface,
   },
   historyButtonText: {
-    fontSize: 12,
+    fontSize: CHAT_FONTS.secondary,
     fontWeight: '600',
+    lineHeight: lineHeight(CHAT_FONTS.secondary, 1.2),
     color: C.text,
   },
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingTop: 80,
-    gap: 8,
+    paddingTop: SIZES.avatar.xl,
+    gap: SPACING.sm,
   },
   emptyText: {
-    fontSize: 14,
+    fontSize: CHAT_FONTS.emptySubtitle,
+    lineHeight: lineHeight(CHAT_FONTS.emptySubtitle, 1.35),
     color: C.textLight,
   },
   expiredNotice: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
     backgroundColor: C.surface,
   },
   expiredNoticeText: {
-    fontSize: 13,
+    fontSize: CHAT_FONTS.label,
     fontWeight: '600',
+    lineHeight: lineHeight(CHAT_FONTS.label, 1.2),
     color: C.textLight,
-  },
-  // Inline notice shown above the composer when sendMessage is rejected
-  // because the recipient muted the sender. Subtle warning, not destructive.
-  mutedNotice: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor: 'rgba(255, 183, 77, 0.10)',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(255, 183, 77, 0.35)',
-    borderBottomColor: 'rgba(255, 183, 77, 0.35)',
-  },
-  mutedNoticeIcon: {
-    marginTop: 1,
-    marginRight: 8,
-  },
-  mutedNoticeTextWrap: {
-    flex: 1,
-  },
-  mutedNoticeTitle: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: '#FFB74D',
-    marginBottom: 2,
-  },
-  mutedNoticeBody: {
-    fontSize: 12,
-    color: C.textLight,
-    lineHeight: 16,
   },
 });
