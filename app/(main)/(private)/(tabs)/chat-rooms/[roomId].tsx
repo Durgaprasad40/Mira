@@ -57,6 +57,7 @@ import UserProfilePopup from '@/components/chatroom/UserProfilePopup';
 import ViewProfileModal from '@/components/chatroom/ViewProfileModal';
 import ReportUserModal, { ReportReason } from '@/components/chatroom/ReportUserModal';
 import AttachmentPopup from '@/components/chatroom/AttachmentPopup';
+import { Toast } from '@/components/ui/Toast';
 import DoodleCanvas from '@/components/chatroom/DoodleCanvas';
 import SecureMediaViewer from '@/components/chatroom/SecureMediaViewer';
 import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
@@ -548,6 +549,15 @@ export default function ChatRoomScreen() {
     api.chatRooms.checkRoomAccess,
     shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
+  const accessStatus = accessStatusQuery?.status;
+
+  useEffect(() => {
+    if (!isDemoMode && accessStatus === 'banned') {
+      Toast.show('You were removed from this room');
+      router.replace('/(main)/(private)/(tabs)/chat-rooms');
+    }
+  }, [accessStatus, router]);
+
   // Phase-2: Route param is the earliest reliable public/private hint (set by the list screen).
   const isPublicFromRoute = routeIsPrivate === '0';
 
@@ -605,6 +615,7 @@ export default function ChatRoomScreen() {
   const setUserRoomMutedMutation = useMutation(api.chatRooms.setUserRoomMuted);
   const markReportedRoomMutation = useMutation(api.chatRooms.markReportedRoom);
   const submitChatRoomReportMutation = useMutation(api.chatRooms.submitChatRoomReport);
+  const kickAndBanMemberMutation = useMutation(api.chatRooms.kickAndBanMember);
 
   // ─────────────────────────────────────────────────────────────────────────
   // ROOM-SPECIFIC PRESENCE: Heartbeat system for real-time online tracking
@@ -2237,6 +2248,41 @@ export default function ChatRoomScreen() {
     }
   }, [authUserId, roomIdStr, hasValidRoomId, toggleMuteUserMutation]);
 
+  const handleKickOut = useCallback((targetUserId: string) => {
+    if (!authUserId || !roomIdStr || !hasValidRoomId) {
+      Toast.show('Unable to remove user');
+      return;
+    }
+
+    Alert.alert(
+      'Kick this user out of the room?',
+      "They won't be able to rejoin this private room.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Kick Out',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await kickAndBanMemberMutation({
+                roomId: roomIdStr as Id<'chatRooms'>,
+                targetUserId: targetUserId as Id<'users'>,
+                authUserId,
+              });
+              if (mountedRef.current) {
+                closeOverlay();
+                setSelectedUser(null);
+              }
+              Toast.show('Removed from room');
+            } catch (error: any) {
+              Toast.show(error?.message || 'Failed to remove from room');
+            }
+          },
+        },
+      ]
+    );
+  }, [authUserId, roomIdStr, hasValidRoomId, kickAndBanMemberMutation, closeOverlay]);
+
   // Auto-clear join messages after 1 minute
   // P0 FIX: Check mountedRef before state update to prevent unmounted warning
   // M-002 FIX: Consolidated to single mountedRef (was isMountedRef)
@@ -3809,7 +3855,6 @@ export default function ChatRoomScreen() {
   // - joinAttempted && joinFailed → user banned or cannot access
   // SECURITY: Show error screen and navigate back safely
   // ─────────────────────────────────────────────────────────────────────────
-  const accessStatus = accessStatusQuery?.status;
   const isRoomNotFound =
     !isDemoMode &&
     (convexRoom === null || accessStatus === 'not_found' || accessStatus === 'expired');
@@ -4316,6 +4361,11 @@ export default function ChatRoomScreen() {
         onPrivateMessage={handlePrivateMessage}
         onMuteUser={handleToggleMuteUser}
         onReport={handleReport}
+        roomId={roomIdStr ? (roomIdStr as Id<'chatRooms'>) : null}
+        currentUserId={authUserId}
+        roomCreatedBy={convexRoom?.createdBy ?? null}
+        isPrivateRoom={!isPublicRoom}
+        onKickOut={handleKickOut}
       />
 
       <ViewProfileModal

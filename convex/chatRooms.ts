@@ -4651,7 +4651,11 @@ export const kickAndBanMember = mutation({
     if (!room) {
       throw new Error('Room not found');
     }
-    if (room.createdBy !== userId) {
+    if (room.isPublic) {
+      throw new Error('Kick is only allowed in private rooms');
+    }
+    const ownerId = room.createdBy;
+    if (ownerId !== userId) {
       throw new Error('Only room owner can kick members');
     }
 
@@ -4687,6 +4691,43 @@ export const kickAndBanMember = mutation({
         bannedBy: userId,
       });
     }
+
+    const presence = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (presence) {
+      await ctx.db.delete(presence._id);
+    }
+
+    const mutesByTargetUser = await ctx.db
+      .query('chatRoomPerUserMutes')
+      .withIndex('by_room_muter', (q) => q.eq('roomId', roomId).eq('muterId', targetUserId))
+      .collect();
+    const mutesTargetingUser = await ctx.db
+      .query('chatRoomPerUserMutes')
+      .withIndex('by_room_target', (q) => q.eq('roomId', roomId).eq('targetUserId', targetUserId))
+      .collect();
+    const muteIds = new Set([
+      ...mutesByTargetUser.map((mute) => mute._id),
+      ...mutesTargetingUser.map((mute) => mute._id),
+    ]);
+    for (const muteId of muteIds) {
+      await ctx.db.delete(muteId);
+    }
+
+    const removedMessageText = 'A member was removed by the room owner.';
+    await ctx.db.insert('chatRoomMessages', {
+      roomId,
+      senderId: ownerId,
+      type: 'system',
+      text: removedMessageText,
+      createdAt: now,
+    });
+    await ctx.db.patch(roomId, {
+      lastMessageAt: now,
+      lastMessageText: removedMessageText,
+    });
 
     // 6. Update any existing request to rejected
     const request = await ctx.db

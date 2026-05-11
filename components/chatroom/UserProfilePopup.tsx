@@ -12,6 +12,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { DemoOnlineUser } from '@/lib/demoData';
+import type { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -25,6 +26,11 @@ interface UserProfilePopupProps {
   onMuteUser?: (userId: string) => void;
   onReport?: (userId: string) => void;
   isMuted?: boolean;
+  roomId?: Id<'chatRooms'> | null;
+  currentUserId?: string | null;
+  roomCreatedBy?: string | null;
+  isPrivateRoom?: boolean;
+  onKickOut?: (userId: string) => void;
 }
 
 export default function UserProfilePopup({
@@ -36,6 +42,10 @@ export default function UserProfilePopup({
   onMuteUser,
   onReport,
   isMuted = false,
+  currentUserId,
+  roomCreatedBy,
+  isPrivateRoom,
+  onKickOut,
 }: UserProfilePopupProps) {
   const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
   // Backdrop only active after open animation finishes (prevents opening touch from closing)
@@ -86,6 +96,13 @@ export default function UserProfilePopup({
   }, [visible]);
 
   if (!visible || !user) return null;
+
+  const showKick =
+    !!isPrivateRoom &&
+    !!currentUserId &&
+    !!roomCreatedBy &&
+    currentUserId === roomCreatedBy &&
+    user.id !== currentUserId;
 
   return (
     <View style={styles.overlay}>
@@ -166,22 +183,34 @@ export default function UserProfilePopup({
             <Text style={styles.actionText}>Private Message</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.actionButton}
-            onPress={() => {
-              onMuteUser?.(user.id);
-              onClose();
-            }}
-          >
-            <Ionicons
-              name={isMuted ? 'volume-high-outline' : 'volume-mute-outline'}
-              size={20}
-              color={isMuted ? '#00B894' : C.text}
-            />
-            <Text style={[styles.actionText, isMuted && { color: '#00B894' }]}>
-              {isMuted ? 'Unmute User' : 'Mute User'}
-            </Text>
-          </TouchableOpacity>
+          {showKick ? (
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => {
+                onKickOut?.(user.id);
+              }}
+            >
+              <Ionicons name="person-remove-outline" size={20} color="#E53935" />
+              <Text style={[styles.actionText, { color: '#E53935' }]}>Kick Out</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => {
+                onMuteUser?.(user.id);
+                onClose();
+              }}
+            >
+              <Ionicons
+                name={isMuted ? 'volume-high-outline' : 'volume-mute-outline'}
+                size={20}
+                color={isMuted ? '#00B894' : C.text}
+              />
+              <Text style={[styles.actionText, isMuted && { color: '#00B894' }]}>
+                {isMuted ? 'Unmute User' : 'Mute User'}
+              </Text>
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity
             style={styles.actionButton}
