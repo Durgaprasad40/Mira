@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   TextInput,
   Alert,
+  Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useRootNavigationState } from 'expo-router';
@@ -143,6 +144,7 @@ interface ChatRoom {
   slug: string;
   category: 'language' | 'general';
   activeUserCount: number;  // LIVE: Real-time presence count (users currently in room)
+  memberCount?: number;
   lastMessageText?: string;
   // Icon support (admin-set, optional)
   iconKey?: string;   // Maps to ROOM_ICON_CONFIG or local asset
@@ -151,6 +153,8 @@ interface ChatRoom {
   isPrivate?: boolean;
   // LOCKED-ROOM-FIX: Password protection flags
   hasPassword?: boolean;  // Room requires password to join
+  requiresPassword?: boolean;
+  isLocked?: boolean;
   isMember?: boolean;     // Current user is already a member (can skip password)
   wasAuthorized?: boolean; // RE-ENTRY-FIX: User was previously authorized (can rejoin without password)
   role?: 'owner' | 'admin' | 'member'; // PRIVATE-ROOM-ACCESS-FIX: User's role in room
@@ -164,6 +168,7 @@ interface ConvexListedRoom {
   name: string;
   slug: string;
   category: RoomCategory;
+  memberCount?: number;
   onlineCount?: number;
   lastMessageText?: string;
 }
@@ -171,6 +176,7 @@ interface ConvexListedRoom {
 interface ConvexPrivateRoom extends ConvexListedRoom {
   isMember?: boolean;
   role?: RoomRole;
+  hasPassword?: boolean;
 }
 
 function AccessPrefetcher({ roomId, authUserId }: { roomId: string; authUserId: string | null }) {
@@ -215,6 +221,12 @@ export default function ChatRoomsScreen() {
     id: string;
     name: string;
   } | null>(null);
+  const [joinCodeModalRoom, setJoinCodeModalRoom] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [joinCodeValue, setJoinCodeValue] = useState('');
+  const [isJoiningByCode, setIsJoiningByCode] = useState(false);
 
   // Navigation readiness check - prevent "navigate before mounting Root Layout" warning
   const rootNavState = useRootNavigationState();
@@ -419,9 +431,11 @@ export default function ChatRoomsScreen() {
       }
 
       // NAV-TRAP FIX: Set session-level flag (persists across remounts, resets on app restart)
+      // Keep the list route in history so Back/List can return to Discover Private Rooms;
+      // the session flag above prevents an immediate preferred-room redirect loop.
       usePreferredChatRoomStore.getState().setHasRedirectedInSession(true);
       setIsRedirecting(true);
-      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
+      router.push(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
 
       // M-003 FIX: Only reset isRedirecting in cleanup
       return () => {
@@ -440,8 +454,14 @@ export default function ChatRoomsScreen() {
     userId ? { authUserId: userId } : 'skip'
   ) as ConvexPrivateRoom[] | undefined;
 
+  const discoverablePrivateRoomsRaw = useQuery(
+    api.chatRooms.getDiscoverablePrivateRooms,
+    userId ? { authUserId: userId } : 'skip'
+  ) as ConvexPrivateRoom[] | undefined;
+
   // Phase-2: Mutations for private rooms
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
+  const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
 
   // BUG FIX: Mutation to seed default public rooms
@@ -489,6 +509,7 @@ export default function ChatRoomsScreen() {
       slug: r.slug,
       category: r.category,
       activeUserCount: getSmoothedCount(r._id, r.onlineCount ?? 0),
+      memberCount: r.memberCount,
       iconKey: r.slug,
       isPrivate: true, // Flag for compact rendering
       hasPassword: false,
@@ -497,6 +518,32 @@ export default function ChatRoomsScreen() {
       role: r.role,
     }));
   }, [getSmoothedCount, myPrivateRooms]);
+
+  const discoverablePrivateRooms: ChatRoom[] = useMemo(() => {
+    if (!discoverablePrivateRoomsRaw) return [];
+    return discoverablePrivateRoomsRaw.map((r: ConvexPrivateRoom) => ({
+      id: r._id,
+      name: r.name,
+      slug: r.slug,
+      category: r.category,
+      activeUserCount: getSmoothedCount(r._id, r.onlineCount ?? 0),
+      memberCount: r.memberCount,
+      iconKey: r.slug,
+      isPrivate: true,
+      hasPassword: r.hasPassword ?? false,
+      requiresPassword: r.hasPassword ?? false,
+      isLocked: true,
+      isMember: false,
+    }));
+  }, [discoverablePrivateRoomsRaw, getSmoothedCount]);
+
+  useEffect(() => {
+    if (myPrivateRooms === undefined || discoverablePrivateRoomsRaw === undefined) return;
+    console.log('[P2_PRIVATE_ROOMS_UI]', {
+      myCount: myPrivateRooms.length,
+      discoverableCount: discoverablePrivateRoomsRaw.length,
+    });
+  }, [myPrivateRooms, discoverablePrivateRoomsRaw]);
 
   // Track loading state for Convex queries
   const isConvexLoading = convexRooms === undefined;
@@ -571,11 +618,30 @@ export default function ChatRoomsScreen() {
       }
 
       // ISSUE B: Find room to get name and private status for instant render
-      // Check in rooms (general/language) first, then privateRooms
+      // Check in rooms (general/language) first, then private room sections.
       const foundRoom = rooms.find((r) => r.id === roomId);
-      const foundPrivateRoom = privateRooms.find((r) => r.id === roomId);
+      const foundMyPrivateRoom = privateRooms.find((r) => r.id === roomId);
+      const foundDiscoverablePrivateRoom = discoverablePrivateRooms.find((r) => r.id === roomId);
+      const foundPrivateRoom = foundMyPrivateRoom ?? foundDiscoverablePrivateRoom;
       const roomName = foundRoom?.name ?? foundPrivateRoom?.name ?? '';
       const isPrivate = !!foundPrivateRoom ? '1' : '0';
+
+      if (foundDiscoverablePrivateRoom && !foundDiscoverablePrivateRoom.isMember) {
+        if (foundDiscoverablePrivateRoom.requiresPassword) {
+          setPasswordModalRoom({
+            id: foundDiscoverablePrivateRoom.id,
+            name: foundDiscoverablePrivateRoom.name,
+          });
+          return;
+        }
+
+        setJoinCodeModalRoom({
+          id: foundDiscoverablePrivateRoom.id,
+          name: foundDiscoverablePrivateRoom.name,
+        });
+        setJoinCodeValue('');
+        return;
+      }
 
       // UX smoothing (visual only): make counts feel instant for a single transition.
       // This does NOT modify backend counts and cannot drift (auto-expires, never accumulates).
@@ -601,8 +667,8 @@ export default function ChatRoomsScreen() {
         });
       }
 
-      // PRIVATE-ROOM-ACCESS-FIX: No invite-code flow for private rooms
-      // Navigation is always allowed - room screen handles access checks
+      // Existing joined/created private rooms can re-enter directly.
+      // Visible non-member private rooms return above into password/code entry.
       if (foundPrivateRoom) {
         const isOwner = foundPrivateRoom.role === 'owner';
         const isApprovedMember = foundPrivateRoom.isMember;
@@ -612,10 +678,9 @@ export default function ChatRoomsScreen() {
         } else if (isApprovedMember) {
           console.log('PRIVATE_ROOM_APPROVED_MEMBER_REENTRY', { roomId, isMember: true });
         } else {
-          // First-time entrant - room screen will handle password
+          // Should only happen for already-approved entries; non-members are gated above.
           console.log('PRIVATE_ROOM_FIRST_TIME_PASSWORD_REQUIRED', { roomId, isMember: false, isOwner: false });
         }
-        // Always allow navigation - no blocking
       }
 
       // NAV-RACE FIX: Set synchronous lock before navigation
@@ -637,7 +702,7 @@ export default function ChatRoomsScreen() {
         isNavigatingToRoomRef.current = false;
       }, NAV_SETTLE_DELAY_MS);
     },
-    [router, markRoomVisited, rooms, privateRooms, isSeedingRooms, userId, currentRoomId, leaveRoomMutation]
+    [router, markRoomVisited, rooms, privateRooms, discoverablePrivateRooms, isSeedingRooms, userId, currentRoomId, leaveRoomMutation]
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -741,6 +806,53 @@ export default function ChatRoomsScreen() {
     setPasswordModalRoom(null);
   }, []);
 
+  const handleJoinCodeCancel = useCallback(() => {
+    setJoinCodeModalRoom(null);
+    setJoinCodeValue('');
+    setIsJoiningByCode(false);
+  }, []);
+
+  const handleJoinCodeSubmit = useCallback(async () => {
+    if (!joinCodeModalRoom || !userId || isJoiningByCode) return;
+    const code = joinCodeValue.trim();
+    if (!code) {
+      Alert.alert('Room Code Required', 'Enter the room code to join this private room.');
+      return;
+    }
+
+    setIsJoiningByCode(true);
+    try {
+      const result = await joinRoomByCodeMut({
+        roomId: joinCodeModalRoom.id as Id<'chatRooms'>,
+        joinCode: code,
+        authUserId: userId,
+      });
+      const joinedRoomId = result.roomId as string;
+      const roomName = joinCodeModalRoom.name;
+
+      setJoinCodeModalRoom(null);
+      setJoinCodeValue('');
+      isNavigatingToRoomRef.current = true;
+      userNavigatedRef.current = true;
+
+      router.push({
+        pathname: `/(main)/(private)/(tabs)/chat-rooms/${joinedRoomId}`,
+        params: { roomName, isPrivate: '1' },
+      } as any);
+      markRoomVisited(joinedRoomId);
+
+      setTimeout(() => {
+        isNavigatingToRoomRef.current = false;
+      }, NAV_SETTLE_DELAY_MS);
+    } catch (error: any) {
+      Alert.alert('Unable to Join', error?.message || 'Could not join this private room.');
+    } finally {
+      if (mountedRef.current) {
+        setIsJoiningByCode(false);
+      }
+    }
+  }, [isJoiningByCode, joinCodeModalRoom, joinCodeValue, joinRoomByCodeMut, markRoomVisited, router, userId]);
+
   // Room Card component with simple opacity press feedback
   const RoomCard = useCallback(
     ({ item, isGeneral = false }: { item: ChatRoom; isGeneral?: boolean }) => {
@@ -757,6 +869,14 @@ export default function ChatRoomsScreen() {
 
       // Activity-based copy (truthful, no fabrication)
       const getActivityCopy = () => {
+        if (item.isPrivate && item.isLocked && !item.isMember && !item.role) {
+          const memberCopy =
+            item.memberCount === 1
+              ? '1 member'
+              : `${item.memberCount ?? 0} members`;
+          const accessCopy = item.requiresPassword ? 'Password required' : 'Join code required';
+          return `${memberCopy} • ${accessCopy}`;
+        }
         if (item.activeUserCount === 0) return 'Quiet right now';
         if (item.activeUserCount === 1) return '1 active';
         if (item.activeUserCount >= 5) return `${item.activeUserCount} active now`;
@@ -891,11 +1011,20 @@ export default function ChatRoomsScreen() {
     return privateRooms.filter((r) => r.name.toLowerCase().includes(normalizedQuery));
   }, [privateRooms, normalizedQuery]);
 
+  const filteredDiscoverablePrivateRooms = useMemo(() => {
+    if (!normalizedQuery) return discoverablePrivateRooms;
+    return discoverablePrivateRooms.filter((r) => r.name.toLowerCase().includes(normalizedQuery));
+  }, [discoverablePrivateRooms, normalizedQuery]);
+
   const generalRooms = filteredRooms.filter((r) => r.category === 'general');
   const languageRooms = filteredRooms.filter((r) => r.category === 'language');
 
   // EMPTY STATES: Check if search has no results
-  const hasSearchResults = generalRooms.length > 0 || languageRooms.length > 0 || filteredPrivateRooms.length > 0;
+  const hasSearchResults =
+    generalRooms.length > 0 ||
+    languageRooms.length > 0 ||
+    filteredPrivateRooms.length > 0 ||
+    filteredDiscoverablePrivateRooms.length > 0;
   const isSearchActive = normalizedQuery.length > 0;
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1109,6 +1238,32 @@ export default function ChatRoomsScreen() {
                 ))}
               </>
             )}
+
+            {/* Section 5: Discoverable Private Rooms */}
+            {(filteredDiscoverablePrivateRooms.length > 0 || (!isSearchActive && discoverablePrivateRoomsRaw !== undefined)) && (
+              <>
+                <View style={styles.sectionHeader}>
+                  <View style={[styles.sectionDot, styles.sectionDotPrivate]} />
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.sectionTitle}>
+                    Discover Private Rooms
+                  </Text>
+                </View>
+                {filteredDiscoverablePrivateRooms.length > 0 ? (
+                  filteredDiscoverablePrivateRooms.map((room) => (
+                    <React.Fragment key={room.id}>
+                      <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                      <RoomCard item={room} />
+                    </React.Fragment>
+                  ))
+                ) : (
+                  <View style={styles.discoverPrivateEmpty}>
+                    <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.discoverPrivateEmptyText}>
+                      No nearby private rooms right now.
+                    </Text>
+                  </View>
+                )}
+              </>
+            )}
           </>
         }
         ListFooterComponent={<View style={[styles.footerSpacer, { height: footerBottomSpacing + SPACING.base }]} />}
@@ -1119,6 +1274,61 @@ export default function ChatRoomsScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       />
+
+      <Modal
+        visible={!!joinCodeModalRoom}
+        transparent
+        animationType="fade"
+        onRequestClose={handleJoinCodeCancel}
+      >
+        <View style={styles.joinCodeBackdrop}>
+          <View style={styles.joinCodeCard}>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.joinCodeTitle}>
+              Enter Room Code
+            </Text>
+            <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.joinCodeSubtitle}>
+              {joinCodeModalRoom?.name ?? 'Private room'} is private.
+            </Text>
+            <TextInput
+              style={styles.joinCodeInput}
+              value={joinCodeValue}
+              onChangeText={setJoinCodeValue}
+              placeholder="Room code"
+              placeholderTextColor="rgba(255,255,255,0.35)"
+              autoCapitalize="characters"
+              autoCorrect={false}
+              maxLength={12}
+              editable={!isJoiningByCode}
+              returnKeyType="join"
+              onSubmitEditing={handleJoinCodeSubmit}
+            />
+            <View style={styles.joinCodeActions}>
+              <Pressable
+                style={[styles.joinCodeButton, styles.joinCodeCancelButton]}
+                onPress={handleJoinCodeCancel}
+                disabled={isJoiningByCode}
+              >
+                <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.joinCodeCancelText}>
+                  Cancel
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[styles.joinCodeButton, styles.joinCodeSubmitButton]}
+                onPress={handleJoinCodeSubmit}
+                disabled={isJoiningByCode}
+              >
+                {isJoiningByCode ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text maxFontSizeMultiplier={TEXT_MAX_SCALE} style={styles.joinCodeSubmitText}>
+                    Join
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* LOCKED-ROOM-FIX: Password entry modal for locked rooms */}
       <PasswordEntryModal
@@ -1395,6 +1605,91 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingRight: 14,
+  },
+  discoverPrivateEmpty: {
+    marginHorizontal: SPACING.md,
+    marginBottom: SPACING.sm,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
+    borderRadius: ROOM_CARD_RADIUS,
+    backgroundColor: 'rgba(255,255,255,0.035)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+  },
+  discoverPrivateEmptyText: {
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
+    color: 'rgba(255,255,255,0.42)',
+  },
+  joinCodeBackdrop: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: SPACING.lg,
+    backgroundColor: 'rgba(0,0,0,0.64)',
+  },
+  joinCodeCard: {
+    width: '100%',
+    maxWidth: moderateScale(360, 0.2),
+    borderRadius: ROOM_CARD_RADIUS,
+    padding: SPACING.lg,
+    backgroundColor: '#1A1A22',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  joinCodeTitle: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: '700',
+    lineHeight: lineHeight(FONT_SIZE.lg, 1.2),
+    color: '#FFFFFF',
+  },
+  joinCodeSubtitle: {
+    marginTop: SPACING.xs,
+    fontSize: FONT_SIZE.body2,
+    lineHeight: lineHeight(FONT_SIZE.body2, 1.35),
+    color: 'rgba(255,255,255,0.5)',
+  },
+  joinCodeInput: {
+    marginTop: SPACING.base,
+    borderRadius: SIZES.radius.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: moderateScale(12, 0.35),
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    color: '#FFFFFF',
+    fontSize: FONT_SIZE.md,
+    letterSpacing: 0,
+  },
+  joinCodeActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: SPACING.sm,
+    marginTop: SPACING.base,
+  },
+  joinCodeButton: {
+    minWidth: moderateScale(86, 0.25),
+    minHeight: moderateScale(42, 0.3),
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: SIZES.radius.md,
+    paddingHorizontal: SPACING.md,
+  },
+  joinCodeCancelButton: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  joinCodeSubmitButton: {
+    backgroundColor: '#A78BFA',
+  },
+  joinCodeCancelText: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.72)',
+  },
+  joinCodeSubmitText: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
   resetPrivateRoomsButton: {
     flexDirection: 'row',

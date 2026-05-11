@@ -2781,8 +2781,9 @@ export const joinRoomByCode = mutation({
   args: {
     joinCode: v.string(),
     authUserId: v.string(),
+    roomId: v.optional(v.id('chatRooms')),
   },
-  handler: async (ctx, { joinCode, authUserId }) => {
+  handler: async (ctx, { joinCode, authUserId, roomId }) => {
     // 1. Auth guard - use app's custom session-based auth
     if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
@@ -2803,6 +2804,9 @@ export const joinRoomByCode = mutation({
 
     if (!room) {
       throw new Error('Invalid join code. Room not found.');
+    }
+    if (roomId && room._id !== roomId) {
+      throw new Error('This code does not match the selected room.');
     }
 
     // 4. Check if room is expired
@@ -3012,6 +3016,106 @@ export const getMyPrivateRooms = query({
         if (bTime !== aTime) return bTime - aTime;
         return a.name.localeCompare(b.name);
       });
+  },
+});
+
+// Phase-2: Discover unexpired private rooms the caller can newly join.
+// Kept separate from getMyPrivateRooms so owned/joined private room behavior
+// remains unchanged.
+export const getDiscoverablePrivateRooms = query({
+  args: {
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId }) => {
+    const logResult = (count: number) => {
+      console.log('[P2_DISCOVERABLE_PRIVATE_ROOMS]', { authUserId, count });
+    };
+
+    if (!authUserId || authUserId.trim().length === 0) {
+      logResult(0);
+      return [];
+    }
+
+    let userId: Id<'users'>;
+    try {
+      const resolved = await resolveUserIdByAuthId(ctx, authUserId);
+      if (!resolved) {
+        logResult(0);
+        return [];
+      }
+      userId = resolved;
+    } catch {
+      logResult(0);
+      return [];
+    }
+
+    const now = Date.now();
+    const ONLINE_WINDOW_MS = 2 * 60 * 1000;
+    const onlineThreshold = now - ONLINE_WINDOW_MS;
+
+    const privateRooms = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_public', (q) => q.eq('isPublic', false))
+      .collect();
+
+    const discoverableRooms = await Promise.all(
+      privateRooms.map(async (room) => {
+        if (room.expiresAt && room.expiresAt <= now) return null;
+        if (!room.createdBy || room.createdBy === userId) return null;
+
+        const membership = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', room._id).eq('userId', userId))
+          .first();
+        if (membership) return null;
+
+        const ban = await ctx.db
+          .query('chatRoomBans')
+          .withIndex('by_room_user', (q) => q.eq('roomId', room._id).eq('userId', userId))
+          .first();
+        if (ban) return null;
+
+        const creator = await ctx.db.get(room.createdBy);
+        if (!creator || !creator.isActive || creator.isBanned) return null;
+        if (await isBlockedBidirectional(ctx, userId, room.createdBy)) return null;
+
+        const presenceRecords = await ctx.db
+          .query('chatRoomPresence')
+          .withIndex('by_room_heartbeat', (q) =>
+            q.eq('roomId', room._id).gte('lastHeartbeatAt', onlineThreshold)
+          )
+          .collect();
+
+        return {
+          _id: room._id,
+          name: room.name,
+          slug: room.slug,
+          category: room.category,
+          isPublic: room.isPublic,
+          memberCount: room.memberCount,
+          onlineCount: presenceRecords.length,
+          lastMessageAt: room.lastMessageAt,
+          lastMessageText: room.lastMessageText,
+          createdAt: room.createdAt,
+          expiresAt: room.expiresAt,
+          createdBy: room.createdBy,
+          hasPassword: !!room.passwordHash || !!room.passwordEncrypted,
+          isMember: false,
+        };
+      })
+    );
+
+    const rooms = discoverableRooms
+      .filter((room): room is NonNullable<typeof room> => room !== null)
+      .sort((a, b) => {
+        const aTime = a.lastMessageAt ?? 0;
+        const bTime = b.lastMessageAt ?? 0;
+        if (bTime !== aTime) return bTime - aTime;
+        return a.name.localeCompare(b.name);
+      });
+
+    logResult(rooms.length);
+    return rooms;
   },
 });
 
@@ -4199,10 +4303,8 @@ export const cleanupStalePasswordAttempts = internalMutation({
 // PHASE-2: Private Rooms - Password + Admin Approval
 // ═══════════════════════════════════════════════════════════════════════════
 
-// REMOVED: getVisiblePrivateRooms
-// Security fix: This function exposed all private room names/slugs without authentication.
-// Use getMyPrivateRooms for authenticated access to user's own private rooms,
-// or joinRoomByCode/getRoomByJoinCode for code-based discovery.
+// Private room access remains gated here. Discovery is handled separately by
+// getDiscoverablePrivateRooms, which returns card-safe fields only.
 
 // Check user's access status for a private room
 export const checkRoomAccess = query({
