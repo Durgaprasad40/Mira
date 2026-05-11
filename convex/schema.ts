@@ -806,6 +806,7 @@ export default defineSchema({
     matchId: v.optional(v.string()),
     isPreMatch: v.optional(v.boolean()),
     lastMessageAt: v.optional(v.number()),
+    firstMutualReplyAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index('by_connection_source', ['connectionSource'])

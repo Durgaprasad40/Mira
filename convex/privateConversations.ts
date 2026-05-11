@@ -15,6 +15,7 @@ import { validateSessionToken, resolveUserIdByAuthId, getPhase2DisplayName } fro
 import { shouldCreatePhase2PrivateMessagesNotification } from './phase2NotificationPrefs';
 import { markPrivateMessageNotificationsForConversation } from './privateNotifications';
 import { softMaskText } from './softMask';
+import { awardWalletCoins } from './wallet';
 
 // P1-001: Generate upload URL for secure media (photos/videos)
 // Used by incognito-chat.tsx to upload protected media to Convex storage
@@ -916,6 +917,60 @@ export const sendPrivateMessage = mutation({
     });
 
     console.log('[P2_MSG_SEND] Sent:', type, 'from:', (senderId as string).slice(-8), 'msgId:', (messageId as string).slice(-8));
+
+    const isRealUserMessage =
+      COUNTABLE_MESSAGE_TYPES.includes(type) &&
+      (type !== 'text' || maskedContent.trim().length > 0);
+
+    if (recipientId && isRealUserMessage && !conversation.firstMutualReplyAt) {
+      const previousPeerMessage = await ctx.db
+        .query('privateMessages')
+        .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('senderId'), recipientId),
+            q.lt(q.field('createdAt'), now),
+            q.or(
+              q.eq(q.field('type'), 'text'),
+              q.eq(q.field('type'), 'image'),
+              q.eq(q.field('type'), 'video'),
+              q.eq(q.field('type'), 'voice')
+            )
+          )
+        )
+        .first();
+
+      if (previousPeerMessage) {
+        await awardWalletCoins(ctx, {
+          userId: senderId,
+          delta: 1,
+          reason: 'p2_mutual_reply',
+          sourceType: 'privateConversation',
+          sourceId: conversationId as string,
+          peerUserId: recipientId,
+          dedupeKey: `p2_mutual_reply:${conversationId}:${senderId}`,
+          createdAt: now,
+        });
+        await awardWalletCoins(ctx, {
+          userId: recipientId,
+          delta: 1,
+          reason: 'p2_mutual_reply',
+          sourceType: 'privateConversation',
+          sourceId: conversationId as string,
+          peerUserId: senderId,
+          dedupeKey: `p2_mutual_reply:${conversationId}:${recipientId}`,
+          createdAt: now,
+        });
+        await ctx.db.patch(conversationId, { firstMutualReplyAt: now });
+
+        console.log('[P2_POINT_AWARD]', {
+          conversationId,
+          senderId,
+          recipientId,
+          awardedBoth: true,
+        });
+      }
+    }
 
     // Update conversation's lastMessageAt
     await ctx.db.patch(conversationId, { lastMessageAt: now });
