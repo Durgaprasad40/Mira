@@ -934,6 +934,7 @@ function PromptMediaViewerModal({
   const kind = payload?.mediaKind;
   const mediaUrl = payload?.mediaUrl;
   const isFrontCamera = !!payload?.isFrontCamera;
+  const isFullscreenMedia = kind === 'photo' || kind === 'video';
   const [imageLoading, setImageLoading] = useState(true);
 
   // ─── Voice playback state ───
@@ -1135,7 +1136,13 @@ function PromptMediaViewerModal({
       onRequestClose={handleClose}
       statusBarTranslucent
     >
-      <View style={styles.promptMediaViewerBackdrop}>
+      <View
+        style={
+          isFullscreenMedia
+            ? styles.promptMediaViewerFullscreenBackdrop
+            : styles.promptMediaViewerBackdrop
+        }
+      >
         <Pressable
           style={StyleSheet.absoluteFillObject}
           onPress={handleClose}
@@ -1143,139 +1150,135 @@ function PromptMediaViewerModal({
           accessibilityLabel="Close media viewer"
         />
 
-        {/* Media surface — sized to fit within safe-area, centered. Pressing
-            inside the surface does NOT dismiss; only the backdrop and the
-            top-right close button dismiss. For photo/video we give the
-            surface an explicit height so the media frame can actually fill
-            most of the screen (without it the surface would shrink to its
-            content and look tiny in the middle of the backdrop). For voice,
-            we keep the surface auto-sized so the compact placeholder box
-            doesn't get stretched into a giant empty surface. */}
-        <Pressable
-          style={[
-            styles.promptMediaViewerSurface,
-            {
-              maxWidth: Math.min(screen.width - 24, 720),
-              maxHeight: Math.min(
-                screen.height - insets.top - insets.bottom - 80,
-                Math.round(screen.height * 0.86)
-              ),
-            },
-            (kind === 'photo' || kind === 'video') && {
-              height: Math.min(
-                screen.height - insets.top - insets.bottom - 80,
-                Math.round(screen.height * 0.86)
-              ),
-            },
-          ]}
-          onPress={() => {}}
-        >
-          {kind === 'photo' && mediaUrl ? (
-            <>
-              <ExpoImage
+        {isFullscreenMedia ? (
+          <View
+            style={[
+              styles.promptMediaViewerFullscreenStage,
+              { top: insets.top, bottom: insets.bottom },
+            ]}
+          >
+            {kind === 'photo' && mediaUrl ? (
+              <>
+                <ExpoImage
+                  source={{ uri: mediaUrl }}
+                  style={[
+                    styles.promptMediaViewerImage,
+                    isFrontCamera ? { transform: [{ scaleX: -1 }] } : null,
+                  ]}
+                  contentFit="contain"
+                  transition={150}
+                  onLoadEnd={() => {
+                    setImageLoading(false);
+                    // Mark "image actually rendered" — this is the gate for
+                    // photo consumption. Mark-viewed only fires later, when
+                    // the user closes the viewer (handleClose).
+                    imageRenderedRef.current = true;
+                  }}
+                />
+                {imageLoading ? (
+                  <View style={styles.promptMediaViewerSpinnerWrap} pointerEvents="none">
+                    <ActivityIndicator size="large" color="#FFFFFF" />
+                  </View>
+                ) : null}
+              </>
+            ) : null}
+
+            {kind === 'video' && mediaUrl ? (
+              <Video
                 source={{ uri: mediaUrl }}
                 style={[
-                  styles.promptMediaViewerImage,
+                  styles.promptMediaViewerVideo,
                   isFrontCamera ? { transform: [{ scaleX: -1 }] } : null,
                 ]}
-                contentFit="contain"
-                transition={150}
-                onLoadEnd={() => {
-                  setImageLoading(false);
-                  // Mark "image actually rendered" — this is the gate for
-                  // photo consumption. Mark-viewed only fires later, when
-                  // the user closes the viewer (handleClose).
-                  imageRenderedRef.current = true;
+                useNativeControls
+                resizeMode={ResizeMode.CONTAIN}
+                // Phase 4: autoplay on viewer open. The tile preloaded the URL
+                // via HEAD on the first tap so the second tap (which mounts
+                // this Video) starts playing with a warm CDN edge / OS HTTP
+                // cache instead of a black "buffering" frame.
+                shouldPlay={true}
+                isLooping={false}
+                onPlaybackStatusUpdate={(status) => {
+                  // Phase 4 part-2: video consumption fires ONLY when
+                  // playback actually completes (didJustFinish). Closing
+                  // mid-playback does NOT mark the video viewed.
+                  if ('isLoaded' in status && status.isLoaded && status.didJustFinish) {
+                    fireConsumed();
+                  }
                 }}
               />
-              {imageLoading ? (
-                <View style={styles.promptMediaViewerSpinnerWrap} pointerEvents="none">
-                  <ActivityIndicator size="large" color="#FFFFFF" />
+            ) : null}
+          </View>
+        ) : (
+          /* Voice keeps the compact surface; only photo/video use fullscreen. */
+          <Pressable
+            style={[
+              styles.promptMediaViewerSurface,
+              {
+                maxWidth: Math.min(screen.width - 24, 720),
+                maxHeight: Math.min(
+                  screen.height - insets.top - insets.bottom - 80,
+                  Math.round(screen.height * 0.86)
+                ),
+              },
+            ]}
+            onPress={() => {}}
+          >
+            {kind === 'voice' && mediaUrl ? (
+              <View style={styles.promptMediaViewerVoiceBox}>
+                <View style={styles.promptMediaViewerVoiceIcon}>
+                  <Ionicons name="mic" size={36} color={PREMIUM.coral} />
                 </View>
-              ) : null}
-            </>
-          ) : null}
-
-          {kind === 'video' && mediaUrl ? (
-            <Video
-              source={{ uri: mediaUrl }}
-              style={[
-                styles.promptMediaViewerVideo,
-                isFrontCamera ? { transform: [{ scaleX: -1 }] } : null,
-              ]}
-              useNativeControls
-              resizeMode={ResizeMode.CONTAIN}
-              // Phase 4: autoplay on viewer open. The tile preloaded the URL
-              // via HEAD on the first tap so the second tap (which mounts
-              // this Video) starts playing with a warm CDN edge / OS HTTP
-              // cache instead of a black "buffering" frame.
-              shouldPlay={true}
-              isLooping={false}
-              onPlaybackStatusUpdate={(status) => {
-                // Phase 4 part-2: video consumption fires ONLY when
-                // playback actually completes (didJustFinish). Closing
-                // mid-playback does NOT mark the video viewed.
-                if ('isLoaded' in status && status.isLoaded && status.didJustFinish) {
-                  fireConsumed();
-                }
-              }}
-            />
-          ) : null}
-
-          {kind === 'voice' && mediaUrl ? (
-            <View style={styles.promptMediaViewerVoiceBox}>
-              <View style={styles.promptMediaViewerVoiceIcon}>
-                <Ionicons name="mic" size={36} color={PREMIUM.coral} />
-              </View>
-              <Text style={styles.promptMediaViewerVoiceTitle}>Voice prompt</Text>
-              {voiceFailed ? (
-                <Text style={styles.promptMediaViewerVoiceSubtitle}>
-                  Couldn’t load this voice prompt. Please try again.
-                </Text>
-              ) : (
-                <View style={styles.promptMediaViewerVoiceControls}>
-                  <TouchableOpacity
-                    style={[
-                      styles.promptMediaViewerVoicePlayBtn,
-                      voiceLoading && styles.promptMediaViewerVoicePlayBtnDisabled,
-                    ]}
-                    onPress={handleToggleVoice}
-                    disabled={voiceLoading}
-                    accessibilityRole="button"
-                    accessibilityLabel={voicePlaying ? 'Pause voice' : 'Play voice'}
-                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                  >
-                    {voiceLoading ? (
-                      <ActivityIndicator size="small" color="#FFFFFF" />
-                    ) : (
-                      <Ionicons
-                        name={voicePlaying ? 'pause' : 'play'}
-                        size={26}
-                        color="#FFFFFF"
-                      />
-                    )}
-                  </TouchableOpacity>
-                  <View style={styles.promptMediaViewerVoiceProgressTrack}>
-                    <View
-                      style={[
-                        styles.promptMediaViewerVoiceProgressFill,
-                        {
-                          width:
-                            voiceDurMs > 0
-                              ? `${Math.min(100, Math.max(0, (voicePosMs / voiceDurMs) * 100))}%`
-                              : '0%',
-                        },
-                      ]}
-                    />
-                  </View>
-                  <Text style={styles.promptMediaViewerVoiceTime} maxFontSizeMultiplier={1.1}>
-                    {formatVoiceTime(voicePosMs)} / {formatVoiceTime(voiceDurMs)}
+                <Text style={styles.promptMediaViewerVoiceTitle}>Voice prompt</Text>
+                {voiceFailed ? (
+                  <Text style={styles.promptMediaViewerVoiceSubtitle}>
+                    Couldn’t load this voice prompt. Please try again.
                   </Text>
-                </View>
-              )}
-            </View>
-          ) : null}
-        </Pressable>
+                ) : (
+                  <View style={styles.promptMediaViewerVoiceControls}>
+                    <TouchableOpacity
+                      style={[
+                        styles.promptMediaViewerVoicePlayBtn,
+                        voiceLoading && styles.promptMediaViewerVoicePlayBtnDisabled,
+                      ]}
+                      onPress={handleToggleVoice}
+                      disabled={voiceLoading}
+                      accessibilityRole="button"
+                      accessibilityLabel={voicePlaying ? 'Pause voice' : 'Play voice'}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      {voiceLoading ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Ionicons
+                          name={voicePlaying ? 'pause' : 'play'}
+                          size={26}
+                          color="#FFFFFF"
+                        />
+                      )}
+                    </TouchableOpacity>
+                    <View style={styles.promptMediaViewerVoiceProgressTrack}>
+                      <View
+                        style={[
+                          styles.promptMediaViewerVoiceProgressFill,
+                          {
+                            width:
+                              voiceDurMs > 0
+                                ? `${Math.min(100, Math.max(0, (voicePosMs / voiceDurMs) * 100))}%`
+                                : '0%',
+                          },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.promptMediaViewerVoiceTime} maxFontSizeMultiplier={1.1}>
+                      {formatVoiceTime(voicePosMs)} / {formatVoiceTime(voiceDurMs)}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            ) : null}
+          </Pressable>
+        )}
 
         {/* Close button — pinned top-right, above safe-area inset. */}
         <TouchableOpacity
@@ -3083,11 +3086,27 @@ const styles = StyleSheet.create({
     color: '#FFF',
   },
   // Prompt-owner media viewer modal (feed-local; not coupled to prompt-thread).
+  // Voice keeps the compact card treatment; photo/video use the fullscreen
+  // backdrop + stage below so opened media is never constrained by card width.
   promptMediaViewerBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.92)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  promptMediaViewerFullscreenBackdrop: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  promptMediaViewerFullscreenStage: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#000',
   },
   promptMediaViewerSurface: {
     width: '92%',
@@ -3097,21 +3116,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: PREMIUM.borderSubtle,
   },
-  // Photo + video fill the explicit height set on the surface (see inline
-  // height in PromptMediaViewerModal). `flex: 1` lets the media stretch to
-  // the full surface; `contentFit="contain"` (photo) and ResizeMode.CONTAIN
-  // (video) preserve aspect ratio with letterboxing — portrait media
-  // becomes tall and fills the screen, landscape media fits to width.
-  // Earlier `aspectRatio: 1` capped both at a square that looked tiny on
-  // tall phones.
+  // Photo + video fill the fullscreen stage. `contain`/CONTAIN preserve
+  // aspect ratio with letterboxing instead of cropping.
   promptMediaViewerImage: {
-    flex: 1,
     width: '100%',
+    height: '100%',
     backgroundColor: '#000',
   },
   promptMediaViewerVideo: {
-    flex: 1,
     width: '100%',
+    height: '100%',
     backgroundColor: '#000',
   },
   promptMediaViewerVoiceBox: {
@@ -3193,10 +3207,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.18)',
+    zIndex: 10,
+    elevation: 10,
   },
   promptMediaViewerSpinnerWrap: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 2,
   },
 });
