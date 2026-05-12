@@ -13,6 +13,44 @@ import { COLORS } from '@/lib/constants';
 const HEADER_H = 48;
 const PAGE_SIZE = 50;
 
+type CategoryProfile = {
+  id?: string;
+  _id?: string;
+  userId?: string;
+  [key: string]: unknown;
+};
+
+const getProfileStableId = (profile: CategoryProfile): string | null => {
+  const rawId = profile.id ?? profile._id ?? profile.userId;
+  return typeof rawId === 'string' && rawId.length > 0 ? rawId : null;
+};
+
+const areProfileListsSame = (left: CategoryProfile[], right: CategoryProfile[]) => {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (getProfileStableId(left[index]) !== getProfileStableId(right[index])) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const dedupeProfilesByStableId = <T extends CategoryProfile>(profiles: T[]): T[] => {
+  const seen = new Set<string>();
+  const deduped: T[] = [];
+  for (const profile of profiles) {
+    const stableId = getProfileStableId(profile);
+    if (!stableId) {
+      deduped.push(profile);
+      continue;
+    }
+    if (seen.has(stableId)) continue;
+    seen.add(stableId);
+    deduped.push(profile);
+  }
+  return deduped;
+};
+
 export default function ExploreCategoryScreen() {
   const { categoryId } = useLocalSearchParams<{ categoryId?: string | string[] }>();
   const normalizedCategoryId = Array.isArray(categoryId) ? categoryId[0] : categoryId;
@@ -24,11 +62,14 @@ export default function ExploreCategoryScreen() {
   const [stackExhausted, setStackExhausted] = useState(false);
   const [showLoadMorePrompt, setShowLoadMorePrompt] = useState(false);
   const [isLoadingNextBatch, setIsLoadingNextBatch] = useState(false);
+  const [lastGoodProfiles, setLastGoodProfiles] = useState<CategoryProfile[]>([]);
+  const [lastGoodHasMore, setLastGoodHasMore] = useState(false);
+  const [consumedVersion, setConsumedVersion] = useState(0);
   const hadProfilesRef = useRef(false);
+  const consumedProfileIdsRef = useRef<Set<string>>(new Set());
 
   const {
     profiles,
-    totalCount,
     hasMore,
     status,
     partialBatchExhausted,
@@ -95,6 +136,10 @@ export default function ExploreCategoryScreen() {
     setStackExhausted(false);
     setShowLoadMorePrompt(false);
     setIsLoadingNextBatch(false);
+    setLastGoodProfiles([]);
+    setLastGoodHasMore(false);
+    consumedProfileIdsRef.current.clear();
+    setConsumedVersion((version) => version + 1);
     hadProfilesRef.current = false;
   }, [normalizedCategoryId]);
 
@@ -106,7 +151,6 @@ export default function ExploreCategoryScreen() {
     setStackExhausted(false);
     setShowLoadMorePrompt(false);
     setIsLoadingNextBatch(false);
-    hadProfilesRef.current = false;
   }, []);
 
   const handleLoadMore = useCallback(() => {
@@ -121,11 +165,34 @@ export default function ExploreCategoryScreen() {
     safeReplace(router, '/(main)/(tabs)/explore' as any, 'explore-category->explore');
   }, [router]);
 
-  // Use the profiles directly from the hook (already filtered by category)
-  const items = profiles;
+  const currentPageProfiles = useMemo(() => {
+    const consumedIds = consumedProfileIdsRef.current;
+    return dedupeProfilesByStableId(profiles as CategoryProfile[]).filter((profile) => {
+      const stableId = getProfileStableId(profile);
+      return !stableId || !consumedIds.has(stableId);
+    });
+  }, [consumedVersion, profiles]);
+
+  useEffect(() => {
+    if (isLoading || isError || status !== 'ok') return;
+
+    setLastGoodHasMore(hasMore);
+    setLastGoodProfiles((previous) => {
+      const nextPage = currentPageProfiles;
+      const next =
+        pageOffset === 0
+          ? nextPage
+          : dedupeProfilesByStableId([...previous, ...nextPage]);
+      return areProfileListsSame(previous, next) ? previous : next;
+    });
+  }, [currentPageProfiles, hasMore, isError, isLoading, pageOffset, status]);
+
+  const isUsingLastGoodProfiles = (isLoading || isError) && lastGoodProfiles.length > 0;
+  const items = isUsingLastGoodProfiles ? lastGoodProfiles : currentPageProfiles;
+  const effectiveHasMore = isUsingLastGoodProfiles ? lastGoodHasMore : hasMore;
   const isInitialLoading = isLoading && items.length === 0;
-  const isRefreshingLoadedPage = isLoading && items.length > 0;
-  const profileActionScope = `${normalizedCategoryId ?? 'invalid'}:${refreshKey}`;
+  const isRefreshingLoadedPage = isLoading && items.length > 0 && !isLoadingNextBatch;
+  const profileActionScope = normalizedCategoryId ?? 'invalid';
   const isUnavailableCategory = status === 'invalid_category' || !cat;
 
   useEffect(() => {
@@ -147,7 +214,18 @@ export default function ExploreCategoryScreen() {
       return;
     }
 
-    if (hasMore) {
+    let markedConsumed = false;
+    for (const profile of items) {
+      const stableId = getProfileStableId(profile as CategoryProfile);
+      if (!stableId || consumedProfileIdsRef.current.has(stableId)) continue;
+      consumedProfileIdsRef.current.add(stableId);
+      markedConsumed = true;
+    }
+    if (markedConsumed) {
+      setConsumedVersion((version) => version + 1);
+    }
+
+    if (effectiveHasMore) {
       setShowLoadMorePrompt(true);
       setStackExhausted(true);
       return;
@@ -155,7 +233,7 @@ export default function ExploreCategoryScreen() {
 
     setShowLoadMorePrompt(false);
     setStackExhausted(true);
-  }, [hasMore, isLoading]);
+  }, [effectiveHasMore, isLoading, items]);
 
   const unavailableTitle = useMemo(() => {
     if (status === 'location_required') {
@@ -176,14 +254,14 @@ export default function ExploreCategoryScreen() {
     if (status === 'empty_category') {
       return 'No one here yet';
     }
-    if (showLoadMorePrompt && hasMore) {
+    if (showLoadMorePrompt && effectiveHasMore) {
       return 'Load more people';
     }
     if (stackExhausted && partialBatchExhausted) {
       return "You've finished this loaded set";
     }
     return "You're all caught up";
-  }, [cat, hasMore, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
+  }, [cat, effectiveHasMore, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
 
   const unavailableSubtitle = useMemo(() => {
     if (status === 'location_required') {
@@ -204,7 +282,7 @@ export default function ExploreCategoryScreen() {
     if (status === 'empty_category') {
       return "There isn't anyone in this vibe right now.\nCheck again later or explore other vibes.";
     }
-    if (showLoadMorePrompt && hasMore) {
+    if (showLoadMorePrompt && effectiveHasMore) {
       return 'You finished the people we already loaded for this vibe. Load the next batch to keep going.';
     }
     if (stackExhausted && partialBatchExhausted) {
@@ -214,7 +292,7 @@ export default function ExploreCategoryScreen() {
       return "You've seen everyone in this loaded set. Check back later for more people in this vibe.";
     }
     return "You've seen everyone in this vibe.\nCheck again later or explore other vibes.";
-  }, [cat, hasMore, pageOffset, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
+  }, [cat, effectiveHasMore, pageOffset, partialBatchExhausted, showLoadMorePrompt, stackExhausted, status]);
 
   const emptyIconName = useMemo(() => {
     if (status === 'location_required') return 'location-outline';
@@ -222,15 +300,23 @@ export default function ExploreCategoryScreen() {
     if (status === 'discovery_paused') return 'pause-circle-outline';
     if (status === 'viewer_missing' || status === 'invalid_category') return 'alert-circle-outline';
     if (status === 'empty_category') return 'people-outline';
-    if (showLoadMorePrompt && hasMore) return 'chevron-down-circle-outline';
+    if (showLoadMorePrompt && effectiveHasMore) return 'chevron-down-circle-outline';
     return 'checkmark-circle-outline';
-  }, [hasMore, showLoadMorePrompt, status]);
+  }, [effectiveHasMore, showLoadMorePrompt, status]);
+
+  const showRetainedError = isError && items.length > 0;
 
   return (
     <View style={styles.container}>
       {/* Custom header with subtitle (Task 6) */}
       <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H + 16 }]}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={8} style={styles.headerBtn}>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Back to Vibes"
+          onPress={() => router.back()}
+          hitSlop={8}
+          style={styles.headerBtn}
+        >
           <Ionicons name="chevron-back" size={26} color={COLORS.text} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
@@ -241,7 +327,13 @@ export default function ExploreCategoryScreen() {
             {cat ? 'People matching this vibe' : 'This Vibes category is no longer available'}
           </Text>
         </View>
-        <TouchableOpacity onPress={handleRefresh} hitSlop={8} style={styles.headerBtn}>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Refresh this vibe"
+          onPress={handleRefresh}
+          hitSlop={8}
+          style={styles.headerBtn}
+        >
           {isRefreshingLoadedPage ? (
             <ActivityIndicator size="small" color={COLORS.text} />
           ) : (
@@ -261,12 +353,21 @@ export default function ExploreCategoryScreen() {
         </View>
       )}
 
-      {!isLoading && isStale && (
+      {(showRetainedError || (!isLoading && isStale)) && (
         <View style={styles.staleState}>
           <Ionicons name="cloud-offline-outline" size={16} color={COLORS.textLight} />
           <Text style={styles.staleStateText}>
             {error ?? 'Showing saved results while we reconnect.'}
           </Text>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Retry loading this vibe"
+            onPress={handleRefresh}
+            hitSlop={8}
+            style={styles.inlineRetryButton}
+          >
+            <Text style={styles.inlineRetryText}>Retry</Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -282,13 +383,18 @@ export default function ExploreCategoryScreen() {
           <Ionicons name="alert-circle-outline" size={64} color={COLORS.textLight} style={styles.emptyIcon} />
           <Text style={styles.emptyTitle}>Category unavailable</Text>
           <Text style={styles.emptySubtitle}>{error ?? 'Unable to load this vibe right now.'}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Try loading this vibe again"
+            style={styles.retryButton}
+            onPress={handleRefresh}
+          >
             <Text style={styles.retryButtonText}>Try again</Text>
           </TouchableOpacity>
         </View>
       ) : items.length > 0 && !stackExhausted ? (
         <DiscoverCardStack
-          key={`${normalizedCategoryId ?? 'explore'}-${pageOffset}-${refreshKey}`}
+          key={normalizedCategoryId ?? 'explore'}
           externalProfiles={items}
           hideHeader
           exploreCategoryId={normalizedCategoryId}
@@ -306,11 +412,21 @@ export default function ExploreCategoryScreen() {
           <Text style={styles.emptyTitle}>{unavailableTitle}</Text>
           <Text style={styles.emptySubtitle}>{unavailableSubtitle}</Text>
           {isUnavailableCategory ? (
-            <TouchableOpacity style={styles.retryButton} onPress={handleReturnToExplore}>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Back to Vibes"
+              style={styles.retryButton}
+              onPress={handleReturnToExplore}
+            >
               <Text style={styles.retryButtonText}>Back to Vibes</Text>
             </TouchableOpacity>
-          ) : showLoadMorePrompt && hasMore ? (
-            <TouchableOpacity style={styles.retryButton} onPress={handleLoadMore}>
+          ) : showLoadMorePrompt && effectiveHasMore ? (
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Load more people in this vibe"
+              style={styles.retryButton}
+              onPress={handleLoadMore}
+            >
               <Text style={styles.retryButtonText}>Load more people</Text>
             </TouchableOpacity>
           ) : null}
@@ -379,6 +495,17 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 13,
     color: COLORS.textLight,
+  },
+  inlineRetryButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255, 107, 107, 0.12)',
+  },
+  inlineRetryText: {
+    fontSize: 12,
+    color: COLORS.primary,
+    fontWeight: '700',
   },
   emptyState: {
     flex: 1,

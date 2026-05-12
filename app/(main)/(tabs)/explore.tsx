@@ -151,9 +151,16 @@ const ExploreTile = React.memo(function ExploreTile({
   const baseColor = category.color;
   const lighterColor = adjustColorBrightness(baseColor, 15);
   const darkerColor = adjustColorBrightness(baseColor, -35);
+  const countLabel = count > 0 ? `${count} ${count === 1 ? "person" : "people"}` : "no people right now";
+  const accessibilityLabel = statusLabel
+    ? `${category.label}, ${statusLabel}`
+    : `${category.label}, ${countLabel}`;
 
   return (
     <TouchableOpacity
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled }}
       activeOpacity={1}
       onPress={disabled ? undefined : onPress}
       onPressIn={handlePressIn}
@@ -495,7 +502,12 @@ export default function ExploreScreen() {
           ? "Fresh profiles are quiet right now. Enable location for Nearby and check back soon."
           : "Fresh profiles are quiet right now. Check back soon for new people."}
       </Text>
-      <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel="Refresh Vibes"
+        style={styles.retryButton}
+        onPress={handleRefresh}
+      >
         <Text {...TEXT_PROPS} style={styles.retryButtonText}>
           Refresh Vibes
         </Text>
@@ -536,7 +548,12 @@ export default function ExploreScreen() {
       <Text {...TEXT_PROPS} style={styles.emptySubtitle}>
         {error ?? 'We hit a snag while refreshing Vibes. Try again in a moment.'}
       </Text>
-      <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel="Refresh Vibes"
+        style={styles.retryButton}
+        onPress={handleRefresh}
+      >
         <Text {...TEXT_PROPS} style={styles.retryButtonText}>
           Refresh Vibes
         </Text>
@@ -554,7 +571,12 @@ export default function ExploreScreen() {
         {subtitle}
       </Text>
       {countsStatus === "viewer_missing" && (
-        <TouchableOpacity style={styles.retryButton} onPress={handleRefresh}>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Try loading Vibes again"
+          style={styles.retryButton}
+          onPress={handleRefresh}
+        >
           <Text {...TEXT_PROPS} style={styles.retryButtonText}>
             Try again
           </Text>
@@ -590,7 +612,12 @@ export default function ExploreScreen() {
 
       {/* Return Hook */}
       {showReturnHook && returnCategory && (
-        <TouchableOpacity style={styles.returnHook} onPress={handleReturnHookPress}>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel={`Return to ${returnCategory.title ?? returnCategory.label}`}
+          style={styles.returnHook}
+          onPress={handleReturnHookPress}
+        >
           <Text {...TEXT_PROPS} style={styles.returnHookIcon}>
             {returnCategory.icon}
           </Text>
