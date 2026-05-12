@@ -1508,8 +1508,15 @@ export default function ChatRoomScreen() {
   // Product rule: if user is inside the room screen, they must remain Online even when idle.
   // ─────────────────────────────────────────────────────────────────────────
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const heartbeatRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const backgroundCleanupTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstHeartbeatAckAtRef = useRef<number | null>(null);
-  const HEARTBEAT_INTERVAL_MS = 30 * 1000; // must be < backend online threshold (2 min)
+  const backgroundedAtRef = useRef<number | null>(null);
+  const lastHeartbeatFailureCaptureAtRef = useRef<number>(0);
+  const HEARTBEAT_INTERVAL_MS = 30 * 1000; // must be < backend online threshold (3 min)
+  const HEARTBEAT_RETRY_DELAY_MS = 2 * 1000;
+  const HEARTBEAT_FAILURE_CAPTURE_THROTTLE_MS = 5 * 60 * 1000;
+  const BACKGROUND_PRESENCE_CLEANUP_MS = 10 * 60 * 1000;
 
   if (__DEV__) console.log('CHATROOM_PUBLIC_ROOM_MEMBER_ACCESS', {
     roomId: roomIdStr,
@@ -1533,23 +1540,93 @@ export default function ChatRoomScreen() {
       reason,
       ts: Date.now(),
     });
-    heartbeatPresenceMutation({
-      roomId: roomIdStr as Id<'chatRooms'>,
-      authUserId: authUserId!,
-    }).then(() => {
+
+    const markHeartbeatAcked = () => {
       // Presence propagation gap fix: track the FIRST successful heartbeat ack
       // so we can avoid a hard-empty top-strip flash for a very short window.
       if (!firstHeartbeatAckAtRef.current) {
         firstHeartbeatAckAtRef.current = Date.now();
       }
-    }).catch((err) => {
-      console.log('CHATROOM_OFFLINE_REASON', {
-        roomId: roomIdStr,
-        reason: 'heartbeat_failed',
-        message: err?.message ?? String(err),
-      });
+    };
+
+    const runHeartbeat = () => heartbeatPresenceMutation({
+      roomId: roomIdStr as Id<'chatRooms'>,
+      authUserId: authUserId!,
     });
-  }, [authUserId, canHeartbeat, heartbeatPresenceMutation, hasMemberAccess, hasValidRoomId, isDemoMode, roomIdStr]);
+
+    void (async () => {
+      try {
+        const result = await runHeartbeat();
+        if (result?.success === false) {
+          console.log('CHATROOM_OFFLINE_REASON', {
+            roomId: roomIdStr,
+            reason: 'heartbeat_rejected',
+          });
+          return;
+        }
+        markHeartbeatAcked();
+      } catch (err: any) {
+        console.log('CHATROOM_OFFLINE_REASON', {
+          roomId: roomIdStr,
+          reason: 'heartbeat_failed',
+          message: err?.message ?? String(err),
+        });
+
+        if (heartbeatRetryTimeoutRef.current) {
+          clearTimeout(heartbeatRetryTimeoutRef.current);
+        }
+
+        heartbeatRetryTimeoutRef.current = setTimeout(() => {
+          heartbeatRetryTimeoutRef.current = null;
+          if (!canHeartbeat || !mountedRef.current) return;
+
+          void (async () => {
+            try {
+              const retryResult = await runHeartbeat();
+              if (retryResult?.success === false) {
+                console.log('CHATROOM_OFFLINE_REASON', {
+                  roomId: roomIdStr,
+                  reason: 'heartbeat_retry_rejected',
+                });
+                return;
+              }
+              markHeartbeatAcked();
+            } catch (retryErr: any) {
+              console.log('CHATROOM_OFFLINE_REASON', {
+                roomId: roomIdStr,
+                reason: 'heartbeat_failed_after_retry',
+                message: retryErr?.message ?? String(retryErr),
+              });
+
+              const now = Date.now();
+              if (now - lastHeartbeatFailureCaptureAtRef.current < HEARTBEAT_FAILURE_CAPTURE_THROTTLE_MS) {
+                return;
+              }
+              lastHeartbeatFailureCaptureAtRef.current = now;
+
+              const capturedError = retryErr instanceof Error
+                ? retryErr
+                : new Error(retryErr?.message ?? String(retryErr));
+              Sentry.withScope((scope) => {
+                scope.setTag('area', 'chat_rooms');
+                scope.setTag('feature', 'presence');
+                scope.setTag('action', 'heartbeat');
+                scope.setTag('reason', 'heartbeat_failed_after_retry');
+                scope.setTag('platform', Platform.OS);
+                scope.setContext('chat_rooms_presence', {
+                  roomId: roomIdStr,
+                  heartbeatReason: reason,
+                  originalError: err?.message ?? String(err),
+                  retryError: retryErr?.message ?? String(retryErr),
+                });
+                Sentry.captureException(capturedError);
+              });
+            }
+          })();
+        }, HEARTBEAT_RETRY_DELAY_MS);
+      }
+    })();
+  }, [authUserId, canHeartbeat, heartbeatPresenceMutation, roomIdStr]);
 
   const startHeartbeatTimer = useCallback((reason: string) => {
     if (!canHeartbeat) return;
@@ -1567,6 +1644,60 @@ export default function ChatRoomScreen() {
     heartbeatIntervalRef.current = null;
     if (__DEV__) console.log('CHATROOM_PRESENCE_HEARTBEAT_STOP', { roomId: roomIdStr, reason });
   }, [roomIdStr]);
+
+  const clearHeartbeatRetryTimer = useCallback(() => {
+    if (!heartbeatRetryTimeoutRef.current) return;
+    clearTimeout(heartbeatRetryTimeoutRef.current);
+    heartbeatRetryTimeoutRef.current = null;
+  }, []);
+
+  const clearBackgroundPresenceCleanup = useCallback((reason: string) => {
+    if (backgroundCleanupTimeoutRef.current) {
+      clearTimeout(backgroundCleanupTimeoutRef.current);
+      backgroundCleanupTimeoutRef.current = null;
+    }
+    backgroundedAtRef.current = null;
+    if (__DEV__) console.log('CHATROOM_BACKGROUND_CLEANUP_CANCEL', { roomId: roomIdStr, reason });
+  }, [roomIdStr]);
+
+  const scheduleBackgroundPresenceCleanup = useCallback(() => {
+    if (backgroundCleanupTimeoutRef.current) return;
+    if (!backgroundedAtRef.current) {
+      backgroundedAtRef.current = Date.now();
+    }
+
+    backgroundCleanupTimeoutRef.current = setTimeout(() => {
+      backgroundCleanupTimeoutRef.current = null;
+      if (!mountedRef.current) return;
+      if (AppState.currentState === 'active') return;
+      if (isDemoMode || !authUserId || !roomIdStr || !hasValidRoomId) return;
+
+      console.log('CHATROOM_BACKGROUND_CLEANUP_RUN', {
+        roomId: roomIdStr,
+        backgroundMs: backgroundedAtRef.current ? Date.now() - backgroundedAtRef.current : null,
+      });
+      Sentry.addBreadcrumb({
+        category: 'chat_rooms.presence',
+        message: 'background_cleanup_after_grace',
+        level: 'info',
+        data: {
+          roomId: roomIdStr,
+          platform: Platform.OS,
+        },
+      });
+
+      leaveRoomMutation({
+        roomId: roomIdStr as Id<'chatRooms'>,
+        authUserId,
+      }).catch((err: any) => {
+        console.log('CHATROOM_OFFLINE_REASON', {
+          roomId: roomIdStr,
+          reason: 'background_cleanup_leave_failed',
+          message: err?.message ?? String(err),
+        });
+      });
+    }, BACKGROUND_PRESENCE_CLEANUP_MS);
+  }, [authUserId, hasValidRoomId, isDemoMode, leaveRoomMutation, roomIdStr]);
 
   // CHATROOM_ACTIVITY_HEARTBEAT_REMOVED: Activity-based ref assignment removed, using timer-based only
 
@@ -1592,8 +1723,10 @@ export default function ChatRoomScreen() {
     return () => {
       if (__DEV__) console.log('CHATROOM_ROOM_UNMOUNT_PRESENCE', { roomId: roomIdStr });
       stopHeartbeatTimer('room_unmount');
+      clearHeartbeatRetryTimer();
+      clearBackgroundPresenceCleanup('room_unmount');
     };
-  }, [authUserId, canHeartbeat, hasMemberAccess, hasValidRoomId, roomIdStr, startHeartbeatTimer, stopHeartbeatTimer]);
+  }, [authUserId, canHeartbeat, clearBackgroundPresenceCleanup, clearHeartbeatRetryTimer, hasMemberAccess, hasValidRoomId, roomIdStr, startHeartbeatTimer, stopHeartbeatTimer]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // APP STATE HANDLING
@@ -1609,16 +1742,30 @@ export default function ChatRoomScreen() {
         from: appStateRef.current,
         to: nextAppState,
       });
+      Sentry.addBreadcrumb({
+        category: 'chat_rooms.presence',
+        message: 'app_state_change',
+        level: 'info',
+        data: {
+          roomId: roomIdStr,
+          from: appStateRef.current,
+          to: nextAppState,
+          platform: Platform.OS,
+        },
+      });
 
       // Foreground: resume heartbeats immediately
       if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        clearBackgroundPresenceCleanup('app_foreground');
         startHeartbeatTimer('app_foreground');
         sendHeartbeatNow('app_foreground_tick');
       }
 
-      // Background/inactive: stop timer (backend will transition to recently-left after expiry)
+      // Background/inactive: stop timer and let backend grace move the user through
+      // online -> recently-left -> hidden. Do not remove presence immediately.
       if (nextAppState.match(/inactive|background/)) {
         stopHeartbeatTimer('app_background');
+        scheduleBackgroundPresenceCleanup();
         console.log('CHATROOM_OFFLINE_REASON', { roomId: roomIdStr, reason: 'app_background_timer_stopped' });
       }
 
@@ -1629,8 +1776,9 @@ export default function ChatRoomScreen() {
 
     return () => {
       subscription.remove();
+      clearBackgroundPresenceCleanup('app_state_unmount');
     };
-  }, [roomIdStr, sendHeartbeatNow, startHeartbeatTimer, stopHeartbeatTimer]);
+  }, [clearBackgroundPresenceCleanup, roomIdStr, scheduleBackgroundPresenceCleanup, sendHeartbeatNow, startHeartbeatTimer, stopHeartbeatTimer]);
 
   // TAB / FOCUS transitions: log only (we keep heartbeat while mounted+foreground)
   useFocusEffect(

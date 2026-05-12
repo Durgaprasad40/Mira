@@ -26,6 +26,9 @@ const PENALTY_DURATION_MS = 24 * 60 * 60 * 1000;
 const ROOM_REPORT_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SEVERE_ROOM_REPORT_DM_BLOCK_MS = 7 * 24 * 60 * 60 * 1000;
 const AUTO_TIMEOUT_WINDOW_MS = 60 * 60 * 1000;
+const PRESENCE_ONLINE_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
+const PRESENCE_RECENTLY_LEFT_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
+const PRESENCE_STALE_CLEANUP_MS = 15 * 60 * 1000; // buffer beyond visible retention
 const QUALIFYING_REPORTER_MIN_MEMBERSHIP_MS = 10 * 60 * 1000;
 const TIMEOUT_2_REPORTS_MS = 3 * 60 * 1000;
 const TIMEOUT_3_REPORTS_MS = 10 * 60 * 1000;
@@ -1473,15 +1476,14 @@ export const listRooms = query({
     // O(rooms × total presence rows). Any room with more than ONLINE_CAP
     // online users is reported as exactly ONLINE_CAP — a safe upper-bound
     // display for the room-list preview.
-    const ONLINE_WINDOW_MS = 2 * 60 * 1000; // must align with presence expiry window
     const ONLINE_CAP = 200;
-    const onlineSince = now - ONLINE_WINDOW_MS;
+    const onlineSince = now - PRESENCE_ONLINE_THRESHOLD_MS;
     const roomsWithLiveCounts = await Promise.all(
       rooms.map(async (room) => {
         const recent = await ctx.db
           .query('chatRoomPresence')
           .withIndex('by_room_heartbeat', (q) =>
-            q.eq('roomId', room._id).gt('lastHeartbeatAt', onlineSince)
+            q.eq('roomId', room._id).gte('lastHeartbeatAt', onlineSince)
           )
           .take(ONLINE_CAP);
         return {
@@ -1986,11 +1988,11 @@ export const listMembers = query({
 // Returns displayName, avatar, age, gender for each member
 // PERFORMANCE: Limited to 50 members to prevent slow queries in large rooms
 // PRESENCE RULES:
-//   - Online: lastActive within 2 minutes
-//   - Offline: lastActive between 2 min and 3 hours
-//   - Hidden: lastActive older than 3 hours (not returned)
-const ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes = Online
-const VISIBILITY_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours = max visibility window
+//   - Online: lastActive within the shared presence online threshold
+//   - Offline: lastActive between online and recently-left thresholds
+//   - Hidden: lastActive older than the recently-left threshold (not returned)
+const ONLINE_THRESHOLD_MS = PRESENCE_ONLINE_THRESHOLD_MS;
+const VISIBILITY_MAX_AGE_MS = PRESENCE_RECENTLY_LEFT_THRESHOLD_MS;
 const MAX_MEMBERS_TO_FETCH = 50;
 
 function calculateAgeFromDob(dateOfBirth: string | undefined): number {
@@ -3128,7 +3130,6 @@ export const getMyPrivateRooms = query({
     }
 
     const now = Date.now();
-    const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 
     // LEAVE-VS-END FIX: Private rooms should appear if user is:
     // 1. A current member, OR
@@ -3193,7 +3194,7 @@ export const getMyPrivateRooms = query({
         // P2-1 adjacent: Use the (roomId, lastHeartbeatAt) range index so
         // we read only currently-online rows instead of collecting every
         // presence row the room has ever seen and filtering in memory.
-        const onlineThreshold = now - ONLINE_WINDOW_MS;
+        const onlineThreshold = now - PRESENCE_ONLINE_THRESHOLD_MS;
         const presenceRecords = await ctx.db
           .query('chatRoomPresence')
           .withIndex('by_room_heartbeat', (q) =>
@@ -3267,8 +3268,7 @@ export const getDiscoverablePrivateRooms = query({
     }
 
     const now = Date.now();
-    const ONLINE_WINDOW_MS = 2 * 60 * 1000;
-    const onlineThreshold = now - ONLINE_WINDOW_MS;
+    const onlineThreshold = now - PRESENCE_ONLINE_THRESHOLD_MS;
 
     const privateRooms = await ctx.db
       .query('chatRooms')
@@ -4137,8 +4137,8 @@ export const cleanupExpiredPenalties = internalMutation({
 });
 
 // P2-14: Internal — Cleanup stale chatRoomPresence rows.
-// Clients send presence heartbeats every ~30s with a 2-min online window.
-// Rows whose last heartbeat is older than the stale cutoff (1h) represent
+// Clients send presence heartbeats every ~30s with a short online window.
+// Rows whose last heartbeat is older than the stale cutoff represent
 // abandoned sessions (tab close, network drop, app kill) and are pure
 // storage bloat that also skews any future presence queries. We batch-delete
 // under a soft time budget and self-schedule if a backlog remains.
@@ -4146,10 +4146,9 @@ export const cleanupStalePresence = internalMutation({
   args: {},
   handler: async (ctx) => {
     const startedAt = Date.now();
-    const STALE_CUTOFF_MS = 60 * 60 * 1000; // 1 hour
     const BATCH = 500;
     const TIME_BUDGET_MS = 20_000;
-    const cutoff = startedAt - STALE_CUTOFF_MS;
+    const cutoff = startedAt - PRESENCE_STALE_CLEANUP_MS;
 
     let deletedCount = 0;
     let hitTimeBudget = false;
@@ -5020,12 +5019,12 @@ export const kickAndBanMember = mutation({
       });
     }
 
-    const presence = await ctx.db
+    const presenceRows = await ctx.db
       .query('chatRoomPresence')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
-      .first();
-    if (presence) {
-      await ctx.db.delete(presence._id);
+      .collect();
+    for (const row of presenceRows) {
+      await ctx.db.delete(row._id);
     }
 
     const mutesByTargetUser = await ctx.db
@@ -7020,9 +7019,6 @@ export const joinRoomWithPassword = mutation({
  * - ONLINE_THRESHOLD: User is online if heartbeat within this window
  * - RECENTLY_LEFT_THRESHOLD: User is "recently left" if heartbeat within this window (but > ONLINE)
  */
-const PRESENCE_ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
-const PRESENCE_RECENTLY_LEFT_THRESHOLD_MS = 60 * 60 * 1000; // 60 minutes
-
 /**
  * Send heartbeat to mark user as active in a room.
  * Creates or updates presence record.
@@ -7051,6 +7047,21 @@ export const heartbeatPresence = mutation({
 
     const now = Date.now();
 
+    const ban = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (ban) {
+      const bannedPresenceRows = await ctx.db
+        .query('chatRoomPresence')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .collect();
+      for (const row of bannedPresenceRows) {
+        await ctx.db.delete(row._id);
+      }
+      return { success: false };
+    }
+
     // SINGLE-ROOM PRESENCE: ensure user exists in only one room at a time.
     // Delete any other presence rows for this user in other rooms.
     const otherPresence = await ctx.db
@@ -7074,7 +7085,7 @@ export const heartbeatPresence = mutation({
     if (existing) {
       // P2-26: Server-side heartbeat throttle. If the last write is
       // within HEARTBEAT_THROTTLE_MS, skip the patch — the "online"
-      // window (PRESENCE_ONLINE_THRESHOLD_MS = 2 min) is far larger
+      // window (PRESENCE_ONLINE_THRESHOLD_MS = 3 min) is far larger
       // than the throttle, so presence semantics are unchanged; we
       // just stop amplifying chatty clients into redundant writes.
       const HEARTBEAT_THROTTLE_MS = 10_000;

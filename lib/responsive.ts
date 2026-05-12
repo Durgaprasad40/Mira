@@ -358,7 +358,7 @@ export const CHAT_SIZES = {
   /** Avatar size in member strip - larger on tablets */
   stripAvatar: SCREEN.isTablet ? moderateScale(32, 0.3) : moderateScale(28, 0.3),
   /** Avatar size in online users panel - larger on tablets */
-  panelAvatar: SCREEN.isTablet ? moderateScale(42, 0.3) : moderateScale(38, 0.3),
+  panelAvatar: SCREEN.isTablet ? moderateScale(37, 0.3) : moderateScale(33, 0.3),
   /** Bubble border radius */
   bubbleRadius: moderateScale(16, 0.25),
   /** Reply preview max lines */
