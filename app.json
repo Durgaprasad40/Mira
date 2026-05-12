@@ -46,6 +46,10 @@
         "READ_MEDIA_VIDEO",
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "POST_NOTIFICATIONS",
         "VIBRATE"
       ]
     },
@@ -81,7 +85,11 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Allow Mira to use your location to show people near you while you're using the app."
+          "locationWhenInUsePermission": "Allow Mira to use your location to show people near you while you're using the app.",
+          "locationAlwaysAndWhenInUsePermission": "Mira may use location in the background ONLY for Background Crossed Paths, and only after you explicitly turn it on. You can disable it anytime in Nearby Settings.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true,
+          "isIosBackgroundLocationEnabled": true
         }
       ],
       "@react-native-community/datetimepicker",
