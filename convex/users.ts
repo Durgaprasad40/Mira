@@ -26,6 +26,7 @@ import {
   normalizeDiscoveryPreferences,
 } from "../lib/discoveryDefaults";
 import { orderSafePhase1DisplayPhotos } from "./phase1Media";
+import { isDiscoveryExcluded, loadDiscoveryExclusions } from "./discoveryExclusions";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 const PROFILE_NAME_MAX_LENGTH = 50;
@@ -436,6 +437,16 @@ function isPhase1ExploreProfileSource(source: string | undefined): boolean {
   return source === "phase1_explore" || source === "explore";
 }
 
+function isNearbyCrossedPathProfileSource(source: string | undefined): boolean {
+  return (
+    source === "nearby" ||
+    source === "crossed_paths" ||
+    source === "crossed-paths" ||
+    source === "crossedPath" ||
+    source === "crossedPaths"
+  );
+}
+
 function isDiscoveryPaused(user: Doc<"users">, now = Date.now()): boolean {
   if (user.isDiscoveryPaused !== true) return false;
   if (!user.discoveryPausedUntil) return true;
@@ -539,6 +550,82 @@ async function hasPhase1ReportBetweenUsers(
   return !!reportBtoA;
 }
 
+function hasCurrentNearbyConsentForProfilePreview(user: Doc<"users">): boolean {
+  return (
+    typeof user.nearbyConsentAt === "number" &&
+    user.nearbyConsentAt > 0 &&
+    user.nearbyConsentVersion === NEARBY_CONSENT_VERSION
+  );
+}
+
+function isNearbyProfilePreviewEligible(
+  user: Doc<"users">,
+  options: { now: number; requireVisibility: boolean; requireConsent: boolean },
+): boolean {
+  if (user.onboardingCompleted !== true) return false;
+  if (user.isActive !== true || user.isBanned === true || user.deletedAt) return false;
+  if ((user.verificationStatus || "unverified") !== "verified") return false;
+  if (user.verificationEnforcementLevel === "security_only") return false;
+  if (calculatePhase1EligibleAge(user.dateOfBirth) === null) return false;
+  if (options.requireConsent && !hasCurrentNearbyConsentForProfilePreview(user)) return false;
+  if (user.recordCrossedPaths === false) return false;
+  if (options.requireVisibility) {
+    if (user.nearbyEnabled === false) return false;
+    if (user.nearbyPausedUntil && user.nearbyPausedUntil > options.now) return false;
+    if (user.incognitoMode === true) return false;
+  }
+  return true;
+}
+
+function crossedPathDismissedForUser(crossedPath: Doc<"crossedPaths">, userId: Id<"users">): boolean {
+  if (crossedPath.user1Id === userId) return crossedPath.dismissedByUser1At != null;
+  if (crossedPath.user2Id === userId) return crossedPath.dismissedByUser2At != null;
+  return true;
+}
+
+function crossedPathHistoryHiddenForUser(
+  entry: Doc<"crossPathHistory">,
+  userId: Id<"users">,
+): boolean {
+  if (entry.user1Id === userId) return entry.hiddenByUser1 === true;
+  if (entry.user2Id === userId) return entry.hiddenByUser2 === true;
+  return true;
+}
+
+async function hasActiveCrossedPathRelationshipForProfilePreview(
+  ctx: QueryCtx,
+  viewerId: Id<"users">,
+  targetId: Id<"users">,
+  now: number,
+): Promise<boolean> {
+  const user1Id = String(viewerId) < String(targetId) ? viewerId : targetId;
+  const user2Id = String(viewerId) < String(targetId) ? targetId : viewerId;
+
+  const crossedPath = await ctx.db
+    .query("crossedPaths")
+    .withIndex("by_users", (q) => q.eq("user1Id", user1Id).eq("user2Id", user2Id))
+    .first();
+  if (
+    crossedPath &&
+    (crossedPathDismissedForUser(crossedPath, viewerId) ||
+      crossedPathDismissedForUser(crossedPath, targetId))
+  ) {
+    return false;
+  }
+
+  const historyRows = await ctx.db
+    .query("crossPathHistory")
+    .withIndex("by_users", (q) => q.eq("user1Id", user1Id).eq("user2Id", user2Id))
+    .collect();
+
+  return historyRows.some((entry) => {
+    if (entry.expiresAt <= now) return false;
+    if (crossedPathHistoryHiddenForUser(entry, viewerId)) return false;
+    if (crossedPathHistoryHiddenForUser(entry, targetId)) return false;
+    return true;
+  });
+}
+
 async function getPhase1ExplorePreviewDistanceIfEligible(
   ctx: QueryCtx,
   viewer: Doc<"users">,
@@ -613,6 +700,7 @@ export const getUserById = query({
 
     const isSelfProfile = userId === viewerId;
     const isPhase1ExploreProfile = isPhase1ExploreProfileSource(args.source);
+    const isNearbySource = isNearbyCrossedPathProfileSource(args.source);
     if (!isSelfProfile && isPhase1ProfileSource(args.source)) {
       if (user.hideFromDiscover === true || isDiscoveryPaused(user)) return null;
       if (user.incognitoMode === true && !canViewerSeeIncognitoProfile(viewer)) {
@@ -639,6 +727,37 @@ export const getUserById = query({
 
     if (reverseBlocked) return null;
 
+    if (!isSelfProfile && isNearbySource) {
+      const now = Date.now();
+      if (
+        !isNearbyProfilePreviewEligible(viewer, {
+          now,
+          requireVisibility: false,
+          requireConsent: true,
+        }) ||
+        !isNearbyProfilePreviewEligible(user, {
+          now,
+          requireVisibility: true,
+          requireConsent: false,
+        })
+      ) {
+        return null;
+      }
+
+      const exclusions = await loadDiscoveryExclusions(ctx, viewerId);
+      if (isDiscoveryExcluded(exclusions, userId as string)) {
+        return null;
+      }
+
+      const hasRelationship = await hasActiveCrossedPathRelationshipForProfilePreview(
+        ctx,
+        viewerId,
+        userId,
+        now,
+      );
+      if (!hasRelationship) return null;
+    }
+
     let phase1ExploreDistance: number | undefined;
     if (!isSelfProfile && isPhase1ExploreProfile) {
       const eligibleDistance = await getPhase1ExplorePreviewDistanceIfEligible(ctx, viewer, user);
@@ -654,8 +773,6 @@ export const getUserById = query({
 
     const orderedPhotos = orderSafePhase1DisplayPhotos(photos);
     if (!isSelfProfile && isPhase1ExploreProfile && orderedPhotos.length === 0) return null;
-
-    const isNearbySource = args.source === "nearby" || args.source === "crossed_paths";
 
     // Calculate distance if both have location. Profiles opened from Nearby
     // deliberately do not return current/raw coordinate distance; Nearby has
@@ -1260,7 +1377,7 @@ export const backfillNearbyConsentForEnabledUsers = internalMutation({
 
 export const updateNearbySettings = mutation({
   args: {
-    authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
+    token: v.string(),
     nearbyEnabled: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),
     strongPrivacyMode: v.optional(v.boolean()),
@@ -1278,10 +1395,9 @@ export const updateNearbySettings = mutation({
     // The field is intentionally NOT accepted by this mutation anymore.
   },
   handler: async (ctx, args) => {
-    const { authUserId, incognitoMode, backgroundLocationEnabled, ...updates } = args;
+    const { token, incognitoMode, backgroundLocationEnabled, ...updates } = args;
 
-    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, token);
     if (!userId) {
       throw new Error("Unauthorized: user not found");
     }

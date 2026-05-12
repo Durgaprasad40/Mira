@@ -193,18 +193,18 @@ export async function flushBufferedBackgroundSamplesFromStoredSession(): Promise
     token: auth.token,
     logPrefix: 'BG_FLUSH_TASK',
     requireLocalEnablement: true,
-    uploadBatch: async ({ userId, samples, deviceHash }) => {
+    uploadBatch: async ({ samples, deviceHash }) => {
       const convexUrl = process.env.EXPO_PUBLIC_CONVEX_URL;
       if (!convexUrl) {
         throw new Error('missing_convex_url');
       }
+      const sessionToken = typeof auth.token === 'string' ? auth.token.trim() : '';
       const client = new ConvexHttpClient(convexUrl, {
-        auth: auth.token ?? undefined,
+        auth: sessionToken || undefined,
         logger: false,
       });
       return (await client.mutation(api.crossedPaths.recordLocationBatch, {
-        userId: userId as any,
-        token: auth.token ?? undefined,
+        token: sessionToken,
         samples,
         deviceHash,
       })) as RecordLocationBatchResult | undefined;

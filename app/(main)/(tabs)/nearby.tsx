@@ -622,8 +622,8 @@ export default function NearbyScreen() {
 
   const nearbyUsersQuery = useQuery(
     api.crossedPaths.getNearbyUsers,
-    shouldRunNearbyUsersQuery && userId
-      ? { userId }
+    shouldRunNearbyUsersQuery && authToken
+      ? { token: authToken }
       : 'skip'
   );
   // Fix 7 — daily distinct crossed-profile cap. Best-effort write so the
@@ -638,7 +638,7 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   const crossedPathSummaryQuery = useQuery(
     api.crossedPaths.getCrossedPathSummary,
-    shouldRunCrossedPathSummaryQuery && userId ? { userId } : 'skip'
+    shouldRunCrossedPathSummaryQuery && authToken ? { token: authToken } : 'skip'
   );
 
   const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
@@ -993,10 +993,10 @@ export default function NearbyScreen() {
 
     // Publish location (with mount guard)
     (async () => {
-      if (!userId) return;
+      if (!token) return;
       try {
         const result = await publishLocationMutation({
-          userId,
+          token,
           latitude: lat,
           longitude: lng,
         });
@@ -1059,10 +1059,10 @@ export default function NearbyScreen() {
         }
 
         // Rate limits passed - trigger crossed paths detection
-        if (!isMountedRef.current || !userId) return;
+        if (!isMountedRef.current || !token) return;
         try {
           const result = await recordLocationMutation({
-            userId,
+            token,
             latitude: lat,
             longitude: lng,
             accuracy: bestLocation.accuracy,
@@ -1234,7 +1234,7 @@ export default function NearbyScreen() {
   // UI. The markerKey guard prevents the same identical list from being
   // re-marked on every render.
   useEffect(() => {
-    if (isDemo || !userId) return;
+    if (isDemo || !authToken) return;
     if (nearbyUsersResult?.status !== 'ok') return;
     const users = nearbyUsersResult.users ?? [];
     if (users.length === 0) return;
@@ -1247,12 +1247,12 @@ export default function NearbyScreen() {
     );
     if (targetUserIds.length === 0) return;
 
-    const markerKey = `${userId}:${targetUserIds.join('|')}`;
+    const markerKey = `${userId ?? 'token'}:${targetUserIds.join('|')}`;
     if (markedDailyShownKeyRef.current === markerKey) return;
     markedDailyShownKeyRef.current = markerKey;
 
     markDailyCrossedProfilesShown({
-      authUserId: userId,
+      token: authToken,
       targetUserIds: targetUserIds as any,
     }).catch((err) => {
       if (__DEV__) {
@@ -1261,7 +1261,7 @@ export default function NearbyScreen() {
         });
       }
     });
-  }, [isDemo, userId, nearbyUsersResult, markDailyCrossedProfilesShown]);
+  }, [authToken, isDemo, userId, nearbyUsersResult, markDailyCrossedProfilesShown]);
 
   const displayNearbyUsersResult = nearbyUsersResult ?? retainedNearbyUsersResult;
   const hasRetainedNearbyResult =
@@ -1688,10 +1688,10 @@ export default function NearbyScreen() {
           text: 'Remove',
           style: 'destructive',
           onPress: async () => {
-            if (!userId || !user.historyId) return;
+            if (!token || !user.historyId) return;
             try {
               await hideCrossedPathMutation({
-                authUserId: userId,
+                token,
                 historyId: user.historyId as Id<'crossPathHistory'>,
               });
               setRemovedNearbyUserIds((current) => {
@@ -1709,7 +1709,7 @@ export default function NearbyScreen() {
         },
       ],
     );
-  }, [hideCrossedPathMutation, requestNearbyRefresh, userId]);
+  }, [hideCrossedPathMutation, requestNearbyRefresh, token]);
 
   // ---------------------------------------------------------------------------
   // Map control handlers

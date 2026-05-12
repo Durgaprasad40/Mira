@@ -13,8 +13,8 @@
  *   - unmatchedUserIds:  bidirectional (either party unmatched the pair; the
  *                        `matches` row persists with `userXUnmatchedAt` set
  *                        and/or `isActive:false`)
- *   - viewerReportedIds: one-way (only the reporter stops seeing the reportee;
- *                        matches the existing Discover/Explore contract)
+ *   - viewerReportedIds: bidirectional safety set (users the viewer reported
+ *                        OR users who reported the viewer)
  *
  * This module is READ-ONLY and additive. It does NOT mutate state and does
  * NOT alter existing block/report/unmatch write paths.
@@ -30,7 +30,7 @@ export interface DiscoveryExclusions {
   blockedUserIds: Set<string>;
   /** Bidirectional: users the viewer has ever unmatched (or been unmatched by) */
   unmatchedUserIds: Set<string>;
-  /** One-way: users the viewer has reported (reporter-only hide) */
+  /** Bidirectional: users the viewer has reported OR who have reported the viewer */
   viewerReportedIds: Set<string>;
 }
 
@@ -43,7 +43,14 @@ export async function loadDiscoveryExclusions(
   ctx: any,
   userId: Id<'users'>
 ): Promise<DiscoveryExclusions> {
-  const [blocksOut, blocksIn, matchesAsUser1, matchesAsUser2, myReports] =
+  const [
+    blocksOut,
+    blocksIn,
+    matchesAsUser1,
+    matchesAsUser2,
+    myReports,
+    reportsAgainstViewer,
+  ] =
     await Promise.all([
       ctx.db
         .query('blocks')
@@ -64,6 +71,10 @@ export async function loadDiscoveryExclusions(
       ctx.db
         .query('reports')
         .withIndex('by_reporter', (q: any) => q.eq('reporterId', userId))
+        .collect(),
+      ctx.db
+        .query('reports')
+        .withIndex('by_reported_user', (q: any) => q.eq('reportedUserId', userId))
         .collect(),
     ]);
 
@@ -101,6 +112,9 @@ export async function loadDiscoveryExclusions(
   const viewerReportedIds = new Set<string>();
   for (const r of myReports as Doc<'reports'>[]) {
     viewerReportedIds.add(r.reportedUserId as string);
+  }
+  for (const r of reportsAgainstViewer as Doc<'reports'>[]) {
+    viewerReportedIds.add(r.reporterId as string);
   }
 
   return { blockedUserIds, unmatchedUserIds, viewerReportedIds };

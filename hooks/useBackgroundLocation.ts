@@ -526,10 +526,10 @@ export function useBackgroundLocation() {
         token: tokenRef.current,
         logPrefix: 'BG_LOCATION',
         requireLocalEnablement: true,
-        uploadBatch: async ({ userId, samples, deviceHash }) => {
+        uploadBatch: async ({ samples, deviceHash }) => {
+          const sessionToken = typeof tokenRef.current === 'string' ? tokenRef.current.trim() : '';
           const result = (await recordBatchMut({
-            userId: userId as any,
-            token: tokenRef.current ?? undefined,
+            token: sessionToken,
             samples,
             deviceHash,
           })) as { success?: boolean; accepted?: number; reason?: string } | undefined;
@@ -573,7 +573,8 @@ export function useBackgroundLocation() {
         return { ok: false, reason: 'demo_mode' };
       }
       const uid = userIdRef.current;
-      if (!uid) {
+      const sessionToken = typeof tokenRef.current === 'string' ? tokenRef.current.trim() : '';
+      if (!uid || !sessionToken) {
         recordBgCrossedPathsBreadcrumb('enable_gate_skipped', {
           gate: 'auth',
           reason: 'not_authenticated',
@@ -736,7 +737,7 @@ export function useBackgroundLocation() {
           await startDiscoveryMut({ authUserId: uid });
         } else {
           await updateNearbySettingsMut({
-            authUserId: uid,
+            token: sessionToken,
             backgroundLocationEnabled: true,
           });
         }
@@ -791,9 +792,9 @@ export function useBackgroundLocation() {
         try {
           if (Platform.OS === 'android') {
             await stopDiscoveryMut({ authUserId: uid });
-          } else {
+          } else if (sessionToken) {
             await updateNearbySettingsMut({
-              authUserId: uid,
+              token: sessionToken,
               backgroundLocationEnabled: false,
             });
           }
@@ -859,6 +860,7 @@ export function useBackgroundLocation() {
         // can do. Treat as success so the UI shows OFF.
         return { ok: true };
       }
+      const sessionToken = typeof tokenRef.current === 'string' ? tokenRef.current.trim() : '';
       try {
         if (Platform.OS === 'android') {
           try {
@@ -866,10 +868,10 @@ export function useBackgroundLocation() {
           } catch {
             // Swallow — revoke below also clears Discovery state.
           }
-        } else {
+        } else if (sessionToken) {
           try {
             await updateNearbySettingsMut({
-              authUserId: uid,
+              token: sessionToken,
               backgroundLocationEnabled: false,
             });
           } catch {

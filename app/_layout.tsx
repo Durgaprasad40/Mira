@@ -815,6 +815,7 @@ function CrossedPathToastManager() {
   const router = useRouter();
   const segments = useSegments();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const lastToastTimeRef = useRef<number>(0);
@@ -827,11 +828,10 @@ function CrossedPathToastManager() {
     return () => { mountedRef.current = false; };
   }, []);
 
-  // Query crossed-path history (live mode only)
-  // FIX: Use userId instead of token for API call
+  // Query crossed-path history summary (live mode only)
   const crossedPathsSummary = useQuery(
     api.crossedPaths.getCrossedPathSummary,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Check for new crossed paths and show toast
@@ -885,18 +885,18 @@ function CrossedPathToastManager() {
 
   // Check on initial data load (after mount)
   useEffect(() => {
-    if (!authHydrated || !userId) return;
+    if (!authHydrated || !userId || !token) return;
     if (hasCheckedOnMountRef.current) return;
     if (!crossedPathsSummary || crossedPathsSummary.count === 0) return;
 
     hasCheckedOnMountRef.current = true;
     checkAndShowToast();
-  }, [authHydrated, userId, crossedPathsSummary, checkAndShowToast]);
+  }, [authHydrated, token, userId, crossedPathsSummary, checkAndShowToast]);
 
   // Check on app resume (foreground)
   useEffect(() => {
     if (isDemoMode) return;
-    if (!authHydrated || !userId) return;
+    if (!authHydrated || !userId || !token) return;
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       // If app was in background and is now active
@@ -916,7 +916,7 @@ function CrossedPathToastManager() {
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
     return () => subscription.remove();
-  }, [authHydrated, userId, checkAndShowToast]);
+  }, [authHydrated, token, userId, checkAndShowToast]);
 
   return null;
 }

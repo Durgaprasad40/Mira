@@ -408,8 +408,8 @@ export default function ViewProfileScreen() {
   // Shared Places query (Phase-1 only, not for demo mode)
   const sharedPlaces = useQuery(
     api.crossedPaths.getSharedPlaces,
-    !isDemoMode && !isPhase2 && userId && currentViewerId && sharedPlacesReady
-      ? { viewerId: currentViewerId, profileUserId: userId as Id<'users'> }
+    !isDemoMode && !isPhase2 && userId && token && sharedPlacesReady
+      ? { token, profileUserId: userId as Id<'users'> }
       : 'skip'
   );
 

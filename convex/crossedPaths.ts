@@ -1,8 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
-import { loadDiscoveryExclusions } from './discoveryExclusions';
+import { validateSessionToken } from './helpers';
+import { isDiscoveryExcluded, loadDiscoveryExclusions } from './discoveryExclusions';
 import {
   BG_CROSSED_PATHS_REQUIRED_CONSENT_VERSION,
   getRequiredBgCrossedPathsConsentVersion,
@@ -10,6 +10,10 @@ import {
   hasCurrentBgCrossedPathsConsentOnUser,
   isBgCrossedPathsEnabled as readBgCrossedPathsFeatureFlag,
 } from './backgroundCrossedPathsPolicy';
+import {
+  filterSafePhase1DisplayPhotos,
+  getSafePhase1PrimaryPhoto,
+} from './phase1Media';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -43,7 +47,7 @@ async function prefetchBlockedUserIds(
 }
 
 /**
- * Pre-fetch photo counts for all users in a single pass.
+ * Pre-fetch safe Phase-1 display photo counts for all users in a single pass.
  * Returns a Map for O(1) lookup.
  * STABILITY FIX: Avoids fetching all photos; uses index-based query.
  */
@@ -54,19 +58,19 @@ async function prefetchPhotoCounts(
 ): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
 
-  // Batch fetch photos for specific users using the by_user index
+  // Batch fetch photos for specific users using the by_user index.
+  // Safety parity: count only the photos that Phase-1 surfaces may display.
   const photoPromises = userIds.map((uid) =>
     ctx.db
       .query('photos')
       .withIndex('by_user', (q: any) => q.eq('userId', uid))
-      .filter((q: any) => q.neq(q.field('photoType'), 'verification_reference'))
       .collect()
   );
 
   const photoResults = await Promise.all(photoPromises);
 
   userIds.forEach((uid, i) => {
-    counts.set(uid, photoResults[i].length);
+    counts.set(uid, filterSafePhase1DisplayPhotos(photoResults[i]).length);
   });
 
   return counts;
@@ -80,16 +84,9 @@ async function fetchPhase1PrimaryPhotoUrl(
   const photos = await ctx.db
     .query('photos')
     .withIndex('by_user_order', (q: any) => q.eq('userId', userId))
-    .filter((q: any) => q.neq(q.field('photoType'), 'verification_reference'))
     .collect();
 
-  photos.sort((a: Doc<'photos'>, b: Doc<'photos'>) => {
-    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
-    if (a.order !== b.order) return a.order - b.order;
-    return a.createdAt - b.createdAt;
-  });
-
-  return photos[0]?.url ?? null;
+  return getSafePhase1PrimaryPhoto(photos)?.url ?? null;
 }
 
 async function prefetchPhase1PrimaryPhotoUrls(
@@ -295,6 +292,137 @@ export function hasNearbyConsent(user: Doc<'users'>): boolean {
     user.nearbyConsentAt > 0 &&
     user.nearbyConsentVersion === NEARBY_CONSENT_VERSION
   );
+}
+
+type NearbyHardEligibilityOptions = {
+  now: number;
+  requireConsent?: boolean;
+  requireProfileComplete?: boolean;
+  requireVerification?: boolean;
+  requireNearbyVisible?: boolean;
+  requireCrossedPathRecording?: boolean;
+  allowDevVerificationBypass?: boolean;
+};
+
+// INVARIANT: Nearby/Crossed Paths is proximity + safety + identity, NEVER compatibility. Do not add relationshipIntent, Vibes category, activities, interests, lifestyle, or Phase-2 private gates here. Compatibility is for reasonTags/context only.
+type NearbyHardEligibilityResult =
+  | { ok: true; age: number; user: Doc<'users'> }
+  | { ok: false; reason: string };
+
+function isNearbyDevVerificationBypass(): boolean {
+  return process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+}
+
+function checkNearbyHardEligibility(
+  user: Doc<'users'> | null | undefined,
+  options: NearbyHardEligibilityOptions,
+): NearbyHardEligibilityResult {
+  if (!user) return { ok: false, reason: 'user_not_found' };
+  if (user.isActive !== true) return { ok: false, reason: 'inactive' };
+  if (user.isBanned === true) return { ok: false, reason: 'banned' };
+  if (user.deletedAt) return { ok: false, reason: 'deleted' };
+  if (user.onboardingCompleted !== true) {
+    return { ok: false, reason: 'onboarding_incomplete' };
+  }
+  if (user.verificationEnforcementLevel === 'security_only') {
+    return { ok: false, reason: 'security_only' };
+  }
+  if (options.requireProfileComplete) {
+    if (!user.name || !user.bio || !user.dateOfBirth) {
+      return { ok: false, reason: 'profile_incomplete' };
+    }
+  }
+  if (
+    options.requireVerification &&
+    (user.verificationStatus || 'unverified') !== 'verified' &&
+    options.allowDevVerificationBypass !== true
+  ) {
+    return { ok: false, reason: 'unverified' };
+  }
+  if (options.requireNearbyVisible) {
+    if (user.nearbyEnabled === false) {
+      return { ok: false, reason: 'disabled_or_paused' };
+    }
+    if (user.nearbyPausedUntil && user.nearbyPausedUntil > options.now) {
+      return { ok: false, reason: 'disabled_or_paused' };
+    }
+    if (user.incognitoMode === true) {
+      return { ok: false, reason: 'incognito' };
+    }
+  }
+  if (options.requireCrossedPathRecording && user.recordCrossedPaths === false) {
+    return { ok: false, reason: 'crossed_paths_opt_out' };
+  }
+  if (options.requireConsent && !hasNearbyConsent(user)) {
+    return { ok: false, reason: 'consent_required' };
+  }
+
+  const age = calculateAge(user.dateOfBirth);
+  if (age === null) {
+    return { ok: false, reason: 'invalid_age' };
+  }
+
+  return { ok: true, age, user };
+}
+
+type NearbyPairExclusions = {
+  blockedUserIds?: ReadonlySet<string>;
+  unmatchedUserIds?: ReadonlySet<string>;
+  viewerReportedIds?: ReadonlySet<string>;
+};
+
+type NearbyPairHardEligibilityResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+function checkNearbyPairHardEligibility(args: {
+  viewer: Doc<'users'>;
+  candidate: Doc<'users'>;
+  viewerAge: number;
+  candidateAge: number;
+  exclusions?: NearbyPairExclusions;
+}): NearbyPairHardEligibilityResult {
+  const { viewer, candidate, viewerAge, candidateAge, exclusions } = args;
+  const candidateId = candidate._id as string;
+
+  if (viewer._id === candidate._id) return { ok: false, reason: 'self' };
+  if (exclusions?.blockedUserIds?.has(candidateId)) {
+    return { ok: false, reason: 'blocked' };
+  }
+  if (exclusions?.unmatchedUserIds?.has(candidateId)) {
+    return { ok: false, reason: 'unmatched_pair' };
+  }
+  if (exclusions?.viewerReportedIds?.has(candidateId)) {
+    return { ok: false, reason: 'reported_pair' };
+  }
+  if (viewerAge < candidate.minAge || viewerAge > candidate.maxAge) {
+    return { ok: false, reason: 'age_out_of_candidate_range' };
+  }
+  if (candidateAge < viewer.minAge || candidateAge > viewer.maxAge) {
+    return { ok: false, reason: 'age_out_of_viewer_range' };
+  }
+  if (
+    !orientationAllowsCandidateGender({
+      viewerGender: viewer.gender,
+      viewerOrientation: viewer.orientation ?? undefined,
+      candidateGender: candidate.gender,
+    }) ||
+    !orientationAllowsCandidateGender({
+      viewerGender: candidate.gender,
+      viewerOrientation: candidate.orientation ?? undefined,
+      candidateGender: viewer.gender,
+    })
+  ) {
+    return { ok: false, reason: 'orientation_incompatible' };
+  }
+  if (!viewer.lookingFor.includes(candidate.gender)) {
+    return { ok: false, reason: 'viewer_not_into_candidate_gender' };
+  }
+  if (!candidate.lookingFor.includes(viewer.gender)) {
+    return { ok: false, reason: 'candidate_not_into_viewer_gender' };
+  }
+
+  return { ok: true };
 }
 
 // Notification rate limiting
@@ -1077,13 +1205,23 @@ function validatePrivacyZoneRadius(radiusMeters: number | undefined): number {
 async function resolvePrivacyZoneOwner(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
-  authUserId: string,
+  token: string,
 ): Promise<Id<'users'>> {
-  const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  const userId = await resolveUserIdFromSessionToken(ctx, token);
   if (!userId) {
     throw new Error('Unauthorized: user not found');
   }
   return userId;
+}
+
+async function resolveUserIdFromSessionToken(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  token: string,
+): Promise<Id<'users'> | null> {
+  const sessionToken = typeof token === 'string' ? token.trim() : '';
+  if (!sessionToken) return null;
+  return await validateSessionToken(ctx, sessionToken);
 }
 
 async function getPrivacyZonesForUser(
@@ -1130,6 +1268,154 @@ async function isPointInsideUserPrivacyZone(
   return zones.some((zone) => isPointInsidePrivacyZone(latitude, longitude, zone));
 }
 
+async function deleteCrossedEventsForPair(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>,
+): Promise<number> {
+  const eventRows = await Promise.all([
+    ctx.db
+      .query('crossedEvents')
+      .withIndex('by_user_other', (q: any) =>
+        q.eq('userId', user1Id).eq('otherUserId', user2Id),
+      )
+      .collect(),
+    ctx.db
+      .query('crossedEvents')
+      .withIndex('by_user_other', (q: any) =>
+        q.eq('userId', user2Id).eq('otherUserId', user1Id),
+      )
+      .collect(),
+  ]);
+
+  let deleted = 0;
+  for (const row of eventRows.flat()) {
+    await ctx.db.delete(row._id);
+    deleted++;
+  }
+  return deleted;
+}
+
+async function refreshOrDeleteCrossedPathAfterPrivacyScrub(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>,
+  now: number,
+): Promise<{ crossedPathsDeleted: number; crossedPathsUpdated: number }> {
+  const remainingHistory = (await ctx.db
+    .query('crossPathHistory')
+    .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+    .collect() as Doc<'crossPathHistory'>[])
+    .filter((entry) =>
+      entry.expiresAt > now &&
+      typeof entry.crossedLatApprox === 'number' &&
+      typeof entry.crossedLngApprox === 'number',
+    )
+    .sort((a, b) => a.createdAt - b.createdAt);
+
+  const crossedPathRows = await ctx.db
+    .query('crossedPaths')
+    .withIndex('by_users', (q: any) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+    .collect();
+
+  if (remainingHistory.length === 0) {
+    let crossedPathsDeleted = 0;
+    for (const row of crossedPathRows) {
+      await ctx.db.delete(row._id);
+      crossedPathsDeleted++;
+    }
+    return { crossedPathsDeleted, crossedPathsUpdated: 0 };
+  }
+
+  const earliest = remainingHistory[0];
+  const latest = remainingHistory[remainingHistory.length - 1];
+  let crossedPathsUpdated = 0;
+  for (const row of crossedPathRows) {
+    await ctx.db.patch(row._id, {
+      count: Math.max(1, remainingHistory.length),
+      firstCrossedAt: earliest.createdAt,
+      firstCrossingLatitude: earliest.crossedLatApprox,
+      firstCrossingLongitude: earliest.crossedLngApprox,
+      lastCrossedAt: latest.createdAt,
+      crossingLatitude: latest.crossedLatApprox,
+      crossingLongitude: latest.crossedLngApprox,
+    });
+    crossedPathsUpdated++;
+  }
+
+  return { crossedPathsDeleted: 0, crossedPathsUpdated };
+}
+
+async function scrubCrossPathHistoryInsidePrivacyZone(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  ownerId: Id<'users'>,
+  zone: Pick<Doc<'privacyZones'>, 'latitude' | 'longitude' | 'radiusMeters'>,
+  now: number,
+): Promise<{
+  historyDeleted: number;
+  crossedPathsDeleted: number;
+  crossedPathsUpdated: number;
+  crossedEventsDeleted: number;
+}> {
+  const [asUser1, asUser2] = await Promise.all([
+    ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user1', (q: any) => q.eq('user1Id', ownerId))
+      .collect(),
+    ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user2', (q: any) => q.eq('user2Id', ownerId))
+      .collect(),
+  ]);
+
+  const affectedPairs = new Map<string, { user1Id: Id<'users'>; user2Id: Id<'users'> }>();
+  let historyDeleted = 0;
+
+  for (const entry of [...asUser1, ...asUser2] as Doc<'crossPathHistory'>[]) {
+    if (
+      typeof entry.crossedLatApprox !== 'number' ||
+      typeof entry.crossedLngApprox !== 'number'
+    ) {
+      continue;
+    }
+    if (!isPointInsidePrivacyZone(entry.crossedLatApprox, entry.crossedLngApprox, zone)) {
+      continue;
+    }
+
+    await ctx.db.delete(entry._id);
+    historyDeleted++;
+    affectedPairs.set(`${entry.user1Id}:${entry.user2Id}`, {
+      user1Id: entry.user1Id,
+      user2Id: entry.user2Id,
+    });
+  }
+
+  let crossedPathsDeleted = 0;
+  let crossedPathsUpdated = 0;
+  let crossedEventsDeleted = 0;
+  for (const { user1Id, user2Id } of affectedPairs.values()) {
+    const pairState = await refreshOrDeleteCrossedPathAfterPrivacyScrub(
+      ctx,
+      user1Id,
+      user2Id,
+      now,
+    );
+    crossedPathsDeleted += pairState.crossedPathsDeleted;
+    crossedPathsUpdated += pairState.crossedPathsUpdated;
+    crossedEventsDeleted += await deleteCrossedEventsForPair(ctx, user1Id, user2Id);
+  }
+
+  return {
+    historyDeleted,
+    crossedPathsDeleted,
+    crossedPathsUpdated,
+    crossedEventsDeleted,
+  };
+}
+
 function logPrivacyZoneSkip(source: string, userId: Id<'users'> | string) {
   if (!PRIVACY_ZONE_AUDIT_ENABLED) return;
   console.log('[PRIVACY_ZONE] skipped location write', {
@@ -1141,10 +1427,10 @@ function logPrivacyZoneSkip(source: string, userId: Id<'users'> | string) {
 
 export const listPrivacyZones = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const userId = await resolvePrivacyZoneOwner(ctx, args.authUserId);
+    const userId = await resolvePrivacyZoneOwner(ctx, args.token);
     const zones = await getPrivacyZonesForUser(ctx, userId);
     return zones
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -1163,7 +1449,7 @@ export const listPrivacyZones = query({
 
 export const upsertPrivacyZone = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     zoneId: v.optional(v.id('privacyZones')),
     label: v.string(),
     latitude: v.number(),
@@ -1171,11 +1457,16 @@ export const upsertPrivacyZone = mutation({
     radiusMeters: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const userId = await resolvePrivacyZoneOwner(ctx, args.authUserId);
+    const userId = await resolvePrivacyZoneOwner(ctx, args.token);
     const label = sanitizePrivacyZoneLabel(args.label);
     validatePrivacyZoneCoordinate(args.latitude, args.longitude);
     const radiusMeters = validatePrivacyZoneRadius(args.radiusMeters);
     const now = Date.now();
+    const zoneForScrub = {
+      latitude: args.latitude,
+      longitude: args.longitude,
+      radiusMeters,
+    };
 
     if (args.zoneId) {
       const existing = await ctx.db.get(args.zoneId);
@@ -1189,6 +1480,9 @@ export const upsertPrivacyZone = mutation({
         radiusMeters,
         updatedAt: now,
       });
+      // Privacy zones are privacy-first. Creating/expanding a zone suppresses
+      // old crossed-path history there; deleting the zone does not restore it.
+      await scrubCrossPathHistoryInsidePrivacyZone(ctx, userId, zoneForScrub, now);
       return { success: true, zoneId: args.zoneId };
     }
 
@@ -1207,17 +1501,21 @@ export const upsertPrivacyZone = mutation({
       updatedAt: now,
     });
 
+    // Privacy zones are privacy-first. Creating/expanding a zone suppresses
+    // old crossed-path history there; deleting the zone does not restore it.
+    await scrubCrossPathHistoryInsidePrivacyZone(ctx, userId, zoneForScrub, now);
+
     return { success: true, zoneId };
   },
 });
 
 export const deletePrivacyZone = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     zoneId: v.id('privacyZones'),
   },
   handler: async (ctx, args) => {
-    const userId = await resolvePrivacyZoneOwner(ctx, args.authUserId);
+    const userId = await resolvePrivacyZoneOwner(ctx, args.token);
     const existing = await ctx.db.get(args.zoneId);
     if (!existing || existing.userId !== userId) {
       throw new Error('Privacy Zone not found.');
@@ -1235,15 +1533,14 @@ export const deletePrivacyZone = mutation({
 
 export const publishLocation = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId
+    token: v.string(),
     latitude: v.number(),
     longitude: v.number(),
   },
   handler: async (ctx, args) => {
-    // Resolve authUserId to Convex ID if needed
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveUserIdFromSessionToken(ctx, args.token);
     if (!userId) {
-      return { published: false, publishedAt: null, reason: 'user_not_found' };
+      return { published: false, publishedAt: null, reason: 'not_authenticated' };
     }
     const { latitude, longitude } = args;
     const now = Date.now();
@@ -1251,38 +1548,16 @@ export const publishLocation = mutation({
     const user = await ctx.db.get(userId);
     if (!user) return { success: false, reason: 'user_not_found' };
 
-    // P1-2: Verification gate — unverified users must not publish a location.
-    // Keeps publishLocation consistent with detectCrossedUsers/recordLocation,
-    // which already skip crossing work for unverified callers.
-    const currentStatus = user.verificationStatus || 'unverified';
-    // DEV-ONLY bypass: allow unverified users to publish when demo auth mode is
-    // enabled on the Convex deployment env. Production behavior is unchanged
-    // because EXPO_PUBLIC_DEMO_AUTH_MODE must be explicitly set to the string
-    // "true" on the Convex deployment (not just the Expo client bundle) for
-    // this bypass to engage.
-    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
-    if (currentStatus !== 'verified' && !isDevBypass) {
-      return { success: false, published: false, reason: 'unverified' };
-    }
-
-    // P1.6: Caller opt-out — a verified user who has disabled Nearby or is
-    // actively paused must not publish a location. Mirrors the opt-out gates
-    // in recordLocation (P1-1) and detectCrossedUsers (P1.5-1) so the
-    // "Show me in Nearby" / "Pause Nearby" promise holds for publish too.
-    if (user.nearbyEnabled === false) {
-      return { success: false, published: false, reason: 'disabled_or_paused' };
-    }
-    if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
-      return { success: false, published: false, reason: 'disabled_or_paused' };
-    }
-    if (user.incognitoMode === true) {
-      return { success: false, published: false, reason: 'incognito' };
-    }
-
-    // Server-side consent gate: drop writes from clients that have not
-    // accepted the current Nearby / Crossed Paths disclosure.
-    if (!hasNearbyConsent(user)) {
-      return { success: false, published: false, reason: 'consent_required' };
+    const eligibility = checkNearbyHardEligibility(user, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireNearbyVisible: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!eligibility.ok) {
+      return { success: false, published: false, reason: eligibility.reason };
     }
 
     // Fix 3 — Impossible Travel / GPS spoof protection. Reject writes that
@@ -1386,8 +1661,7 @@ export const publishLocation = mutation({
 
 export const detectCrossedUsers = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
-    token: v.optional(v.string()),
+    token: v.string(),
     myLat: v.number(),
     myLng: v.number(),
   },
@@ -1395,21 +1669,9 @@ export const detectCrossedUsers = mutation({
     const { myLat, myLng } = args;
     const now = Date.now();
 
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!resolvedUserId) {
-      return { triggered: false, reason: 'user_not_found' };
-    }
-    let userId = resolvedUserId;
-    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
-    if (sessionToken) {
-      const tokenUserId = await validateSessionToken(ctx, sessionToken);
-      if (!tokenUserId) {
-        return { triggered: false, reason: 'not_authenticated' };
-      }
-      if (tokenUserId !== resolvedUserId) {
-        return { triggered: false, reason: 'session_user_mismatch' };
-      }
-      userId = tokenUserId;
+    const userId = await resolveUserIdFromSessionToken(ctx, args.token);
+    if (!userId) {
+      return { triggered: false, reason: 'not_authenticated' };
     }
 
     // 1) Validate user exists
@@ -1418,27 +1680,17 @@ export const detectCrossedUsers = mutation({
       return { triggered: false, reason: 'user_not_found' };
     }
 
-    // P1.5-1: Caller opt-out — if Nearby is disabled or actively paused for
-    // the caller, we must not run detection logic and must not insert any
-    // crossedEvents row. Mirrors the recordLocation opt-out from P1-1 so the
-    // "Show me in Nearby" / "Pause Nearby" UI promises hold end-to-end.
-    if (currentUser.nearbyEnabled === false) {
-      return { triggered: false, reason: 'disabled_or_paused' };
-    }
-    if (currentUser.nearbyPausedUntil && currentUser.nearbyPausedUntil > now) {
-      return { triggered: false, reason: 'disabled_or_paused' };
-    }
-    // Phase-2: caller must also be opted into crossed-paths recording for
-    // "Someone crossed you" alerts to fire. Treat undefined as opted-in.
-    if (currentUser.recordCrossedPaths === false) {
-      return { triggered: false, reason: 'crossed_paths_opt_out' };
-    }
-    if (currentUser.incognitoMode === true) {
-      return { triggered: false, reason: 'incognito' };
-    }
-    // Server-side consent gate.
-    if (!hasNearbyConsent(currentUser)) {
-      return { triggered: false, reason: 'consent_required' };
+    const currentEligibility = checkNearbyHardEligibility(currentUser, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireNearbyVisible: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!currentEligibility.ok) {
+      return { triggered: false, reason: currentEligibility.reason };
     }
     // Fix 3 — Impossible Travel / GPS spoof protection.
     const locationSafety = await rejectIfUnsafeLocation(
@@ -1468,21 +1720,8 @@ export const detectCrossedUsers = mutation({
       return { triggered: false, reason: 'cooldown' };
     }
 
-    const currentStatus = currentUser.verificationStatus || 'unverified';
-    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
-    if (currentStatus !== 'verified' && !isDevBypass) {
-      return { triggered: false, reason: 'unverified' };
-    }
-    if (!currentUser.name || !currentUser.bio || !currentUser.dateOfBirth) {
-      return { triggered: false, reason: 'profile_incomplete' };
-    }
-
-    const {
-      blockedUserIds: blockedIds,
-      unmatchedUserIds,
-      viewerReportedIds,
-    } = await loadDiscoveryExclusions(ctx, userId);
-    const myAge = calculateAge(currentUser.dateOfBirth);
+    const exclusions = await loadDiscoveryExclusions(ctx, userId);
+    const myAge = currentEligibility.age;
 
     // Alert source is the same history rows written by the sample matchers.
     // This avoids a second, looser published-location crossing model.
@@ -1522,40 +1761,25 @@ export const detectCrossedUsers = mutation({
     }
 
     for (const { otherUserId } of recentHistoryCandidates) {
-      const otherUserKey = otherUserId as string;
-      if (blockedIds.has(otherUserKey)) continue;
-      if (unmatchedUserIds.has(otherUserKey)) continue;
-      if (viewerReportedIds.has(otherUserKey)) continue;
-
       const otherUser = await ctx.db.get(otherUserId);
       if (!otherUser || otherUser._id === userId) continue;
-      if (!otherUser.isActive) continue;
-      if (otherUser.nearbyEnabled === false) continue;
-      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
-      if (otherUser.recordCrossedPaths === false) continue;
-      if (otherUser.incognitoMode === true) continue;
-      if (!otherUser.name || !otherUser.bio || !otherUser.dateOfBirth) continue;
-
-      const otherStatus = otherUser.verificationStatus || 'unverified';
-      if (otherStatus !== 'verified' && !isDevBypass) continue;
-
-      const otherAge = calculateAge(otherUser.dateOfBirth);
-      if (myAge < otherUser.minAge || myAge > otherUser.maxAge) continue;
-      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
-      if (
-        !orientationAllowsCandidateGender({
-          viewerGender: currentUser.gender,
-          viewerOrientation: currentUser.orientation ?? undefined,
-          candidateGender: otherUser.gender,
-        }) ||
-        !orientationAllowsCandidateGender({
-          viewerGender: otherUser.gender,
-          viewerOrientation: otherUser.orientation ?? undefined,
-          candidateGender: currentUser.gender,
-        })
-      ) continue;
-      if (!currentUser.lookingFor.includes(otherUser.gender)) continue;
-      if (!otherUser.lookingFor.includes(currentUser.gender)) continue;
+      const otherEligibility = checkNearbyHardEligibility(otherUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+      });
+      if (!otherUser || !otherEligibility.ok) continue;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: currentUser,
+        candidate: otherUser,
+        viewerAge: myAge,
+        candidateAge: otherEligibility.age,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
 
       const crossedPath = await getCrossedPathForPair(ctx, userId, otherUserId);
       if (!crossedPath || isPairDismissedForViewer(crossedPath, userId)) continue;
@@ -1616,16 +1840,15 @@ export const cleanupExpiredCrossedEvents = internalMutation({
 
 export const recordLocation = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId
+    token: v.string(),
     latitude: v.number(),
     longitude: v.number(),
     accuracy: v.optional(v.number()), // GPS accuracy in meters (for jitter protection)
   },
   handler: async (ctx, args) => {
-    // Resolve authUserId to Convex ID if needed
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveUserIdFromSessionToken(ctx, args.token);
     if (!userId) {
-      return { nearbyCount: 0, reason: 'user_not_found' };
+      return { nearbyCount: 0, reason: 'not_authenticated' };
     }
     const { latitude, longitude, accuracy } = args;
     const now = Date.now();
@@ -1637,31 +1860,19 @@ export const recordLocation = mutation({
     // trace every accepted/rejected candidate during QA. Can be flipped to
     // false to silence without removing the logging blocks.
     const CROSSED_PATHS_AUDIT_ENABLED = true;
+    const isDevBypass = isNearbyDevVerificationBypass();
 
-    // P1-1: Caller opt-out — if the user has disabled Nearby or paused it,
-    // we must NOT record any location/crossings for them. The UI promises
-    // "Show me in Nearby" and "Pause Nearby" include both map visibility
-    // AND crossing detection; respect that end-to-end.
-    if (currentUser.nearbyEnabled === false) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'disabled_or_paused' };
-    }
-    if (currentUser.nearbyPausedUntil && currentUser.nearbyPausedUntil > now) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'disabled_or_paused' };
-    }
-    // Crossed-paths is a separate opt-in from "Show me in Nearby".
-    // If the caller has explicitly turned off "Save crossed paths" we must
-    // not insert any crossedPaths / crossPathHistory / crossedEvents rows for
-    // them. Map visibility (publishLocation / getNearbyUsers) is unaffected.
-    // Treat undefined as true for backward compatibility with existing users.
-    if (currentUser.recordCrossedPaths === false) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'crossed_paths_opt_out' };
-    }
-    if (currentUser.incognitoMode === true) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'incognito' };
-    }
-    // Server-side consent gate.
-    if (!hasNearbyConsent(currentUser)) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'consent_required' };
+    const currentEligibility = checkNearbyHardEligibility(currentUser, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireNearbyVisible: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isDevBypass,
+    });
+    if (!currentEligibility.ok) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: currentEligibility.reason };
     }
     // Fix 3 — Impossible Travel / GPS spoof protection.
     const locationSafety = await rejectIfUnsafeLocation(
@@ -1785,19 +1996,7 @@ export const recordLocation = mutation({
       };
     }
 
-    // Skip crossed-path computation if current user is not verified
-    const currentStatus = currentUser.verificationStatus || 'unverified';
-    // DEV-ONLY bypass (matches publishLocation). Engages only when the Convex
-    // deployment env explicitly sets EXPO_PUBLIC_DEMO_AUTH_MODE to "true".
-    // Production behavior is unchanged because this env is NOT auto-propagated
-    // from .env.local to the Convex deployment.
-    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
-    if (currentStatus !== 'verified' && !isDevBypass) {
-      return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
-    }
-
-    // Get current user's age for filtering
-    const myAge = calculateAge(currentUser.dateOfBirth);
+    const myAge = currentEligibility.age;
 
     // STABILITY FIX S3: Use indexed query for verified users only (production).
     // In DEV bypass: widen to all users so unverified demo peers are discoverable.
@@ -1811,11 +2010,7 @@ export const recordLocation = mutation({
 
     // STABILITY FIX S6/C2: Pre-fetch blocks before loop
     // P1 EXCLUSION: Load full negative-relationship exclusion set.
-    const {
-      blockedUserIds: blockedIds,
-      unmatchedUserIds,
-      viewerReportedIds,
-    } = await loadDiscoveryExclusions(ctx, userId);
+    const exclusions = await loadDiscoveryExclusions(ctx, userId);
 
     if (CROSSED_PATHS_AUDIT_ENABLED) {
       console.log('[CROSSED_PATHS_AUDIT][trigger]', {
@@ -1835,25 +2030,19 @@ export const recordLocation = mutation({
 
     for (const user of verifiedUsers) {
       if (user._id === userId) continue;
-      if (!user.isActive) { preFilterRejects.push({ candidate: user._id as string, reason: 'inactive' }); continue; }
+      const candidateEligibility = checkNearbyHardEligibility(user, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isDevBypass,
+      });
+      if (!candidateEligibility.ok) {
+        preFilterRejects.push({ candidate: user._id as string, reason: candidateEligibility.reason });
+        continue;
+      }
       if (!user.latitude || !user.longitude) { preFilterRejects.push({ candidate: user._id as string, reason: 'no_location' }); continue; }
-
-      // Incognito Nearby is fully hidden from crossed-path recording and
-      // notifications. Incognito users can still browse Nearby themselves,
-      // but other users must not receive new crossing rows involving them.
-      if (user.incognitoMode === true) { preFilterRejects.push({ candidate: user._id as string, reason: 'incognito' }); continue; }
-
-      // Nearby visibility opt-out: Skip users who opted out of nearby
-      if (user.nearbyEnabled === false) { preFilterRejects.push({ candidate: user._id as string, reason: 'nearby_disabled' }); continue; }
-
-      // Phase-2: skip users who opted out of crossed-paths recording.
-      // Both sides must have recordCrossedPaths !== false for a crossing to
-      // be persisted. undefined is treated as opted-in (default true) so
-      // existing accounts are unaffected.
-      if (user.recordCrossedPaths === false) { preFilterRejects.push({ candidate: user._id as string, reason: 'other_opted_out' }); continue; }
-
-      // Basic info completeness
-      if (!user.name || !user.bio || !user.dateOfBirth) { preFilterRejects.push({ candidate: user._id as string, reason: 'profile_incomplete' }); continue; }
 
       // Location freshness check: foreground detection must not compare against
       // very old stored locations.
@@ -1916,54 +2105,27 @@ export const recordLocation = mutation({
       }
 
       // Age filtering (both directions)
-      const otherAge = calculateAge(nearbyUser.dateOfBirth);
-      if (myAge < nearbyUser.minAge || myAge > nearbyUser.maxAge) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'age_out_of_other_range' });
+      const candidateEligibility = checkNearbyHardEligibility(nearbyUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isDevBypass,
+      });
+      if (!candidateEligibility.ok) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: candidateEligibility.reason });
         continue;
       }
-      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'age_out_of_viewer_range' });
-        continue;
-      }
-
-      // Gender/orientation preference match (both directions)
-      if (
-        !orientationAllowsCandidateGender({
-          viewerGender: currentUser.gender,
-          viewerOrientation: currentUser.orientation ?? undefined,
-          candidateGender: nearbyUser.gender,
-        }) ||
-        !orientationAllowsCandidateGender({
-          viewerGender: nearbyUser.gender,
-          viewerOrientation: nearbyUser.orientation ?? undefined,
-          candidateGender: currentUser.gender,
-        })
-      ) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'orientation_incompatible' });
-        continue;
-      }
-      if (!currentUser.lookingFor.includes(nearbyUser.gender)) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'viewer_not_into_other_gender' });
-        continue;
-      }
-      if (!nearbyUser.lookingFor.includes(currentUser.gender)) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'other_not_into_viewer_gender' });
-        continue;
-      }
-
-      // STABILITY FIX S6/C2: Check if blocked using pre-fetched set (O(1) lookup)
-      if (blockedIds.has(candidateId)) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'blocked' });
-        continue;
-      }
-      // P1 EXCLUSION: skip unmatched pairs (bidirectional) and reporter-hidden
-      // users before recording a crossed-paths entry.
-      if (unmatchedUserIds.has(candidateId)) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'unmatched_pair' });
-        continue;
-      }
-      if (viewerReportedIds.has(candidateId)) {
-        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'viewer_reported' });
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: currentUser,
+        candidate: nearbyUser,
+        viewerAge: myAge,
+        candidateAge: candidateEligibility.age,
+        exclusions,
+      });
+      if (!pairEligibility.ok) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: pairEligibility.reason });
         continue;
       }
 
@@ -2759,7 +2921,7 @@ export const debugBgPipelineStatus = query({
 //
 // Order of gates (each early-returns + writes audit log on first failure):
 //   1. bgCrossedPathsEnabled feature flag must be true
-//   2. resolveUserIdByAuthId must return a real user
+//   2. session token must resolve to a real user
 //   3. samples non-empty + below MAX_SAMPLES_PER_BATCH
 //   4. user exists and is verified
 //   5. nearbyEnabled !== false / nearbyPausedUntil not active
@@ -2776,8 +2938,7 @@ export const debugBgPipelineStatus = query({
 
 export const recordLocationBatch = mutation({
   args: {
-    userId: v.union(v.id('users'), v.string()),
-    token: v.optional(v.string()),
+    token: v.string(),
     samples: v.array(
       v.object({
         lat: v.number(),
@@ -2804,21 +2965,9 @@ export const recordLocationBatch = mutation({
       };
     }
 
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!resolvedUserId) {
-      return { success: false, accepted: 0, reason: 'user_not_found' };
-    }
-    let userId = resolvedUserId;
-    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
-    if (sessionToken) {
-      const tokenUserId = await validateSessionToken(ctx, sessionToken);
-      if (!tokenUserId) {
-        return { success: false, accepted: 0, reason: 'not_authenticated' };
-      }
-      if (tokenUserId !== resolvedUserId) {
-        return { success: false, accepted: 0, reason: 'session_user_mismatch' };
-      }
-      userId = tokenUserId;
+    const userId = await resolveUserIdFromSessionToken(ctx, args.token);
+    if (!userId) {
+      return { success: false, accepted: 0, reason: 'not_authenticated' };
     }
     const now = Date.now();
     const sources = Array.from(new Set(args.samples.map((s) => s.source)));
@@ -2859,53 +3008,21 @@ export const recordLocationBatch = mutation({
       return { success: false, accepted: 0, reason: 'ops_disabled' };
     }
 
-    // Early opt-out gates (no background-consent specifics yet — those
-    // come below only when the batch carries bg/slc samples).
-    if (user.nearbyEnabled === false) {
+    const eligibility = checkNearbyHardEligibility(user, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireNearbyVisible: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!eligibility.ok) {
       await emitBgLocationAuditLog(ctx, {
         userId, sampleCount: args.samples.length, accepted: 0, sources,
-        outcome: 'rejected', reason: 'disabled_or_paused', deviceHash: args.deviceHash,
+        outcome: 'rejected', reason: eligibility.reason, deviceHash: args.deviceHash,
       });
-      return { success: true, accepted: 0, reason: 'disabled_or_paused' };
-    }
-    if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) {
-      await emitBgLocationAuditLog(ctx, {
-        userId, sampleCount: args.samples.length, accepted: 0, sources,
-        outcome: 'rejected', reason: 'disabled_or_paused', deviceHash: args.deviceHash,
-      });
-      return { success: true, accepted: 0, reason: 'disabled_or_paused' };
-    }
-    if (user.recordCrossedPaths === false) {
-      await emitBgLocationAuditLog(ctx, {
-        userId, sampleCount: args.samples.length, accepted: 0, sources,
-        outcome: 'rejected', reason: 'crossed_paths_opt_out', deviceHash: args.deviceHash,
-      });
-      return { success: true, accepted: 0, reason: 'crossed_paths_opt_out' };
-    }
-    if (user.incognitoMode === true) {
-      await emitBgLocationAuditLog(ctx, {
-        userId, sampleCount: args.samples.length, accepted: 0, sources,
-        outcome: 'rejected', reason: 'incognito', deviceHash: args.deviceHash,
-      });
-      return { success: true, accepted: 0, reason: 'incognito' };
-    }
-    // Foreground consent gate (required for any location write).
-    if (!hasNearbyConsent(user)) {
-      await emitBgLocationAuditLog(ctx, {
-        userId, sampleCount: args.samples.length, accepted: 0, sources,
-        outcome: 'rejected', reason: 'consent_required', deviceHash: args.deviceHash,
-      });
-      return { success: true, accepted: 0, reason: 'consent_required' };
-    }
-
-    const currentStatus = user.verificationStatus || 'unverified';
-    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
-    if (currentStatus !== 'verified' && !isDevBypass) {
-      await emitBgLocationAuditLog(ctx, {
-        userId, sampleCount: args.samples.length, accepted: 0, sources,
-        outcome: 'rejected', reason: 'unverified', deviceHash: args.deviceHash,
-      });
-      return { success: true, accepted: 0, reason: 'unverified' };
+      return { success: true, accepted: 0, reason: eligibility.reason };
     }
 
     // Source-specific opt-in gates. Background writes are strictly opt-in
@@ -3274,7 +3391,7 @@ export const recordLocationBatch = mutation({
 // Looks for other users whose most recent locationSamples row falls within
 // ±SAMPLE_TIME_WINDOW_MS of the anchor sample AND within CROSSED_MAX_METERS
 // of the anchor coordinate. Applies the same opt-out / block / age /
-// orientation / compat rules as recordLocation, then upserts
+// orientation rules as recordLocation, then upserts
 // crossedPaths + crossPathHistory and emits in-app notifications.
 //
 // Kept deliberately separate from the recordLocation loop so the foreground
@@ -3297,8 +3414,18 @@ async function detectCrossingsForSample(
   const now = Date.now();
   const windowStart = sampleTime - SAMPLE_TIME_WINDOW_MS;
   const windowEnd = sampleTime + SAMPLE_TIME_WINDOW_MS;
+  const isDevBypass = isNearbyDevVerificationBypass();
 
-  if (viewer.incognitoMode === true) {
+  const viewerEligibility = checkNearbyHardEligibility(viewer, {
+    now,
+    requireProfileComplete: true,
+    requireVerification: true,
+    requireNearbyVisible: true,
+    requireCrossedPathRecording: true,
+    requireConsent: true,
+    allowDevVerificationBypass: isDevBypass,
+  });
+  if (!viewerEligibility.ok) {
     return { crossingsWritten: 0 };
   }
   if (await isPointInsideUserPrivacyZone(ctx, viewerId, lat, lng)) {
@@ -3375,52 +3502,32 @@ async function detectCrossingsForSample(
   }
 
   // 3) Exclusion set + my basic gates (same as recordLocation).
-  const {
-    blockedUserIds: blockedIds,
-    unmatchedUserIds,
-    viewerReportedIds,
-  } = await loadDiscoveryExclusions(ctx, viewerId);
-  const myAge = calculateAge(viewer.dateOfBirth);
+  const exclusions = await loadDiscoveryExclusions(ctx, viewerId);
+  const myAge = viewerEligibility.age;
 
   // 4) Per-peer full-gate loop (age, orientation, opt-outs, compat, cooldown).
   let crossingsWritten = 0;
   for (const { peerId, distance } of candidates) {
     const peerUser = await ctx.db.get(peerId as Id<'users'>);
     if (!peerUser) continue;
-    if (!peerUser.isActive) continue;
-    if (peerUser.nearbyEnabled === false) continue;
-    if (peerUser.recordCrossedPaths === false) continue;
-    if (peerUser.incognitoMode === true) continue;
-    if (!peerUser.name || !peerUser.bio || !peerUser.dateOfBirth) continue;
+    const peerEligibility = checkNearbyHardEligibility(peerUser, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireNearbyVisible: true,
+      requireCrossedPathRecording: true,
+      allowDevVerificationBypass: isDevBypass,
+    });
+    if (!peerEligibility.ok) continue;
 
-    // Verification parity with recordLocation (DEV bypass respected).
-    const peerStatus = peerUser.verificationStatus || 'unverified';
-    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
-    if (peerStatus !== 'verified' && !isDevBypass) continue;
-
-    // Age / orientation / gender filters (bi-directional).
-    const peerAge = calculateAge(peerUser.dateOfBirth);
-    if (myAge < peerUser.minAge || myAge > peerUser.maxAge) continue;
-    if (peerAge < viewer.minAge || peerAge > viewer.maxAge) continue;
-    if (
-      !orientationAllowsCandidateGender({
-        viewerGender: viewer.gender,
-        viewerOrientation: viewer.orientation ?? undefined,
-        candidateGender: peerUser.gender,
-      }) ||
-      !orientationAllowsCandidateGender({
-        viewerGender: peerUser.gender,
-        viewerOrientation: peerUser.orientation ?? undefined,
-        candidateGender: viewer.gender,
-      })
-    ) continue;
-    if (!viewer.lookingFor.includes(peerUser.gender)) continue;
-    if (!peerUser.lookingFor.includes(viewer.gender)) continue;
-
-    // Negative-relationship exclusions.
-    if (blockedIds.has(peerId)) continue;
-    if (unmatchedUserIds.has(peerId)) continue;
-    if (viewerReportedIds.has(peerId)) continue;
+    const pairEligibility = checkNearbyPairHardEligibility({
+      viewer,
+      candidate: peerUser,
+      viewerAge: myAge,
+      candidateAge: peerEligibility.age,
+      exclusions,
+    });
+    if (!pairEligibility.ok) continue;
 
     // Compatibility (metadata only — same product-fix rule as recordLocation).
     const compatibility = computeCompatibility(
@@ -3719,39 +3826,33 @@ export const cleanupStaleLocationBatchRateLimit = internalMutation({
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
-  args: { userId: v.union(v.id('users'), v.string()) }, // Accept both Convex ID and authUserId
+  args: { token: v.string() },
   handler: async (ctx, args) => {
     const now = Date.now();
 
-    // Resolve authUserId to Convex ID if needed
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveUserIdFromSessionToken(ctx, args.token);
     if (!userId) return [];
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
 
-    // P2 — Consent read-gate. Requester must have accepted the current
-    // Nearby / Crossed Paths disclosure before any list payload is exposed.
-    // Write paths already gate on this; the read gate prevents leaking
-    // existing data to a user who has not (re-)consented.
-    if (!hasNearbyConsent(currentUser)) return [];
-
-    // Current user must be verified to see nearby users.
-    // DEV-ONLY bypass (matches publishLocation / detectCrossedUsers). Engages
-    // only when the Convex deployment env explicitly sets
-    // EXPO_PUBLIC_DEMO_AUTH_MODE to "true". Production behavior is unchanged
-    // because this env is NOT auto-propagated from .env.local to the Convex
-    // deployment.
-    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
-    if (currentUser.verificationStatus !== 'verified' && !isDevBypass) return [];
+    const isDevBypass = isNearbyDevVerificationBypass();
+    const currentEligibility = checkNearbyHardEligibility(currentUser, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isDevBypass,
+    });
+    if (!currentEligibility.ok) return [];
 
     // Viewer coordinates are server-only and used solely for optional coarse
     // distance buckets. They are never returned to the client.
     const myLat = currentUser.publishedLat ?? currentUser.latitude;
     const myLng = currentUser.publishedLng ?? currentUser.longitude;
 
-    // Get current user's age for filtering
-    const myAge = calculateAge(currentUser.dateOfBirth);
+    const myAge = currentEligibility.age;
 
     // Inclusion source: active, non-hidden crossed-path history only.
     // This deliberately does NOT read candidate publishedLat/publishedLng.
@@ -3828,10 +3929,6 @@ export const getNearbyUsers = query({
       prefetchPhase1PrimaryPhotoUrls(ctx, otherUserIds),
       Promise.all(otherUserIds.map((id) => ctx.db.get(id as Id<'users'>))),
     ]);
-    const blockedIds = exclusions.blockedUserIds;
-    const unmatchedUserIds = exclusions.unmatchedUserIds;
-    const viewerReportedIds = exclusions.viewerReportedIds;
-
     const usersMap = new Map<string, Doc<'users'>>();
     otherUserIds.forEach((id, i) => {
       const user = fetchedUsers[i];
@@ -3850,45 +3947,24 @@ export const getNearbyUsers = query({
 
       const user = usersMap.get(otherUserId);
       if (!user || user._id === userId) continue;
-      if (!user.isActive) continue;
-
-      // Candidate privacy gates. These remain server-side so a client cannot
-      // opt into seeing someone who is hidden, paused, blocked, unmatched, or
-      // reported.
-      if (user.incognitoMode === true) continue;
-      if (user.nearbyEnabled === false) continue;
-      if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) continue;
-
-      const candidateStatus = user.verificationStatus || 'unverified';
-      if (candidateStatus !== 'verified' && !isDevBypass) continue;
-
-      // Basic info completeness
-      if (!user.name || !user.bio || !user.dateOfBirth) continue;
-
-      // Age filtering (both directions)
-      const otherAge = calculateAge(user.dateOfBirth);
-      if (myAge < user.minAge || myAge > user.maxAge) continue;
-      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
-
-      // Gender/orientation preference match (both directions)
-      if (
-        !orientationAllowsCandidateGender({
-          viewerGender: currentUser.gender,
-          viewerOrientation: currentUser.orientation ?? undefined,
-          candidateGender: user.gender,
-        }) ||
-        !orientationAllowsCandidateGender({
-          viewerGender: user.gender,
-          viewerOrientation: user.orientation ?? undefined,
-          candidateGender: currentUser.gender,
-        })
-      ) continue;
-      if (!currentUser.lookingFor.includes(user.gender)) continue;
-      if (!user.lookingFor.includes(currentUser.gender)) continue;
-
-      if (blockedIds.has(otherUserId)) continue;
-      if (unmatchedUserIds.has(otherUserId)) continue;
-      if (viewerReportedIds.has(otherUserId)) continue;
+      const candidateEligibility = checkNearbyHardEligibility(user, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isDevBypass,
+      });
+      if (!candidateEligibility.ok) continue;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: currentUser,
+        candidate: user,
+        viewerAge: myAge,
+        candidateAge: candidateEligibility.age,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
+      const otherAge = candidateEligibility.age;
 
       // Skip filter (using pre-fetched map)
       const existingSwipe = swipedUsersMap.get(otherUserId);
@@ -4009,7 +4085,7 @@ export const getNearbyUsers = query({
           id: user._id,
           historyId: entry._id,
           name: user.name,
-          age: calculateAge(user.dateOfBirth),
+          age: otherAge,
           cellId,
           displayLat: display.lat,
           displayLng: display.lng,
@@ -4017,7 +4093,7 @@ export const getNearbyUsers = query({
           freshness,
           freshnessLabel,
           photoUrl,
-          isVerified: user.isVerified || candidateStatus === 'verified',
+          isVerified: user.isVerified || (user.verificationStatus || 'unverified') === 'verified',
           verificationStatus: user.verificationStatus ?? 'unverified',
           strongPrivacyMode: user.strongPrivacyMode ?? false,
           hideDistance: user.hideDistance ?? false,
@@ -4056,27 +4132,60 @@ export const getNearbyUsers = query({
 // ---------------------------------------------------------------------------
 export const markDailyCrossedProfilesShown = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     targetUserIds: v.array(v.id('users')),
   },
   handler: async (ctx, args) => {
-    const viewerId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    const viewerId = await resolveUserIdFromSessionToken(ctx, args.token);
     if (!viewerId) {
       return { success: false, reason: 'unauthorized' };
     }
 
     const now = Date.now();
     const dateKey = getDailyShownDateKey(now);
+    const viewer = await ctx.db.get(viewerId);
+    const viewerEligibility = checkNearbyHardEligibility(viewer, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!viewerEligibility.ok) {
+      return { success: false, reason: viewerEligibility.reason };
+    }
+    const exclusions = await loadDiscoveryExclusions(ctx, viewerId);
     // Bound the work per call so a misbehaving client cannot make us scan
     // unbounded pairs in a single mutation.
     const uniqueTargetIds = [...new Set(args.targetUserIds.map(String))]
       .filter((id) => id !== (viewerId as string))
+      .filter((id) => !isDiscoveryExcluded(exclusions, id))
       .slice(0, MAX_DAILY_NEW_CROSSED_PROFILES * 2) as Id<'users'>[];
 
     let inserted = 0;
     let updated = 0;
 
     for (const targetUserId of uniqueTargetIds) {
+      const targetUser = await ctx.db.get(targetUserId);
+      const targetEligibility = checkNearbyHardEligibility(targetUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+      });
+      if (!targetEligibility.ok) continue;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: viewerEligibility.user,
+        candidate: targetEligibility.user,
+        viewerAge: viewerEligibility.age,
+        candidateAge: targetEligibility.age,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
+
       const pairKey = makeDailyShownPairKey(viewerId, targetUserId);
       const existingShown = await ctx.db
         .query('crossedPathDailyShown')
@@ -4174,10 +4283,9 @@ export const cleanupExpiredCrossedPathDailyShown = internalMutation({
 // ---------------------------------------------------------------------------
 
 export const getCrossPathHistory = query({
-  args: { authUserId: v.string() }, // CONTRACT FIX: Changed from userId: v.id('users')
-  handler: async (ctx, { authUserId }) => {
-    // Resolve authUserId to Convex user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  args: { token: v.string() },
+  handler: async (ctx, { token }) => {
+    const userId = await resolveUserIdFromSessionToken(ctx, token);
     if (!userId) {
       return []; // Graceful fallback
     }
@@ -4187,24 +4295,30 @@ export const getCrossPathHistory = query({
     // Get current user for distance calculation
     const currentUser = await ctx.db.get(userId);
 
-    // P2 — Consent read-gate. Requester must have accepted the current
-    // Nearby / Crossed Paths disclosure before any history payload is
-    // returned. Mirrors the gate on getNearbyUsers and the existing
-    // write-path gates.
-    if (!currentUser || !hasNearbyConsent(currentUser)) return [];
+    const currentEligibility = checkNearbyHardEligibility(currentUser, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!currentEligibility.ok) return [];
+    const viewerUser = currentEligibility.user;
 
-    const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
-    const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
+    const myLat = viewerUser.publishedLat ?? viewerUser.latitude;
+    const myLng = viewerUser.publishedLng ?? viewerUser.longitude;
 
     // P1-3: Block filter — blocked users (either direction) must never
     // appear in crossed-paths history.
-    // P1 EXCLUSION: also hide unmatched pairs (bidirectional) and users the
-    // viewer has reported (one-way).
+    // P1 EXCLUSION: also hide unmatched pairs and reported pairs in either
+    // direction.
+    const exclusions = await loadDiscoveryExclusions(ctx, userId);
     const {
       blockedUserIds: blockedIds,
       unmatchedUserIds,
       viewerReportedIds,
-    } = await loadDiscoveryExclusions(ctx, userId);
+    } = exclusions;
 
     // Pre-fetch swipes for skip filtering (matches Discover behavior per Rule 9)
     const mySwipes = await ctx.db
@@ -4243,8 +4357,8 @@ export const getCrossPathHistory = query({
         // in either direction (using pre-fetched set for O(1) lookup).
         const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
         if (blockedIds.has(otherUserId as string)) return false;
-        // P1 EXCLUSION: drop history rows for unmatched pairs and viewer-reported
-        // users so history stays consistent with the Nearby/Discover surfaces.
+        // P1 EXCLUSION: drop history rows for unmatched/reported pairs so
+        // history stays consistent with the Nearby/Discover surfaces.
         if (unmatchedUserIds.has(otherUserId as string)) return false;
         if (viewerReportedIds.has(otherUserId as string)) return false;
 
@@ -4314,12 +4428,24 @@ export const getCrossPathHistory = query({
     for (const entry of all) {
       const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
       const otherUser = usersMap.get(otherUserId as string);
-      if (!otherUser || !otherUser.isActive) continue;
-
-      // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
-      if (otherUser.nearbyEnabled === false) continue;
-      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
-      if (otherUser.incognitoMode === true) continue;
+      const otherEligibility = checkNearbyHardEligibility(otherUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+      });
+      if (!otherUser || !otherEligibility.ok) continue;
+      const otherUserAge = otherEligibility.age;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: viewerUser,
+        candidate: otherEligibility.user,
+        viewerAge: currentEligibility.age,
+        candidateAge: otherUserAge,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
 
       const photoUrl = photosMap.get(otherUserId as string) ?? null;
       if (!photoUrl) continue;
@@ -4402,7 +4528,7 @@ export const getCrossPathHistory = query({
         id: entry._id,
         otherUserId,
         otherUserName: otherUser.name,
-        otherUserAge: calculateAge(otherUser.dateOfBirth),
+        otherUserAge,
         areaName: displayAreaName,
         // Approximate crossing location (not current location — persists across travel)
         crossedLatApprox: approxLat,
@@ -4471,18 +4597,17 @@ export const getCrossPathHistory = query({
 // hideCrossedPath — mark a crossed path as hidden for the current user
 // ---------------------------------------------------------------------------
 
-// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
+// Uses token-derived viewer identity to prevent spoofing.
 export const hideCrossedPath = mutation({
   args: {
-    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
+    token: v.string(),
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { authUserId, historyId } = args;
+    const { token, historyId } = args;
     const now = Date.now();
 
-    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveUserIdFromSessionToken(ctx, token);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -4520,18 +4645,17 @@ export const hideCrossedPath = mutation({
 // deleteCrossedPath — permanently delete a crossed path entry
 // ---------------------------------------------------------------------------
 
-// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
+// Uses token-derived viewer identity to prevent spoofing.
 export const deleteCrossedPath = mutation({
   args: {
-    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
+    token: v.string(),
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { authUserId, historyId } = args;
+    const { token, historyId } = args;
     const now = Date.now();
 
-    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveUserIdFromSessionToken(ctx, token);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -4594,7 +4718,7 @@ export const cleanupExpiredHistory = internalMutation({
 
 export const getDelayedCrossedPathEntries = query({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
     delayMs: v.optional(v.number()),   // Default: 10 minutes (600_000)
     windowMs: v.optional(v.number()),  // Default: 72 hours (259_200_000)
     radiusMeters: v.optional(v.number()), // Optional: filter by distance
@@ -4603,14 +4727,28 @@ export const getDelayedCrossedPathEntries = query({
   },
   handler: async (ctx, args) => {
     const {
-      userId,
+      token,
       delayMs = 10 * 60 * 1000,         // 10 minutes
       windowMs = 72 * 60 * 60 * 1000,   // 72 hours
       radiusMeters,
       myLat,
       myLng,
     } = args;
+    const userId = await resolveUserIdFromSessionToken(ctx, token);
+    if (!userId) return [];
     const now = Date.now();
+    const viewer = await ctx.db.get(userId);
+    const viewerEligibility = checkNearbyHardEligibility(viewer, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!viewerEligibility.ok) return [];
+    const viewerUser = viewerEligibility.user;
+    const exclusions = await loadDiscoveryExclusions(ctx, userId);
 
     // Time bounds: entries must be past delay but within window
     const visibleAfter = now - windowMs;   // oldest allowed
@@ -4678,13 +4816,28 @@ export const getDelayedCrossedPathEntries = query({
     }> = [];
     for (const entry of filtered) {
       const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
-      if (dismissedOtherUserIds.has(otherUserId as string)) continue;
+      const otherUserKey = otherUserId as string;
+      if (dismissedOtherUserIds.has(otherUserKey)) continue;
+      if (isDiscoveryExcluded(exclusions, otherUserKey)) continue;
 
       const otherUser = await ctx.db.get(otherUserId);
-      if (!otherUser || !otherUser.isActive) continue;
-      if (otherUser.nearbyEnabled === false) continue;
-      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
-      if (otherUser.incognitoMode === true) continue;
+      const otherEligibility = checkNearbyHardEligibility(otherUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+      });
+      if (!otherUser || !otherEligibility.ok) continue;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: viewerUser,
+        candidate: otherEligibility.user,
+        viewerAge: viewerEligibility.age,
+        candidateAge: otherEligibility.age,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
 
       visibleEntries.push({ entry, otherUserId });
     }
@@ -4711,14 +4864,13 @@ export const getDelayedCrossedPathEntries = query({
 
 export const getCrossedPaths = query({
   args: {
-    authUserId: v.string(), // CONTRACT FIX: Changed from userId: v.id('users') to authUserId
+    token: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, limit = 15 } = args;
+    const { token, limit = 15 } = args;
 
-    // Resolve authUserId to Convex user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await resolveUserIdFromSessionToken(ctx, token);
     if (!userId) {
       return []; // Graceful fallback for missing user
     }
@@ -4726,8 +4878,19 @@ export const getCrossedPaths = query({
 
     // Get current user for distance calculation
     const currentUser = await ctx.db.get(userId);
-    const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
-    const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
+    const currentEligibility = checkNearbyHardEligibility(currentUser, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!currentEligibility.ok) return [];
+    const viewerUser = currentEligibility.user;
+    const myLat = viewerUser.publishedLat ?? viewerUser.latitude;
+    const myLng = viewerUser.publishedLng ?? viewerUser.longitude;
+    const exclusions = await loadDiscoveryExclusions(ctx, userId);
 
     const asUser1 = await ctx.db
       .query('crossedPaths')
@@ -4740,7 +4903,11 @@ export const getCrossedPaths = query({
       .take(limit);
 
     const allCrossedPaths = [...asUser1, ...asUser2].filter(
-      (cp) => cp.count > 0 && !isPairDismissedForViewer(cp, userId),
+      (cp) => {
+        if (cp.count <= 0 || isPairDismissedForViewer(cp, userId)) return false;
+        const otherUserId = cp.user1Id === userId ? cp.user2Id : cp.user1Id;
+        return !isDiscoveryExcluded(exclusions, otherUserId as string);
+      },
     );
 
     // Sort by recency only. Do not rank by legacy crossingLatitude/Longitude
@@ -4775,12 +4942,24 @@ export const getCrossedPaths = query({
       const otherUserId = cp.user1Id === userId ? cp.user2Id : cp.user1Id;
       const otherUser = usersMap.get(otherUserId as string);
 
-      if (!otherUser || !otherUser.isActive) continue;
-
-      // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
-      if (otherUser.nearbyEnabled === false) continue;
-      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
-      if (otherUser.incognitoMode === true) continue;
+      const otherEligibility = checkNearbyHardEligibility(otherUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+      });
+      if (!otherUser || !otherEligibility.ok) continue;
+      const otherAge = otherEligibility.age;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: viewerUser,
+        candidate: otherEligibility.user,
+        viewerAge: currentEligibility.age,
+        candidateAge: otherAge,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
 
       const photoUrl = photosMap.get(otherUserId as string) ?? null;
       if (!photoUrl) continue;
@@ -4847,7 +5026,7 @@ export const getCrossedPaths = query({
         user: {
           id: otherUserId,
           name: otherUser.name,
-          age: calculateAge(otherUser.dateOfBirth),
+          age: otherAge,
           photoUrl,
           isVerified: otherUser.isVerified,
         },
@@ -4864,28 +5043,51 @@ export const getCrossedPaths = query({
 
 export const getCrossedPathCount = query({
   args: {
-    user1Id: v.id('users'),
-    user2Id: v.id('users'),
+    token: v.string(),
+    otherUserId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { user1Id, user2Id } = args;
+    const user1Id = await resolveUserIdFromSessionToken(ctx, args.token);
+    if (!user1Id) return { count: 0, exists: false };
+    const user2Id = args.otherUserId;
     const now = Date.now();
+    const exclusions = await loadDiscoveryExclusions(ctx, user1Id);
+    if (isDiscoveryExcluded(exclusions, user2Id as string)) {
+      return { count: 0, exists: false };
+    }
 
     const [user1, user2] = await Promise.all([
       ctx.db.get(user1Id),
       ctx.db.get(user2Id),
     ]);
     if (!user1 || !user2) return { count: 0, exists: false };
-    if (user1.incognitoMode === true || user2.incognitoMode === true) {
+    const user1Eligibility = checkNearbyHardEligibility(user1, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    const user2Eligibility = checkNearbyHardEligibility(user2, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireNearbyVisible: true,
+      requireCrossedPathRecording: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!user1Eligibility.ok || !user2Eligibility.ok) {
       return { count: 0, exists: false };
     }
-    if (user1.nearbyEnabled === false || user2.nearbyEnabled === false) {
-      return { count: 0, exists: false };
-    }
-    if (
-      (user1.nearbyPausedUntil && user1.nearbyPausedUntil > now) ||
-      (user2.nearbyPausedUntil && user2.nearbyPausedUntil > now)
-    ) {
+    const pairEligibility = checkNearbyPairHardEligibility({
+      viewer: user1Eligibility.user,
+      candidate: user2Eligibility.user,
+      viewerAge: user1Eligibility.age,
+      candidateAge: user2Eligibility.age,
+      exclusions,
+    });
+    if (!pairEligibility.ok) {
       return { count: 0, exists: false };
     }
 
@@ -4914,10 +5116,23 @@ export const getCrossedPathCount = query({
 // ---------------------------------------------------------------------------
 
 export const getCrossedPathsCount = query({
-  args: { userId: v.id('users') },
+  args: { token: v.string() },
   handler: async (ctx, args) => {
-    const { userId } = args;
+    const userId = await resolveUserIdFromSessionToken(ctx, args.token);
+    if (!userId) return 0;
     const now = Date.now();
+    const viewer = await ctx.db.get(userId);
+    const viewerEligibility = checkNearbyHardEligibility(viewer, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!viewerEligibility.ok) return 0;
+    const viewerUser = viewerEligibility.user;
+    const exclusions = await loadDiscoveryExclusions(ctx, userId);
 
     const asUser1 = await ctx.db
       .query('crossedPaths')
@@ -4936,11 +5151,25 @@ export const getCrossedPathsCount = query({
     let count = 0;
     for (const cp of visibleCrossedPaths) {
       const otherUserId = cp.user1Id === userId ? cp.user2Id : cp.user1Id;
+      if (isDiscoveryExcluded(exclusions, otherUserId as string)) continue;
       const otherUser = await ctx.db.get(otherUserId);
-      if (!otherUser || !otherUser.isActive) continue;
-      if (otherUser.nearbyEnabled === false) continue;
-      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
-      if (otherUser.incognitoMode === true) continue;
+      const otherEligibility = checkNearbyHardEligibility(otherUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+      });
+      if (!otherEligibility.ok) continue;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: viewerUser,
+        candidate: otherEligibility.user,
+        viewerAge: viewerEligibility.age,
+        candidateAge: otherEligibility.age,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
       count++;
     }
 
@@ -4950,16 +5179,14 @@ export const getCrossedPathsCount = query({
 
 // ---------------------------------------------------------------------------
 // getCrossedPathSummary — get count and latest timestamp for badge display
-// FIX: Use userId (authUserId) instead of token for consistency
 // ---------------------------------------------------------------------------
 
 export const getCrossedPathSummary = query({
   args: {
-    userId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    // Resolve authUserId to Convex ID
-    const userId = await resolveUserIdByAuthId(ctx, args.userId);
+    const userId = await resolveUserIdFromSessionToken(ctx, args.token);
     if (!userId) {
       return { count: 0, latestCreatedAt: null };
     }
@@ -4970,6 +5197,18 @@ export const getCrossedPathSummary = query({
     if (!requester || !hasNearbyConsent(requester)) {
       return { count: 0, latestCreatedAt: null };
     }
+    const requesterEligibility = checkNearbyHardEligibility(requester, {
+      now: Date.now(),
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!requesterEligibility.ok) {
+      return { count: 0, latestCreatedAt: null };
+    }
+    const requesterUser = requesterEligibility.user;
 
     // Get all crossed paths for this user
     const [asUser1, asUser2] = await Promise.all([
@@ -4989,15 +5228,30 @@ export const getCrossedPathSummary = query({
 
     // Find the latest createdAt timestamp
     const now = Date.now();
+    const exclusions = await loadDiscoveryExclusions(ctx, userId);
     let count = 0;
     let latestCreatedAt: number | null = null;
     for (const path of allCrossedPaths) {
       const otherUserId = path.user1Id === userId ? path.user2Id : path.user1Id;
+      if (isDiscoveryExcluded(exclusions, otherUserId as string)) continue;
       const otherUser = await ctx.db.get(otherUserId);
-      if (!otherUser || !otherUser.isActive) continue;
-      if (otherUser.nearbyEnabled === false) continue;
-      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
-      if (otherUser.incognitoMode === true) continue;
+      const otherEligibility = checkNearbyHardEligibility(otherUser, {
+        now,
+        requireProfileComplete: true,
+        requireVerification: true,
+        requireNearbyVisible: true,
+        requireCrossedPathRecording: true,
+        allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+      });
+      if (!otherEligibility.ok) continue;
+      const pairEligibility = checkNearbyPairHardEligibility({
+        viewer: requesterUser,
+        candidate: otherEligibility.user,
+        viewerAge: requesterEligibility.age,
+        candidateAge: otherEligibility.age,
+        exclusions,
+      });
+      if (!pairEligibility.ok) continue;
 
       count++;
       const ts = path.lastCrossedAt ?? path._creationTime;
@@ -5026,18 +5280,52 @@ export const getCrossedPathSummary = query({
  */
 export const getSharedPlaces = query({
   args: {
-    viewerId: v.id('users'),    // Current user viewing the profile
+    token: v.string(),
     profileUserId: v.id('users'), // User whose profile is being viewed
   },
   handler: async (ctx, args) => {
-    const { viewerId, profileUserId } = args;
+    const viewerId = await resolveUserIdFromSessionToken(ctx, args.token);
+    if (!viewerId) return [];
+    const { profileUserId } = args;
 
     // Don't show shared places for self
     if (viewerId === profileUserId) {
       return [];
     }
 
+    const [viewer, profileUser, exclusions] = await Promise.all([
+      ctx.db.get(viewerId),
+      ctx.db.get(profileUserId),
+      loadDiscoveryExclusions(ctx, viewerId),
+    ]);
     const now = Date.now();
+    const viewerEligibility = checkNearbyHardEligibility(viewer, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireCrossedPathRecording: true,
+      requireConsent: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    const profileEligibility = checkNearbyHardEligibility(profileUser, {
+      now,
+      requireProfileComplete: true,
+      requireVerification: true,
+      requireNearbyVisible: true,
+      requireCrossedPathRecording: true,
+      allowDevVerificationBypass: isNearbyDevVerificationBypass(),
+    });
+    if (!viewerEligibility.ok || !profileEligibility.ok) return [];
+    if (isDiscoveryExcluded(exclusions, profileUserId as string)) return [];
+    const pairEligibility = checkNearbyPairHardEligibility({
+      viewer: viewerEligibility.user,
+      candidate: profileEligibility.user,
+      viewerAge: viewerEligibility.age,
+      candidateAge: profileEligibility.age,
+      exclusions,
+    });
+    if (!pairEligibility.ok) return [];
+
     const windowStart = now - SHARED_PLACES_WINDOW_MS;
 
     // Query history entries for both users
@@ -5151,15 +5439,36 @@ function toRad(deg: number): number {
   return deg * (Math.PI / 180);
 }
 
-function calculateAge(dateOfBirth: string): number {
+function calculateAge(dateOfBirth?: string | null): number | null {
+  if (typeof dateOfBirth !== 'string') return null;
+  const trimmedDateOfBirth = dateOfBirth.trim();
+  if (!trimmedDateOfBirth) return null;
+
   const today = new Date();
-  const birthDate = new Date(dateOfBirth);
+  const isoDateParts = trimmedDateOfBirth.match(/^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/);
+  const birthDate = isoDateParts
+    ? new Date(
+        Number(isoDateParts[1]),
+        Number(isoDateParts[2]) - 1,
+        Number(isoDateParts[3]),
+      )
+    : new Date(trimmedDateOfBirth);
+  if (!Number.isFinite(birthDate.getTime())) return null;
+  if (
+    isoDateParts &&
+    (birthDate.getFullYear() !== Number(isoDateParts[1]) ||
+      birthDate.getMonth() !== Number(isoDateParts[2]) - 1 ||
+      birthDate.getDate() !== Number(isoDateParts[3]))
+  ) {
+    return null;
+  }
+
   let age = today.getFullYear() - birthDate.getFullYear();
   const m = today.getMonth() - birthDate.getMonth();
   if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
     age--;
   }
-  return age;
+  return Number.isFinite(age) && age >= 18 && age < 120 ? age : null;
 }
 
 /** Simple deterministic hash for seeding jitter. */

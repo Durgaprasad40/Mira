@@ -157,13 +157,12 @@ export default function NearbySettingsScreen() {
         return;
       }
 
-      if (!userId) return;
+      if (!token) return;
       setIsSaving(true);
 
       try {
-        // FIX: Backend expects { authUserId }, not { token }
         await updateNearbySettingsMut({
-          authUserId: userId,
+          token,
           [field]: value,
         });
       } catch (error: any) {
@@ -178,7 +177,7 @@ export default function NearbySettingsScreen() {
         setIsSaving(false);
       }
     },
-    [userId, currentUser, updateNearbySettingsMut]
+    [token, currentUser, updateNearbySettingsMut]
   );
 
   const hasNearbyConsent = isDemoMode || hasAcceptedNearbyConsent(currentUser);
@@ -227,10 +226,10 @@ export default function NearbySettingsScreen() {
           setIsPaused(false);
           setPausedUntil(null);
 
-          if (!isDemoMode && userId) {
+          if (!isDemoMode && userId && token) {
             setIsSaving(true);
             await updateNearbySettingsMut({
-              authUserId: userId,
+              token,
               nearbyEnabled: true,
               recordCrossedPaths: true,
             });
@@ -256,10 +255,10 @@ export default function NearbySettingsScreen() {
         await disableBackgroundCrossedPaths();
         await refreshBackgroundStatus();
 
-        if (!isDemoMode && userId) {
+        if (!isDemoMode && token) {
           setIsSaving(true);
           await updateNearbySettingsMut({
-            authUserId: userId,
+            token,
             nearbyEnabled: false,
             recordCrossedPaths: false,
           });
@@ -284,6 +283,7 @@ export default function NearbySettingsScreen() {
       pauseNearbyMut,
       refreshBackgroundStatus,
       updateNearbySettingsMut,
+      token,
       userId,
     ],
   );

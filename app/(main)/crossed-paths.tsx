@@ -159,8 +159,8 @@ export default function CrossedPathsScreen() {
   const router = useRouter();
   const isDemo = isDemoMode;
 
-  // Auth store - CONTRACT FIX: Use userId instead of token
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // Local state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -179,10 +179,9 @@ export default function CrossedPathsScreen() {
   const hasAnimatedRef = useRef(false);
 
   // Query crossed paths history (live mode only)
-  // CONTRACT FIX: Use authUserId instead of token
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemo && userId ? { authUserId: userId } : 'skip'
+    !isDemo && token ? { token } : 'skip'
   );
 
   // Mutations for hide/delete (live mode only)
@@ -224,7 +223,7 @@ export default function CrossedPathsScreen() {
   // "new" surfaces vs re-displays. The markerKey guard prevents the same
   // identical list from being re-marked on every render.
   useEffect(() => {
-    if (isDemo || !userId || crossedPaths.length === 0) return;
+    if (isDemo || !token || crossedPaths.length === 0) return;
     const targetUserIds = Array.from(
       new Set(
         crossedPaths
@@ -234,12 +233,12 @@ export default function CrossedPathsScreen() {
     );
     if (targetUserIds.length === 0) return;
 
-    const markerKey = `${userId}:${targetUserIds.join('|')}`;
+    const markerKey = `${userId ?? 'viewer'}:${targetUserIds.join('|')}`;
     if (markedDailyShownKeyRef.current === markerKey) return;
     markedDailyShownKeyRef.current = markerKey;
 
     markDailyCrossedProfilesShown({
-      authUserId: userId,
+      token,
       targetUserIds: targetUserIds as any,
     }).catch((err) => {
       if (__DEV__) {
@@ -248,7 +247,7 @@ export default function CrossedPathsScreen() {
         });
       }
     });
-  }, [isDemo, userId, crossedPaths, markDailyCrossedProfilesShown]);
+  }, [isDemo, token, userId, crossedPaths, markDailyCrossedProfilesShown]);
 
   // ---------------------------------------------------------------------------
   // Section Data - Split into "Just Crossed", "Frequent Crosses", "Recent"
@@ -415,11 +414,11 @@ export default function CrossedPathsScreen() {
               return;
             }
 
-            // Live mode: call mutation - CONTRACT FIX: Use authUserId
-            if (!userId) return;
+            // Live mode: call mutation with token-derived viewer identity.
+            if (!token) return;
             try {
               await hideCrossedPathMutation({
-                authUserId: userId,
+                token,
                 historyId: item.id as Id<'crossPathHistory'>,
               });
             } catch (error) {
@@ -430,7 +429,7 @@ export default function CrossedPathsScreen() {
         },
       ]
     );
-  }, [isDemo, userId, hideCrossedPathMutation]);
+  }, [isDemo, token, hideCrossedPathMutation]);
 
   const handleDeletePress = useCallback((item: CrossedPathItem) => {
     Alert.alert(
@@ -448,11 +447,11 @@ export default function CrossedPathsScreen() {
               return;
             }
 
-            // Live mode: call mutation - CONTRACT FIX: Use authUserId
-            if (!userId) return;
+            // Live mode: call mutation with token-derived viewer identity.
+            if (!token) return;
             try {
               await deleteCrossedPathMutation({
-                authUserId: userId,
+                token,
                 historyId: item.id as Id<'crossPathHistory'>,
               });
             } catch (error) {
@@ -463,7 +462,7 @@ export default function CrossedPathsScreen() {
         },
       ]
     );
-  }, [isDemo, userId, deleteCrossedPathMutation]);
+  }, [isDemo, token, deleteCrossedPathMutation]);
 
   const handleOptionsPress = useCallback((item: CrossedPathItem) => {
     Alert.alert(

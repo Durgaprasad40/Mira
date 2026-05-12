@@ -34,7 +34,7 @@ const MAX_ZONES = 3;
 
 export default function PrivacyZonesScreen() {
   const router = useRouter();
-  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const { forceGetCurrentLocation, isLoading: isLocating } = useLocation();
 
   const [selectedLabel, setSelectedLabel] = useState('Home');
@@ -42,10 +42,10 @@ export default function PrivacyZonesScreen() {
   const [pendingZoneId, setPendingZoneId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  const shouldQuery = !isDemoMode && !!userId;
+  const shouldQuery = !isDemoMode && !!token;
   const zonesQuery = useQuery(
     api.crossedPaths.listPrivacyZones,
-    shouldQuery ? { authUserId: userId! } : 'skip',
+    shouldQuery && token ? { token } : 'skip',
   );
   const zones = useMemo(
     () => (Array.isArray(zonesQuery) ? (zonesQuery as PrivacyZone[]) : []),
@@ -66,7 +66,7 @@ export default function PrivacyZonesScreen() {
       Toast.show('Privacy Zones are available in live mode.');
       return;
     }
-    if (!userId) {
+    if (!token) {
       Toast.show('Please log in to manage Privacy Zones.');
       return;
     }
@@ -84,14 +84,14 @@ export default function PrivacyZonesScreen() {
       }
 
       const payload: {
-        authUserId: string;
+        token: string;
         zoneId?: Id<'privacyZones'>;
         label: string;
         latitude: number;
         longitude: number;
         radiusMeters: number;
       } = {
-        authUserId: userId,
+        token,
         label: selectedLabel,
         latitude: location.latitude,
         longitude: location.longitude,
@@ -116,7 +116,7 @@ export default function PrivacyZonesScreen() {
   };
 
   const handleDelete = (zone: PrivacyZone) => {
-    if (!userId || pendingZoneId) return;
+    if (!token || pendingZoneId) return;
 
     Alert.alert(
       'Delete Privacy Zone?',
@@ -130,7 +130,7 @@ export default function PrivacyZonesScreen() {
             setPendingZoneId(zone._id);
             try {
               await deletePrivacyZone({
-                authUserId: userId,
+                token,
                 zoneId: zone._id,
               });
               Toast.show(`${zone.label} zone deleted`);
