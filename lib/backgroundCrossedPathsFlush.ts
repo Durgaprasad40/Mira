@@ -1,4 +1,5 @@
 import { ConvexHttpClient } from 'convex/browser';
+import { Platform } from 'react-native';
 import { api } from '@/convex/_generated/api';
 import {
   BG_CROSSED_PATHS_FEATURE_READY,
@@ -11,8 +12,11 @@ import {
   type BufferedSample,
 } from '@/stores/backgroundLocationBufferStore';
 import { recordBgCrossedPathsBreadcrumb } from '@/lib/backgroundCrossedPathsTelemetry';
+import { captureException as sentryCaptureException } from '@/lib/sentry';
 
 const FLUSH_BATCH_LIMIT = 50;
+const SENTRY_THROTTLE_MS = 10 * 60 * 1000;
+const sentryLastCapturedAt = new Map<string, number>();
 
 export type BackgroundFlushResult = {
   flushed: number;
@@ -37,8 +41,51 @@ function isTransientFlushReason(reason: string | undefined): boolean {
   return (
     reason === 'rate_limited' ||
     reason === 'rate_limited_short' ||
-    reason === 'rate_limited_daily'
+    reason === 'rate_limited_daily' ||
+    reason === 'feature_not_ready' ||
+    reason === 'feature_disabled_server' ||
+    reason === 'consent_required' ||
+    reason === 'bg_consent_required' ||
+    reason === 'background_consent_required'
   );
+}
+
+function normalizeServerBackgroundReason(reason: string | undefined | null):
+  | 'feature_disabled_server'
+  | 'consent_required'
+  | null {
+  if (reason === 'feature_not_ready' || reason === 'feature_disabled_server') {
+    return 'feature_disabled_server';
+  }
+  if (
+    reason === 'consent_required' ||
+    reason === 'bg_consent_required' ||
+    reason === 'background_consent_required'
+  ) {
+    return 'consent_required';
+  }
+  return null;
+}
+
+function captureFlushBlockOnce(reason: string): void {
+  const key = `flush_background_samples:${reason}`;
+  const now = Date.now();
+  const lastCapturedAt = sentryLastCapturedAt.get(key) ?? 0;
+  if (now - lastCapturedAt < SENTRY_THROTTLE_MS) return;
+  sentryLastCapturedAt.set(key, now);
+
+  try {
+    sentryCaptureException(new Error(`Nearby background flush blocked: ${reason}`), {
+      tags: {
+        area: 'nearby',
+        feature: 'background_crossed_paths',
+        action: 'flush_background_samples',
+        reason,
+        platform: Platform.OS,
+      },
+      level: 'warning',
+    });
+  } catch {}
 }
 
 function logFlushSkipped(logPrefix: string, reason: string): void {
@@ -93,6 +140,10 @@ export async function flushBufferedBackgroundSamples(args: {
     const reason = res?.reason;
     const accepted = typeof res?.accepted === 'number' ? res.accepted : 0;
     const retained = isTransientFlushReason(reason);
+    const blockedReason = normalizeServerBackgroundReason(reason);
+    if (blockedReason) {
+      captureFlushBlockOnce(blockedReason);
+    }
     if (!retained) {
       backgroundLocationBuffer.drainFirst(slice.length);
     }
@@ -153,6 +204,7 @@ export async function flushBufferedBackgroundSamplesFromStoredSession(): Promise
       });
       return (await client.mutation(api.crossedPaths.recordLocationBatch, {
         userId: userId as any,
+        token: auth.token ?? undefined,
         samples,
         deviceHash,
       })) as RecordLocationBatchResult | undefined;

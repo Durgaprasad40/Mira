@@ -7,6 +7,10 @@ import { validateAccess } from "./devReset";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateOwnership, validateSessionToken } from "./helpers";
 import { BG_LOCATION_CONSENT_VERSION, NEARBY_CONSENT_VERSION } from "./crossedPaths";
 import {
+  hasCurrentBgCrossedPathsConsentOnUser,
+  isBgCrossedPathsEnabled,
+} from "./backgroundCrossedPathsPolicy";
+import {
   FRONTEND_RELATIONSHIP_INTENT_IDS,
   normalizeRelationshipIntentValues,
 } from "../lib/discoveryNaming";
@@ -1107,12 +1111,11 @@ export const updateNearbySettings = mutation({
     // OFF is always allowed — users must always be able to disable.
     if (backgroundLocationEnabled !== undefined) {
       if (backgroundLocationEnabled === true) {
-        const hasBgConsent =
-          typeof user.backgroundLocationConsentAt === 'number' &&
-          user.backgroundLocationConsentAt > 0 &&
-          user.backgroundLocationConsentVersion === BG_LOCATION_CONSENT_VERSION;
-        if (!hasBgConsent) {
-          throw new Error('background_consent_required');
+        if (!(await isBgCrossedPathsEnabled(ctx))) {
+          throw new Error('feature_not_ready');
+        }
+        if (!hasCurrentBgCrossedPathsConsentOnUser(user)) {
+          throw new Error('consent_required');
         }
       }
       (updates as Record<string, unknown>).backgroundLocationEnabled = backgroundLocationEnabled;
@@ -1179,11 +1182,7 @@ async function readBgCrossedPathsFlag(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
 ): Promise<boolean> {
-  const row = await ctx.db
-    .query('featureFlags')
-    .withIndex('by_name', (q: any) => q.eq('name', 'bgCrossedPathsEnabled'))
-    .first();
-  return row?.value === true;
+  return isBgCrossedPathsEnabled(ctx);
 }
 
 export const startDiscoveryMode = mutation({
@@ -1198,14 +1197,7 @@ export const startDiscoveryMode = mutation({
     // the featureFlags row says otherwise. Returning a benign disabled
     // response keeps cached old clients from crashing.
     if (!(await readBgCrossedPathsFlag(ctx))) {
-      return {
-        success: true,
-        disabled: true,
-        reason: 'background_location_disabled',
-        startedAt: null,
-        expiresAt: null,
-        durationMs: 0,
-      };
+      throw new Error('feature_not_ready');
     }
 
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -1217,12 +1209,8 @@ export const startDiscoveryMode = mutation({
 
     // Phase 1 background restore: must have explicit background-location
     // consent before Discovery Mode can be started server-side.
-    const hasBgConsent =
-      typeof user.backgroundLocationConsentAt === 'number' &&
-      user.backgroundLocationConsentAt > 0 &&
-      user.backgroundLocationConsentVersion === BG_LOCATION_CONSENT_VERSION;
-    if (!hasBgConsent) {
-      throw new Error('background_consent_required');
+    if (!hasCurrentBgCrossedPathsConsentOnUser(user)) {
+      throw new Error('consent_required');
     }
 
     const now = Date.now();
@@ -1290,6 +1278,9 @@ export const acceptBackgroundLocationConsent = mutation({
     }
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');
+    if (!(await isBgCrossedPathsEnabled(ctx))) {
+      throw new Error('feature_not_ready');
+    }
 
     // Foreground consent is a prerequisite — a user who hasn't accepted the
     // baseline Nearby disclosure cannot accept the stricter background one.

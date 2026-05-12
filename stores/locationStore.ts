@@ -44,7 +44,7 @@ import { markTiming } from '@/utils/startupTiming';
 const MAX_ACCEPTABLE_ACCURACY_METERS = 80;
 
 /** Minimum movement in meters to consider as real movement (not jitter) */
-const MIN_MOVEMENT_METERS = 30;
+const MIN_MOVEMENT_METERS = 25;
 
 /** Maximum realistic speed in meters per second (~200 km/h for edge cases like trains) */
 const MAX_SPEED_METERS_PER_SEC = 55; // ~200 km/h

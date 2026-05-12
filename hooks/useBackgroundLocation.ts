@@ -42,7 +42,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { AppState, Platform, type AppStateStatus } from 'react-native';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
-import { useMutation } from 'convex/react';
+import { useConvex, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -62,6 +62,51 @@ import { recordBgCrossedPathsBreadcrumb } from '@/lib/backgroundCrossedPathsTele
 import { BACKGROUND_LOCATION_TASK_NAME } from '@/tasks/backgroundLocationTask';
 import { backgroundLocationBuffer } from '@/stores/backgroundLocationBufferStore';
 import { getAuthBootCache } from '@/stores/authBootCache';
+import { captureException as sentryCaptureException } from '@/lib/sentry';
+
+// Native rejection from expo-location when the AndroidManifest is missing
+// ACCESS_BACKGROUND_LOCATION (or similar misconfiguration). We sniff for
+// these markers so the UI can render a friendly "needs app update" message
+// instead of the raw native error string.
+const NATIVE_MANIFEST_MARKERS = [
+  'ACCESS_BACKGROUND_LOCATION',
+  'AndroidManifest',
+  'ExpoLocation.getBackgroundPermissionsAsync',
+  'ExpoLocation.requestBackgroundPermissionsAsync',
+];
+
+function isNativeManifestError(err: unknown): boolean {
+  const msg = (err as Error)?.message || String(err ?? '');
+  return NATIVE_MANIFEST_MARKERS.some((m) => msg.includes(m));
+}
+
+function reportBgPermissionError(
+  err: unknown,
+  context: {
+    stage: 'get' | 'request';
+    nativeManifest: boolean;
+  },
+): void {
+  try {
+    sentryCaptureException(err, {
+      tags: {
+        area: 'nearby_settings',
+        feature: 'background_detection',
+        action: 'allow_background',
+        platform: Platform.OS,
+        stage: context.stage,
+        native_manifest_error: context.nativeManifest ? 'true' : 'false',
+      },
+      extra: {
+        message: (err as Error)?.message,
+      },
+      level: 'error',
+    });
+  } catch {
+    // Sentry helper is already defensive, but never let logging surface
+    // an error to the caller.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Public result types — the hook NEVER throws, callers branch on `ok`.
@@ -69,11 +114,18 @@ import { getAuthBootCache } from '@/stores/authBootCache';
 
 export type BgEnableFailureReason =
   | 'feature_not_ready'
+  | 'feature_disabled_server'
   | 'demo_mode'
   | 'not_authenticated'
   | 'foreground_permission_denied'
   | 'background_permission_denied'
+  // Native/Expo module rejected the call because the installed binary is
+  // missing manifest entries (e.g. ACCESS_BACKGROUND_LOCATION). Requires
+  // an app rebuild + reinstall — not something the user can fix in app.
+  | 'native_misconfigured'
+  | 'consent_required'
   | 'consent_failed'
+  | 'server_failed'
   | 'platform_setup_failed'
   | 'task_start_failed';
 
@@ -88,6 +140,67 @@ export type BgDisableResult =
   | { ok: false; reason: BgDisableFailureReason; message?: string };
 
 export type BgFlushResult = BackgroundFlushResult;
+
+type ServerBackgroundGateResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'feature_disabled_server' | 'consent_required' | 'not_authenticated' | 'server_failed';
+      message?: string;
+    };
+
+const SENTRY_THROTTLE_MS = 10 * 60 * 1000;
+const sentryLastCapturedAt = new Map<string, number>();
+
+function captureBgReliabilityIssue(
+  action: 'enable_background' | 'flush_background_samples',
+  reason: string,
+  err?: unknown,
+): void {
+  const key = `${action}:${reason}`;
+  const now = Date.now();
+  const lastCapturedAt = sentryLastCapturedAt.get(key) ?? 0;
+  if (now - lastCapturedAt < SENTRY_THROTTLE_MS) return;
+  sentryLastCapturedAt.set(key, now);
+
+  try {
+    sentryCaptureException(
+      err instanceof Error
+        ? err
+        : new Error(`Nearby background ${action} blocked: ${reason}`),
+      {
+        tags: {
+          area: 'nearby',
+          feature: 'background_crossed_paths',
+          action,
+          reason,
+          platform: Platform.OS,
+        },
+        extra: {
+          message: err ? String(err) : undefined,
+        },
+        level: reason === 'server_failed' ? 'error' : 'warning',
+      },
+    );
+  } catch {}
+}
+
+function normalizeServerBackgroundReason(reason: string | undefined | null):
+  | 'feature_disabled_server'
+  | 'consent_required'
+  | null {
+  if (reason === 'feature_not_ready' || reason === 'feature_disabled_server') {
+    return 'feature_disabled_server';
+  }
+  if (
+    reason === 'consent_required' ||
+    reason === 'bg_consent_required' ||
+    reason === 'background_consent_required'
+  ) {
+    return 'consent_required';
+  }
+  return null;
+}
 
 export type BgStatus = {
   /** Mirror of the client-side feature gate. Currently false. */
@@ -323,6 +436,7 @@ export async function recoverBackgroundCrossedPathsTasks(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export function useBackgroundLocation() {
+  const convex = useConvex();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   // Capture in a ref so async callbacks see the latest value without
@@ -343,6 +457,57 @@ export function useBackgroundLocation() {
    *  flushes. */
   const flushInFlightRef = useRef(false);
 
+  const checkServerBackgroundGate = useCallback(
+    async (): Promise<ServerBackgroundGateResult> => {
+      const sessionToken = typeof tokenRef.current === 'string' ? tokenRef.current.trim() : '';
+      if (!sessionToken || !userIdRef.current) {
+        return { ok: false, reason: 'not_authenticated' };
+      }
+
+      try {
+        const status = await convex.query(api.crossedPaths.getBackgroundCrossedPathsStatus, {
+          token: sessionToken,
+        });
+        recordBgCrossedPathsBreadcrumb('server_background_status_checked', {
+          serverFeatureEnabled: status.serverFeatureEnabled,
+          reconsentRequired: status.reconsentRequired,
+          reason: status.reason ?? 'ok',
+          platform: Platform.OS,
+        });
+
+        if (!status.serverFeatureEnabled) {
+          captureBgReliabilityIssue('enable_background', 'feature_disabled_server');
+          return {
+            ok: false,
+            reason: 'feature_disabled_server',
+            message:
+              'Background detection is not available yet. You can still use Nearby while the app is open.',
+          };
+        }
+        if (status.reconsentRequired) {
+          captureBgReliabilityIssue('enable_background', 'consent_required');
+          return {
+            ok: false,
+            reason: 'consent_required',
+            message: 'Please confirm background detection again to continue.',
+          };
+        }
+
+        return { ok: true };
+      } catch (err) {
+        const normalized = normalizeServerBackgroundReason((err as Error)?.message);
+        const reason = normalized ?? 'server_failed';
+        captureBgReliabilityIssue('enable_background', reason, err);
+        return {
+          ok: false,
+          reason,
+          message: (err as Error)?.message,
+        };
+      }
+    },
+    [convex],
+  );
+
   // -------------------------------------------------------------------------
   // flushPendingBackgroundSamples
   // -------------------------------------------------------------------------
@@ -361,12 +526,19 @@ export function useBackgroundLocation() {
         token: tokenRef.current,
         logPrefix: 'BG_LOCATION',
         requireLocalEnablement: true,
-        uploadBatch: async ({ userId, samples, deviceHash }) =>
-          (await recordBatchMut({
+        uploadBatch: async ({ userId, samples, deviceHash }) => {
+          const result = (await recordBatchMut({
             userId: userId as any,
+            token: tokenRef.current ?? undefined,
             samples,
             deviceHash,
-          })) as { success?: boolean; accepted?: number; reason?: string } | undefined,
+          })) as { success?: boolean; accepted?: number; reason?: string } | undefined;
+          const blockedReason = normalizeServerBackgroundReason(result?.reason);
+          if (blockedReason) {
+            captureBgReliabilityIssue('flush_background_samples', blockedReason);
+          }
+          return result;
+        },
       });
     } finally {
       flushInFlightRef.current = false;
@@ -407,6 +579,19 @@ export function useBackgroundLocation() {
           reason: 'not_authenticated',
         });
         return { ok: false, reason: 'not_authenticated' };
+      }
+
+      const serverGate = await checkServerBackgroundGate();
+      if (!serverGate.ok) {
+        recordBgCrossedPathsBreadcrumb('enable_gate_skipped', {
+          gate: 'server_status',
+          reason: serverGate.reason,
+        });
+        return {
+          ok: false,
+          reason: serverGate.reason,
+          message: serverGate.message,
+        };
       }
 
       // Gate 2: Foreground permission. Required before background per Apple
@@ -454,6 +639,19 @@ export function useBackgroundLocation() {
           success: true,
         });
       } catch (err) {
+        const normalized = normalizeServerBackgroundReason((err as Error)?.message);
+        if (normalized) {
+          captureBgReliabilityIssue('enable_background', normalized, err);
+          recordBgCrossedPathsBreadcrumb('server_consent_result', {
+            success: false,
+            reason: normalized,
+          });
+          return {
+            ok: false,
+            reason: normalized,
+            message: (err as Error)?.message,
+          };
+        }
         recordBgCrossedPathsBreadcrumb('server_consent_result', {
           success: false,
           reason: 'consent_failed',
@@ -468,21 +666,50 @@ export function useBackgroundLocation() {
       // Gate 4: OS background permission. Triggers the system "Always Allow"
       // / "Allow all the time" prompt. The user CAN deny here even after
       // accepting our explainer — we honor that and roll back consent.
-      let bg = await Location.getBackgroundPermissionsAsync();
+      //
+      // Both `get` and `request` calls can reject natively if the installed
+      // binary is missing manifest entries (e.g. ACCESS_BACKGROUND_LOCATION
+      // on Android). We MUST catch both so the rejection never escapes as
+      // an unhandled promise + LogBox to the user, and so Sentry sees the
+      // technical detail under tagged context.
+      let bg: Awaited<ReturnType<typeof Location.getBackgroundPermissionsAsync>>;
+      try {
+        bg = await Location.getBackgroundPermissionsAsync();
+      } catch (err) {
+        const manifestErr = isNativeManifestError(err);
+        reportBgPermissionError(err, {
+          stage: 'get',
+          nativeManifest: manifestErr,
+        });
+        await safeRevokeOnRollback(uid, revokeConsentMut);
+        recordBgCrossedPathsBreadcrumb('os_permission_result', {
+          permission: 'background',
+          granted: false,
+          reason: manifestErr ? 'native_misconfigured' : 'get_failed',
+        });
+        return {
+          ok: false,
+          reason: manifestErr ? 'native_misconfigured' : 'background_permission_denied',
+        };
+      }
       if (bg.status !== 'granted') {
         try {
           bg = await Location.requestBackgroundPermissionsAsync();
         } catch (err) {
+          const manifestErr = isNativeManifestError(err);
+          reportBgPermissionError(err, {
+            stage: 'request',
+            nativeManifest: manifestErr,
+          });
           await safeRevokeOnRollback(uid, revokeConsentMut);
           recordBgCrossedPathsBreadcrumb('os_permission_result', {
             permission: 'background',
             granted: false,
-            reason: 'request_failed',
+            reason: manifestErr ? 'native_misconfigured' : 'request_failed',
           });
           return {
             ok: false,
-            reason: 'background_permission_denied',
-            message: (err as Error)?.message,
+            reason: manifestErr ? 'native_misconfigured' : 'background_permission_denied',
           };
         }
       }
@@ -518,6 +745,21 @@ export function useBackgroundLocation() {
           platform: Platform.OS,
         });
       } catch (err) {
+        const normalized = normalizeServerBackgroundReason((err as Error)?.message);
+        if (normalized) {
+          captureBgReliabilityIssue('enable_background', normalized, err);
+          await safeRevokeOnRollback(uid, revokeConsentMut);
+          recordBgCrossedPathsBreadcrumb('platform_setup_result', {
+            success: false,
+            platform: Platform.OS,
+            reason: normalized,
+          });
+          return {
+            ok: false,
+            reason: normalized,
+            message: (err as Error)?.message,
+          };
+        }
         await safeRevokeOnRollback(uid, revokeConsentMut);
         recordBgCrossedPathsBreadcrumb('platform_setup_result', {
           success: false,
@@ -579,6 +821,7 @@ export function useBackgroundLocation() {
       return { ok: true };
     }, [
       acceptConsentMut,
+      checkServerBackgroundGate,
       revokeConsentMut,
       startDiscoveryMut,
       stopDiscoveryMut,

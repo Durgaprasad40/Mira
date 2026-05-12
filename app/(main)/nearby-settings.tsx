@@ -39,6 +39,7 @@ import {
   useBackgroundLocation,
   type BgStatus,
 } from '@/hooks/useBackgroundLocation';
+import { captureException as sentryCaptureException } from '@/lib/sentry';
 
 // Phase-1 cleanup: the `always / app_open / recent` visibility-mode UI was
 // removed because the backend no longer enforces these modes (Nearby became a
@@ -74,11 +75,12 @@ export default function NearbySettingsScreen() {
   const updateNearbySettingsMut = useMutation(api.users.updateNearbySettings);
   const pauseNearbyMut = useMutation(api.users.pauseNearby);
   const acceptNearbyConsentMut = useMutation(api.users.acceptNearbyConsent);
-  // Phase-3 background detection: the OFF path is routed through the
-  // `useBackgroundLocation` hook, which stops the OS task, clears the buffer,
-  // and revokes server-side consent. ON path is reserved for the explainer
-  // modal — and even there only when the client-side feature gate is ON.
-  const { disableBackgroundCrossedPaths } = useBackgroundLocation();
+  // Phase-3 background detection: both ON and OFF paths run through the
+  // `useBackgroundLocation` hook directly from this screen so the user
+  // never leaves Nearby Settings. The hook stops/starts the OS task,
+  // manages the local buffer, and syncs server-side consent.
+  const { disableBackgroundCrossedPaths, enableBackgroundCrossedPaths } =
+    useBackgroundLocation();
 
   // Local state (initialized from server)
   const [nearbyEnabled, setNearbyEnabled] = useState(true);
@@ -91,6 +93,9 @@ export default function NearbySettingsScreen() {
   // Phase-2: pause duration picker visibility
   const [showPauseOptions, setShowPauseOptions] = useState(false);
   const [bgStatus, setBgStatus] = useState<BgStatus | null>(null);
+  // Phase-3: in-place loading state for the Background detection action so
+  // the row can show "Requesting…" instead of navigating away.
+  const [isBgWorking, setIsBgWorking] = useState(false);
 
   // Loading states
   const [timedOut, setTimedOut] = useState(false);
@@ -454,7 +459,67 @@ export default function NearbySettingsScreen() {
     }
   };
 
+  // Map structured failure reasons from `enableBackgroundCrossedPaths` to a
+  // short, in-place message. Kept here (not in the hook) so this UI surface
+  // owns its own copy and doesn't depend on the explainer page. Never
+  // includes raw native error text, function names, stack traces, manifest
+  // identifiers, or Convex/backend details.
+  const describeEnableFailure = useCallback(
+    (reason: string | undefined): string => {
+      switch (reason) {
+        case 'feature_not_ready':
+          return 'Background detection is temporarily unavailable.';
+        case 'demo_mode':
+          return 'Background detection is disabled in demo mode.';
+        case 'not_authenticated':
+          return 'Please sign in to enable background detection.';
+        case 'foreground_permission_denied':
+          return 'Allow location access to enable background detection.';
+        case 'background_permission_denied':
+          return 'Background location permission was denied.';
+        case 'native_misconfigured':
+          return 'Background detection needs an app update. Please update or reinstall the latest build and try again.';
+        case 'consent_failed':
+          return 'Could not save your preference. Try again.';
+        case 'platform_setup_failed':
+          return 'Could not enable background detection. Try again.';
+        case 'task_start_failed':
+          return 'Background service could not start. Try again.';
+        default:
+          return 'Failed to enable background detection.';
+      }
+    },
+    [],
+  );
+
+  // Centralized Sentry capture for unexpected failures from this surface.
+  // We only forward the structured reason + truncated error message — never
+  // user state — and we tag the area/feature/action for dashboard filtering.
+  const reportBgFailure = useCallback(
+    (err: unknown, action: 'allow_background' | 'disable_background', reason?: string) => {
+      try {
+        sentryCaptureException(err ?? new Error(`bg_${action}_failed`), {
+          tags: {
+            area: 'nearby_settings',
+            feature: 'background_detection',
+            action,
+            platform: Platform.OS,
+            reason: reason || 'unknown',
+          },
+          extra: {
+            message: (err as Error)?.message?.slice(0, 500),
+          },
+          level: 'error',
+        });
+      } catch {
+        // Capture itself must never break the UI.
+      }
+    },
+    [],
+  );
+
   const handleBackgroundAction = useCallback(async () => {
+    if (isBgWorking) return;
     if (!nearbyEnabled) {
       await handleNearbyEnabledToggle(true);
       return;
@@ -466,37 +531,114 @@ export default function NearbySettingsScreen() {
     if (!nearbyActiveForCrossedPaths) {
       return;
     }
+
+    // Disable path: tap when currently ON should turn OFF locally + server.
     if (bgServerActive) {
-      const result = await disableBackgroundCrossedPaths();
-      await refreshBackgroundStatus();
-      Toast.show(
-        result.ok
-          ? 'Background detection turned off'
-          : 'Failed to turn off background detection',
-      );
+      setIsBgWorking(true);
+      try {
+        const result = await disableBackgroundCrossedPaths();
+        await refreshBackgroundStatus();
+        if (result.ok) {
+          Toast.show('Background detection turned off');
+        } else {
+          reportBgFailure(
+            new Error('disable_background_failed'),
+            'disable_background',
+            result.reason,
+          );
+          Toast.show('Failed to turn off background detection');
+        }
+      } catch (err: unknown) {
+        // Hook is fail-closed; this branch is purely defensive. Never
+        // surface raw native text — always show friendly copy and let
+        // Sentry receive the technical detail.
+        reportBgFailure(err, 'disable_background', 'unexpected');
+        Toast.show('Failed to turn off background detection');
+      } finally {
+        setIsBgWorking(false);
+      }
       return;
     }
+
+    // OS says we can no longer prompt for background location — must go to
+    // system settings. Open them in-place; do NOT route to the in-app
+    // explainer page.
     if (bgPermissionBlocked) {
       await handleOpenAndroidAppSettings();
       return;
     }
 
+    // Enable path: request OS permission and start the background task
+    // directly from this row. No navigation to /background-crossed-paths-explainer.
     const consentOk = await ensureNearbyConsent();
     if (!consentOk) return;
-    router.push('/(main)/background-crossed-paths-explainer' as any);
+
+    setIsBgWorking(true);
+    try {
+      const result = await enableBackgroundCrossedPaths();
+      await refreshBackgroundStatus();
+      if (result.ok) {
+        Toast.show('Background detection turned on');
+      } else {
+        // Native/manifest misconfiguration: the installed binary is missing
+        // permissions and must be rebuilt+reinstalled. Show a friendly
+        // message that does NOT contain native function names, manifest
+        // identifiers, or stack traces.
+        if (result.reason === 'native_misconfigured') {
+          reportBgFailure(
+            new Error('native_misconfigured'),
+            'allow_background',
+            result.reason,
+          );
+          Toast.show(describeEnableFailure(result.reason));
+        } else if (result.reason === 'background_permission_denied') {
+          // If the OS refuses to prompt again (e.g. user picked "Don't ask
+          // again"), surface the open-settings affordance via Toast — the
+          // row's action button will also flip to "Open Settings" once
+          // `refreshBackgroundStatus` resolves.
+          const status = await getBackgroundLocationStatus().catch(() => null);
+          if (status && status.backgroundPermissionCanAskAgain === false) {
+            Toast.show('Open system settings to allow background location.');
+          } else {
+            Toast.show(describeEnableFailure(result.reason));
+          }
+        } else {
+          // Other structured failures (consent/platform/task). Send the
+          // reason to Sentry and show user-friendly copy.
+          reportBgFailure(
+            new Error(`bg_enable_${result.reason}`),
+            'allow_background',
+            result.reason,
+          );
+          Toast.show(describeEnableFailure(result.reason));
+        }
+      }
+    } catch (err: unknown) {
+      // Defensive: the hook is already fail-closed and should never throw,
+      // but we still wrap to guarantee no unhandled promise rejection
+      // escapes the UI tap handler. NEVER show raw error.message to the
+      // user — only friendly copy. Technical detail goes to Sentry.
+      reportBgFailure(err, 'allow_background', 'unexpected');
+      Toast.show(describeEnableFailure(undefined));
+    } finally {
+      setIsBgWorking(false);
+    }
   }, [
     bgPermissionBlocked,
     bgServerActive,
+    describeEnableFailure,
     disableBackgroundCrossedPaths,
+    enableBackgroundCrossedPaths,
     ensureNearbyConsent,
     handleNearbyEnabledToggle,
     handleOpenAndroidAppSettings,
     handleResumeNearby,
+    isBgWorking,
     isPaused,
     nearbyActiveForCrossedPaths,
     nearbyEnabled,
     refreshBackgroundStatus,
-    router,
+    reportBgFailure,
   ]);
 
   // Format "paused until ..." status line. Indefinite pauses render as a
@@ -608,6 +750,20 @@ export default function NearbySettingsScreen() {
 
         </View>
 
+        {/* How Nearby works */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>How Nearby works</Text>
+          <View style={styles.infoCard}>
+            <Ionicons name="navigate-circle-outline" size={18} color={COLORS.primary} />
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleTitle}>Crossed paths only</Text>
+              <Text style={styles.toggleDescription}>
+                Mira uses crossed paths, not live tracking. We only show approximate areas, never your exact location. Crossed paths work when two people are near the same area around the same time.
+              </Text>
+            </View>
+          </View>
+        </View>
+
         {/* Crossed Paths Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Crossed Paths</Text>
@@ -626,6 +782,9 @@ export default function NearbySettingsScreen() {
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Background</Text>
+          <Text style={styles.bgTagline}>
+            Background detection is optional and helps Mira notice crossed paths when the app is not open.
+          </Text>
           <View style={styles.actionRow}>
             <View style={styles.toggleInfo}>
               <View style={styles.titleRow}>
@@ -645,9 +804,12 @@ export default function NearbySettingsScreen() {
               <TouchableOpacity
                 style={styles.actionButton}
                 onPress={handleBackgroundAction}
-                disabled={isSaving}
+                disabled={isSaving || isBgWorking}
+                accessibilityState={{ busy: isBgWorking, disabled: isSaving || isBgWorking }}
               >
-                <Text style={styles.actionButtonText}>{bgDisplay.action}</Text>
+                <Text style={styles.actionButtonText}>
+                  {isBgWorking ? 'Working…' : bgDisplay.action}
+                </Text>
               </TouchableOpacity>
             )}
           </View>
@@ -705,7 +867,7 @@ export default function NearbySettingsScreen() {
             <View style={styles.actionInfo}>
               <Text style={styles.toggleTitle}>Privacy Zones</Text>
               <Text style={styles.toggleDescription}>
-                Stop Nearby and crossed paths from recording private areas
+                Add Privacy Zones for places like home, hostel, hospital, or work so crossings are not recorded there.
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />

@@ -3,6 +3,13 @@ import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import { loadDiscoveryExclusions } from './discoveryExclusions';
+import {
+  BG_CROSSED_PATHS_REQUIRED_CONSENT_VERSION,
+  getRequiredBgCrossedPathsConsentVersion,
+  getUserBgCrossedPathsConsent,
+  hasCurrentBgCrossedPathsConsentOnUser,
+  isBgCrossedPathsEnabled as readBgCrossedPathsFeatureFlag,
+} from './backgroundCrossedPathsPolicy';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -166,6 +173,38 @@ const FOREGROUND_FRESHNESS_MS = 12 * 60 * 60 * 1000; // 12 hours
 const HISTORY_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 const GENERIC_CROSSING_AREA_NAME = 'Nearby area';
+
+// Mirrors convex/discover.ts orientationAllowsCandidateGender exactly so
+// Nearby/crossed-path eligibility matches the current Discover hard gate.
+function orientationAllowsCandidateGender(args: {
+  viewerGender: string | undefined;
+  viewerOrientation: string | undefined;
+  candidateGender: string | undefined;
+}): boolean {
+  const { viewerGender, viewerOrientation, candidateGender } = args;
+
+  if (!viewerOrientation || viewerOrientation === 'prefer_not_to_say') return true;
+  if (candidateGender !== 'male' && candidateGender !== 'female') return true;
+  if (viewerGender !== 'male' && viewerGender !== 'female') return true;
+
+  if (viewerOrientation === 'bisexual') {
+    return candidateGender === 'male' || candidateGender === 'female';
+  }
+
+  if (viewerOrientation === 'straight') {
+    return viewerGender === 'male' ? candidateGender === 'female' : candidateGender === 'male';
+  }
+
+  if (viewerOrientation === 'gay') {
+    return candidateGender === viewerGender;
+  }
+
+  if (viewerOrientation === 'lesbian') {
+    return viewerGender === 'female' && candidateGender === 'female';
+  }
+
+  return true;
+}
 
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
@@ -1339,21 +1378,39 @@ export const publishLocation = mutation({
 
 // ---------------------------------------------------------------------------
 // detectCrossedUsers — privacy-safe "Someone crossed you" alert
-// Uses PUBLISHED locations only (not live GPS).
+// Uses recent sample-created crossPathHistory rows, not published snapshots.
 // Returns { triggered: true } if alert should be shown, never reveals identity.
-// STABILITY FIX S2: Uses indexed query instead of full table scan
-// STABILITY FIX S6: Pre-fetches blocks before loop
+// This keeps the generic alert consistent with recordLocation /
+// recordLocationBatch / detectCrossingsForSample crossed-path matching.
 // ---------------------------------------------------------------------------
 
 export const detectCrossedUsers = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
+    token: v.optional(v.string()),
     myLat: v.number(),
     myLng: v.number(),
   },
   handler: async (ctx, args) => {
-    const { userId, myLat, myLng } = args;
+    const { myLat, myLng } = args;
     const now = Date.now();
+
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      return { triggered: false, reason: 'user_not_found' };
+    }
+    let userId = resolvedUserId;
+    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
+    if (sessionToken) {
+      const tokenUserId = await validateSessionToken(ctx, sessionToken);
+      if (!tokenUserId) {
+        return { triggered: false, reason: 'not_authenticated' };
+      }
+      if (tokenUserId !== resolvedUserId) {
+        return { triggered: false, reason: 'session_user_mismatch' };
+      }
+      userId = tokenUserId;
+    }
 
     // 1) Validate user exists
     const currentUser = await ctx.db.get(userId);
@@ -1411,105 +1468,117 @@ export const detectCrossedUsers = mutation({
       return { triggered: false, reason: 'cooldown' };
     }
 
-    // STABILITY FIX S2: Use indexed query for verified users only
-    // Crossed paths detection only applies to verified users
-    const verifiedUsers = await ctx.db
-      .query('users')
-      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
-      .collect();
+    const currentStatus = currentUser.verificationStatus || 'unverified';
+    const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+    if (currentStatus !== 'verified' && !isDevBypass) {
+      return { triggered: false, reason: 'unverified' };
+    }
+    if (!currentUser.name || !currentUser.bio || !currentUser.dateOfBirth) {
+      return { triggered: false, reason: 'profile_incomplete' };
+    }
 
-    // STABILITY FIX S6: Pre-fetch blocks before loop
-    // P1 EXCLUSION: Load the full negative-relationship exclusion set
-    // (blocks bidirectional, unmatched bidirectional, reports one-way).
     const {
       blockedUserIds: blockedIds,
       unmatchedUserIds,
       viewerReportedIds,
     } = await loadDiscoveryExclusions(ctx, userId);
+    const myAge = calculateAge(currentUser.dateOfBirth);
 
-    const candidates: Id<'users'>[] = [];
+    // Alert source is the same history rows written by the sample matchers.
+    // This avoids a second, looser published-location crossing model.
+    const [asUser1, asUser2] = await Promise.all([
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
+        .collect(),
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
+        .collect(),
+    ]);
 
-    for (const user of verifiedUsers) {
-      // Skip self
-      if (user._id === userId) continue;
-      // Skip inactive
-      if (!user.isActive) continue;
-      // Skip blocked (using pre-fetched set)
-      if (blockedIds.has(user._id as string)) continue;
-      // P1 EXCLUSION: skip any pair that has ever unmatched (bidirectional)
-      if (unmatchedUserIds.has(user._id as string)) continue;
-      // P1 EXCLUSION: skip users the viewer has reported (one-way)
-      if (viewerReportedIds.has(user._id as string)) continue;
-      // Phase-2: the other side must also be opted into crossed-paths
-      // recording. undefined treated as opted-in.
-      if (user.recordCrossedPaths === false) continue;
-      if (user.incognitoMode === true) continue;
-      // Skip if no published location
-      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
-      if (
-        await isPointInsideUserPrivacyZone(
-          ctx,
-          user._id,
-          user.publishedLat,
-          user.publishedLng,
-        )
-      ) {
-        continue;
-      }
-      // Skip stale foreground snapshots so old stored locations do not create crossings.
-      if (now - user.publishedAt > FOREGROUND_FRESHNESS_MS) continue;
-
-      // Compute distance using published location
-      const distance = calculateDistanceMeters(
-        myLat,
-        myLng,
-        user.publishedLat,
-        user.publishedLng,
+    const recentHistoryCandidates: Array<{ otherUserId: Id<'users'> }> = [];
+    const seenOtherUserIds = new Set<string>();
+    const recentHistories = [...asUser1, ...asUser2]
+      .filter((entry: Doc<'crossPathHistory'>) => {
+        if (entry.expiresAt <= now) return false;
+        if (now - entry.createdAt > SAMPLE_TIME_WINDOW_MS) return false;
+        const isUser1 = entry.user1Id === userId;
+        if (isUser1 && entry.hiddenByUser1) return false;
+        if (!isUser1 && entry.hiddenByUser2) return false;
+        return true;
+      })
+      .sort(
+        (a: Doc<'crossPathHistory'>, b: Doc<'crossPathHistory'>) =>
+          b.createdAt - a.createdAt,
       );
 
-      // Within crossed paths range (100m - 750m)?
-      if (distance >= CROSSED_MIN_METERS && distance <= CROSSED_MAX_METERS) {
-        candidates.push(user._id);
-      }
+    for (const history of recentHistories) {
+      const otherUserId = history.user1Id === userId ? history.user2Id : history.user1Id;
+      const otherUserKey = otherUserId as string;
+      if (seenOtherUserIds.has(otherUserKey)) continue;
+      seenOtherUserIds.add(otherUserKey);
+      recentHistoryCandidates.push({ otherUserId });
     }
 
-    // 4) Dedupe — filter out people we've already alerted about recently
-    // Batch fetch existing events for all candidates to avoid N+1
-    const validCandidates: Id<'users'>[] = [];
+    for (const { otherUserId } of recentHistoryCandidates) {
+      const otherUserKey = otherUserId as string;
+      if (blockedIds.has(otherUserKey)) continue;
+      if (unmatchedUserIds.has(otherUserKey)) continue;
+      if (viewerReportedIds.has(otherUserKey)) continue;
 
-    // Pre-fetch existing events for candidates
-    const eventPromises = candidates.map((otherUserId) =>
-      ctx.db
+      const otherUser = await ctx.db.get(otherUserId);
+      if (!otherUser || otherUser._id === userId) continue;
+      if (!otherUser.isActive) continue;
+      if (otherUser.nearbyEnabled === false) continue;
+      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+      if (otherUser.recordCrossedPaths === false) continue;
+      if (otherUser.incognitoMode === true) continue;
+      if (!otherUser.name || !otherUser.bio || !otherUser.dateOfBirth) continue;
+
+      const otherStatus = otherUser.verificationStatus || 'unverified';
+      if (otherStatus !== 'verified' && !isDevBypass) continue;
+
+      const otherAge = calculateAge(otherUser.dateOfBirth);
+      if (myAge < otherUser.minAge || myAge > otherUser.maxAge) continue;
+      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
+      if (
+        !orientationAllowsCandidateGender({
+          viewerGender: currentUser.gender,
+          viewerOrientation: currentUser.orientation ?? undefined,
+          candidateGender: otherUser.gender,
+        }) ||
+        !orientationAllowsCandidateGender({
+          viewerGender: otherUser.gender,
+          viewerOrientation: otherUser.orientation ?? undefined,
+          candidateGender: currentUser.gender,
+        })
+      ) continue;
+      if (!currentUser.lookingFor.includes(otherUser.gender)) continue;
+      if (!otherUser.lookingFor.includes(currentUser.gender)) continue;
+
+      const crossedPath = await getCrossedPathForPair(ctx, userId, otherUserId);
+      if (!crossedPath || isPairDismissedForViewer(crossedPath, userId)) continue;
+
+      const existingEvent = await ctx.db
         .query('crossedEvents')
         .withIndex('by_user_other', (q) =>
           q.eq('userId', userId).eq('otherUserId', otherUserId),
         )
-        .first()
-    );
-    const existingEvents = await Promise.all(eventPromises);
-
-    for (let i = 0; i < candidates.length; i++) {
-      const existingEvent = existingEvents[i];
-      // If no existing event, or existing event is older than dedupe window, allow
-      if (!existingEvent || now - existingEvent.createdAt >= CROSS_DEDUPE_WINDOW_MS) {
-        validCandidates.push(candidates[i]);
+        .first();
+      if (existingEvent && now - existingEvent.createdAt < CROSS_DEDUPE_WINDOW_MS) {
+        continue;
       }
-    }
-
-    // 5) If any valid candidates, insert ONE event and return triggered
-    if (validCandidates.length > 0) {
-      // Pick the first candidate (doesn't matter which — we don't reveal identity)
-      const pickedOther = validCandidates[0];
 
       await ctx.db.insert('crossedEvents', {
         userId,
-        otherUserId: pickedOther,
+        otherUserId,
         createdAt: now,
         expiresAt: now + CROSS_EVENT_EXPIRY_MS,
       });
 
       // Return triggered: true — client shows generic "Someone crossed you" toast
-      // IMPORTANT: We do NOT return pickedOther or any identity info
+      // IMPORTANT: We do NOT return otherUserId or any identity info
       return { triggered: true };
     }
 
@@ -1858,6 +1927,21 @@ export const recordLocation = mutation({
       }
 
       // Gender/orientation preference match (both directions)
+      if (
+        !orientationAllowsCandidateGender({
+          viewerGender: currentUser.gender,
+          viewerOrientation: currentUser.orientation ?? undefined,
+          candidateGender: nearbyUser.gender,
+        }) ||
+        !orientationAllowsCandidateGender({
+          viewerGender: nearbyUser.gender,
+          viewerOrientation: nearbyUser.orientation ?? undefined,
+          candidateGender: currentUser.gender,
+        })
+      ) {
+        if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'orientation_incompatible' });
+        continue;
+      }
       if (!currentUser.lookingFor.includes(nearbyUser.gender)) {
         if (CROSSED_PATHS_AUDIT_ENABLED) console.log('[CROSSED_PATHS_AUDIT][reject]', { pair: [userId, candidateId], reason: 'viewer_not_into_other_gender' });
         continue;
@@ -2340,7 +2424,7 @@ const BG_LOCATION_AUDIT_ENABLED = true;
  *  every existing consent and force re-acceptance. Mirrors the
  *  NEARBY_CONSENT_VERSION pattern. Kept here (not on users.ts) so the gate
  *  helper below can compare against it without an import cycle. */
-export const BG_LOCATION_CONSENT_VERSION = 'bg_crossed_paths_v1';
+export const BG_LOCATION_CONSENT_VERSION = BG_CROSSED_PATHS_REQUIRED_CONSENT_VERSION;
 
 /** Background-pipeline kill switch. Reads featureFlags table. Returns false
  *  when the flag row is absent OR present with value !== true. Phase 1
@@ -2349,11 +2433,7 @@ async function isBgCrossedPathsEnabled(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
 ): Promise<boolean> {
-  const row = await ctx.db
-    .query('featureFlags')
-    .withIndex('by_name', (q: any) => q.eq('name', 'bgCrossedPathsEnabled'))
-    .first();
-  return row?.value === true;
+  return readBgCrossedPathsFeatureFlag(ctx);
 }
 
 /** Returns true only when the user has explicitly accepted the current
@@ -2361,12 +2441,82 @@ async function isBgCrossedPathsEnabled(
  *  the separate background-consent fields so a foreground-consenting user
  *  cannot have any background sample accepted. */
 export function hasBackgroundLocationConsent(user: Doc<'users'>): boolean {
-  return (
-    typeof user.backgroundLocationConsentAt === 'number' &&
-    user.backgroundLocationConsentAt > 0 &&
-    user.backgroundLocationConsentVersion === BG_LOCATION_CONSENT_VERSION
-  );
+  return hasCurrentBgCrossedPathsConsentOnUser(user);
 }
+
+export const getBackgroundCrossedPathsStatus = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const sessionToken = args.token.trim();
+    const userId = await validateSessionToken(ctx, sessionToken);
+    const serverFeatureEnabled = await isBgCrossedPathsEnabled(ctx);
+    const requiredConsentVersion = await getRequiredBgCrossedPathsConsentVersion();
+
+    if (!userId) {
+      return {
+        serverFeatureEnabled,
+        requiredConsentVersion,
+        userConsentVersion: null,
+        userConsentAcceptedAt: null,
+        serverSideBackgroundConsentEnabled: false,
+        backgroundLocationEnabled: false,
+        discoveryModeEnabled: false,
+        discoveryModeExpiresAt: null,
+        reconsentRequired: false,
+        enabled: false,
+        reason: 'not_authenticated' as const,
+      };
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return {
+        serverFeatureEnabled,
+        requiredConsentVersion,
+        userConsentVersion: null,
+        userConsentAcceptedAt: null,
+        serverSideBackgroundConsentEnabled: false,
+        backgroundLocationEnabled: false,
+        discoveryModeEnabled: false,
+        discoveryModeExpiresAt: null,
+        reconsentRequired: false,
+        enabled: false,
+        reason: 'not_authenticated' as const,
+      };
+    }
+
+    const now = Date.now();
+    const consent = await getUserBgCrossedPathsConsent(ctx, userId);
+    const backgroundLocationEnabled = user.backgroundLocationEnabled === true;
+    const discoveryModeEnabled =
+      user.discoveryModeEnabled === true &&
+      typeof user.discoveryModeExpiresAt === 'number' &&
+      user.discoveryModeExpiresAt > now;
+    const serverSideBackgroundConsentEnabled =
+      backgroundLocationEnabled || discoveryModeEnabled;
+    const consentCurrent = consent.version === requiredConsentVersion;
+    const reconsentRequired =
+      serverFeatureEnabled && serverSideBackgroundConsentEnabled && !consentCurrent;
+
+    return {
+      serverFeatureEnabled,
+      requiredConsentVersion,
+      userConsentVersion: consent.version,
+      userConsentAcceptedAt: consent.acceptedAt,
+      serverSideBackgroundConsentEnabled,
+      backgroundLocationEnabled,
+      discoveryModeEnabled,
+      discoveryModeExpiresAt: user.discoveryModeExpiresAt ?? null,
+      reconsentRequired,
+      enabled: serverFeatureEnabled && !reconsentRequired,
+      reason: !serverFeatureEnabled
+        ? ('feature_disabled_server' as const)
+        : reconsentRequired
+          ? ('consent_required' as const)
+          : null,
+    };
+  },
+});
 
 // Sliding-window rate-limit thresholds. Tuned to comfortably allow
 // legitimate Discovery Mode + iOS SLC sampling cadence (~1 sample / 5min)
@@ -2627,6 +2777,7 @@ export const debugBgPipelineStatus = query({
 export const recordLocationBatch = mutation({
   args: {
     userId: v.union(v.id('users'), v.string()),
+    token: v.optional(v.string()),
     samples: v.array(
       v.object({
         lat: v.number(),
@@ -2646,10 +2797,10 @@ export const recordLocationBatch = mutation({
     //    so the disabled path has zero observable side effects.
     if (!(await isBgCrossedPathsEnabled(ctx))) {
       return {
-        success: true,
+        success: false,
         accepted: 0,
         skipped: true,
-        reason: 'background_location_disabled',
+        reason: 'feature_not_ready',
       };
     }
 
@@ -2657,7 +2808,18 @@ export const recordLocationBatch = mutation({
     if (!resolvedUserId) {
       return { success: false, accepted: 0, reason: 'user_not_found' };
     }
-    const userId = resolvedUserId;
+    let userId = resolvedUserId;
+    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
+    if (sessionToken) {
+      const tokenUserId = await validateSessionToken(ctx, sessionToken);
+      if (!tokenUserId) {
+        return { success: false, accepted: 0, reason: 'not_authenticated' };
+      }
+      if (tokenUserId !== resolvedUserId) {
+        return { success: false, accepted: 0, reason: 'session_user_mismatch' };
+      }
+      userId = tokenUserId;
+    }
     const now = Date.now();
     const sources = Array.from(new Set(args.samples.map((s) => s.source)));
 
@@ -2786,7 +2948,7 @@ export const recordLocationBatch = mutation({
         userId, sampleCount: args.samples.length, accepted: 0, sources,
         outcome: 'rejected', reason: 'bg_consent_required', deviceHash: args.deviceHash,
       });
-      return { success: false, accepted: 0, reason: 'bg_consent_required' };
+      return { success: false, accepted: 0, reason: 'consent_required' };
     }
 
     if (hasSlc && !bgLocationOn) {
@@ -3236,10 +3398,22 @@ async function detectCrossingsForSample(
     const isDevBypass = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
     if (peerStatus !== 'verified' && !isDevBypass) continue;
 
-    // Age / gender filters (bi-directional).
+    // Age / orientation / gender filters (bi-directional).
     const peerAge = calculateAge(peerUser.dateOfBirth);
     if (myAge < peerUser.minAge || myAge > peerUser.maxAge) continue;
     if (peerAge < viewer.minAge || peerAge > viewer.maxAge) continue;
+    if (
+      !orientationAllowsCandidateGender({
+        viewerGender: viewer.gender,
+        viewerOrientation: viewer.orientation ?? undefined,
+        candidateGender: peerUser.gender,
+      }) ||
+      !orientationAllowsCandidateGender({
+        viewerGender: peerUser.gender,
+        viewerOrientation: peerUser.orientation ?? undefined,
+        candidateGender: viewer.gender,
+      })
+    ) continue;
     if (!viewer.lookingFor.includes(peerUser.gender)) continue;
     if (!peerUser.lookingFor.includes(viewer.gender)) continue;
 
@@ -3697,6 +3871,18 @@ export const getNearbyUsers = query({
       if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
 
       // Gender/orientation preference match (both directions)
+      if (
+        !orientationAllowsCandidateGender({
+          viewerGender: currentUser.gender,
+          viewerOrientation: currentUser.orientation ?? undefined,
+          candidateGender: user.gender,
+        }) ||
+        !orientationAllowsCandidateGender({
+          viewerGender: user.gender,
+          viewerOrientation: user.orientation ?? undefined,
+          candidateGender: currentUser.gender,
+        })
+      ) continue;
       if (!currentUser.lookingFor.includes(user.gender)) continue;
       if (!user.lookingFor.includes(currentUser.gender)) continue;
 
