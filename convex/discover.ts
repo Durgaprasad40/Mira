@@ -1332,6 +1332,10 @@ const EXTRA_EXPLORE_CATEGORY_IDS = [
   'free_tonight',
 ] as const;
 
+function getFiniteNumber(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 const EXPLORE_CATEGORY_IDS = [
   ...FRONTEND_EXPLORE_CATEGORY_IDS,
   ...EXTRA_EXPLORE_CATEGORY_IDS,
@@ -1584,7 +1588,14 @@ async function resolveExploreViewer(
   const userId = await resolveUserIdByAuthId(ctx, rawUserId as string);
   if (!userId) return null;
   const currentUser = await ctx.db.get(userId);
-  if (!currentUser || !currentUser.isActive || currentUser.isBanned || isEffectivelyHiddenFromDiscover(currentUser)) return null;
+  if (
+    !currentUser ||
+    !currentUser.isActive ||
+    currentUser.isBanned ||
+    currentUser.deletedAt ||
+    currentUser.onboardingCompleted !== true ||
+    isEffectivelyHiddenFromDiscover(currentUser)
+  ) return null;
   return { userId, currentUser };
 }
 
@@ -1602,6 +1613,7 @@ async function loadExploreExclusions(
     blocksICreated,
     blocksAgainstMe,
     myReports,
+    reportsAgainstMe,
     myConversationParticipations,
   ] = await Promise.all([
     ctx.db
@@ -1631,6 +1643,10 @@ async function loadExploreExclusions(
       .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
       .collect(),
     ctx.db
+      .query('reports')
+      .withIndex('by_reported_user', (q) => q.eq('reportedUserId', userId))
+      .collect(),
+    ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect(),
@@ -1652,6 +1668,7 @@ async function loadExploreExclusions(
 
   const viewerReportedIds = new Set<string>();
   for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
+  for (const report of reportsAgainstMe) viewerReportedIds.add(report.reporterId as string);
 
   const conversationPartnerIds = new Set<string>();
   if (myConversationParticipations.length > 0) {
@@ -1775,17 +1792,29 @@ async function buildExploreCandidates(
 
   const exclusions = await loadExploreExclusions(ctx, userId);
 
-  const effectiveGender = Array.from(
-    new Set((args.genderFilter && args.genderFilter.length > 0 ? args.genderFilter : currentUser.lookingFor ?? []).filter(Boolean))
+  const savedLookingFor = Array.isArray(currentUser.lookingFor)
+    ? Array.from(new Set(currentUser.lookingFor.filter(Boolean)))
+    : [];
+  const requestedGenderSet = args.genderFilter && args.genderFilter.length > 0
+    ? new Set(args.genderFilter.filter(Boolean))
+    : null;
+  const effectiveGender = savedLookingFor.filter((gender) =>
+    requestedGenderSet ? requestedGenderSet.has(gender) : true
   );
   if (effectiveGender.length === 0) {
     return { status: 'ready', currentUser, candidates: [] };
   }
 
   const currentPrefs = normalizeDiscoveryPreferences(currentUser);
-  const effectiveMinAge = args.minAge ?? currentPrefs.minAge;
-  const effectiveMaxAge = args.maxAge ?? currentPrefs.maxAge;
-  const effectiveMaxDistance = args.maxDistance ?? currentPrefs.maxDistance;
+  const requestedMinAge = getFiniteNumber(args.minAge);
+  const requestedMaxAge = getFiniteNumber(args.maxAge);
+  const requestedMaxDistance = getFiniteNumber(args.maxDistance);
+  const effectiveMinAge = Math.max(requestedMinAge ?? currentPrefs.minAge, currentPrefs.minAge);
+  const effectiveMaxAge = Math.min(requestedMaxAge ?? currentPrefs.maxAge, currentPrefs.maxAge);
+  const effectiveMaxDistance = Math.min(requestedMaxDistance ?? currentPrefs.maxDistance, currentPrefs.maxDistance);
+  if (effectiveMaxAge < effectiveMinAge || effectiveMaxDistance <= 0) {
+    return { status: 'ready', currentUser, candidates: [] };
+  }
   const normalizedRelationshipIntentFilter = normalizeRelationshipIntentValues(args.relationshipIntent);
   const viewerAge = calculateAge(currentUser.dateOfBirth);
   if (!hasEligibleAdultAge(viewerAge)) {
@@ -1811,8 +1840,9 @@ async function buildExploreCandidates(
       seenUserIds.add(candidateId);
 
       if (user._id === userId) continue;
-      if (!user.isActive || user.isBanned) continue;
+      if (!user.isActive || user.isBanned || user.deletedAt || user.onboardingCompleted !== true) continue;
       if (isEffectivelyHiddenFromDiscover(user)) continue;
+      if ((user.verificationStatus || 'unverified') !== 'verified') continue;
       if (user.verificationEnforcementLevel === 'security_only') continue;
       if (exclusions.swipedUserIds.has(candidateId)) continue;
       if (exclusions.matchedUserIds.has(candidateId)) continue;
@@ -1940,11 +1970,11 @@ async function buildExploreCandidates(
   return { status: 'ready', currentUser, candidates };
 }
 
-async function hydrateExploreProfiles(
+async function loadSafeExplorePhotoUrlsByCandidateId(
   ctx: QueryCtx,
   candidates: ExploreCandidateBase[]
-): Promise<ExploreProfileResult[]> {
-  const results: ExploreProfileResult[] = [];
+): Promise<Map<string, { url: string }[]>> {
+  const photoUrlsByCandidateId = new Map<string, { url: string }[]>();
   const CHUNK_SIZE = 12;
 
   for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
@@ -1964,13 +1994,38 @@ async function hydrateExploreProfiles(
       const publicPhotos = orderedSafePhotos.map((photo) => ({ url: photo.url }));
 
       if (publicPhotos.length === 0) continue;
-
-      const { rankingScore, rankingLastActive, nearbyDistanceKm, sourceUserId, primaryPhotoUrl, displayPrimaryPhotoUrl, ...safeCandidate } = candidate;
-      results.push({
-        ...safeCandidate,
-        photos: publicPhotos,
-      });
+      photoUrlsByCandidateId.set(candidate.id as string, publicPhotos);
     }
+  }
+
+  return photoUrlsByCandidateId;
+}
+
+function filterExploreCandidatesWithSafeDisplayPhoto(
+  candidates: ExploreCandidateBase[],
+  photoUrlsByCandidateId: Map<string, { url: string }[]>
+): ExploreCandidateBase[] {
+  return candidates.filter((candidate) => photoUrlsByCandidateId.has(candidate.id as string));
+}
+
+async function hydrateExploreProfiles(
+  ctx: QueryCtx,
+  candidates: ExploreCandidateBase[],
+  preloadedPhotoUrlsByCandidateId?: Map<string, { url: string }[]>
+): Promise<ExploreProfileResult[]> {
+  const results: ExploreProfileResult[] = [];
+  const photoUrlsByCandidateId =
+    preloadedPhotoUrlsByCandidateId ?? await loadSafeExplorePhotoUrlsByCandidateId(ctx, candidates);
+
+  for (const candidate of candidates) {
+    const publicPhotos = photoUrlsByCandidateId.get(candidate.id as string) ?? [];
+    if (publicPhotos.length === 0) continue;
+
+    const { rankingScore, rankingLastActive, nearbyDistanceKm, sourceUserId, primaryPhotoUrl, displayPrimaryPhotoUrl, ...safeCandidate } = candidate;
+    results.push({
+      ...safeCandidate,
+      photos: publicPhotos,
+    });
   }
 
   return results;
@@ -2121,12 +2176,17 @@ export const getExploreCategoryProfiles = query({
       }
     }
 
-    const pageWindow = orderedCandidates.slice(offset, offset + limit * 3);
-    const hydratedProfiles = await hydrateExploreProfiles(ctx, pageWindow);
+    const safePhotoUrlsByCandidateId = await loadSafeExplorePhotoUrlsByCandidateId(ctx, orderedCandidates);
+    const displayableOrderedCandidates = filterExploreCandidatesWithSafeDisplayPhoto(
+      orderedCandidates,
+      safePhotoUrlsByCandidateId
+    );
+    const pageWindow = displayableOrderedCandidates.slice(offset, offset + limit * 3);
+    const hydratedProfiles = await hydrateExploreProfiles(ctx, pageWindow, safePhotoUrlsByCandidateId);
 
     return {
       profiles: hydratedProfiles.slice(0, limit),
-      totalCount: orderedCandidates.length,
+      totalCount: displayableOrderedCandidates.length,
       status: 'ok' as const,
     };
   },
@@ -2287,15 +2347,20 @@ export const getExploreCategoryCounts = query({
       };
     }
 
+    const safePhotoUrlsByCandidateId = await loadSafeExplorePhotoUrlsByCandidateId(ctx, built.candidates);
+    const displayableCandidates = filterExploreCandidatesWithSafeDisplayPhoto(
+      built.candidates,
+      safePhotoUrlsByCandidateId
+    );
     const nearbyStatus = getExploreNearbyAvailabilityStatus(built.currentUser);
-    const counts = countExploreCategories(built.currentUser, built.candidates);
+    const counts = countExploreCategories(built.currentUser, displayableCandidates);
     if (nearbyStatus !== 'ok') {
       counts.nearby = 0;
     }
 
     return {
       counts,
-      totalCount: built.candidates.length,
+      totalCount: displayableCandidates.length,
       status: 'ok' as const,
       nearbyStatus,
     };

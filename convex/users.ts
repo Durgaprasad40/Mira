@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query, QueryCtx } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
@@ -432,6 +432,10 @@ function isPhase1ProfileSource(source: string | undefined): boolean {
   );
 }
 
+function isPhase1ExploreProfileSource(source: string | undefined): boolean {
+  return source === "phase1_explore" || source === "explore";
+}
+
 function isDiscoveryPaused(user: Doc<"users">, now = Date.now()): boolean {
   if (user.isDiscoveryPaused !== true) return false;
   if (!user.discoveryPausedUntil) return true;
@@ -440,6 +444,147 @@ function isDiscoveryPaused(user: Doc<"users">, now = Date.now()): boolean {
 
 function canViewerSeeIncognitoProfile(viewer: Doc<"users">): boolean {
   return viewer.gender === "female" || viewer.subscriptionTier === "premium";
+}
+
+function orientationAllowsPhase1CandidateGender(args: {
+  viewerGender: string | undefined;
+  viewerOrientation: string | undefined;
+  candidateGender: string | undefined;
+}): boolean {
+  const { viewerGender, viewerOrientation, candidateGender } = args;
+
+  if (!viewerOrientation || viewerOrientation === "prefer_not_to_say") return true;
+  if (candidateGender !== "male" && candidateGender !== "female") return true;
+  if (viewerGender !== "male" && viewerGender !== "female") return true;
+
+  if (viewerOrientation === "bisexual") {
+    return candidateGender === "male" || candidateGender === "female";
+  }
+
+  if (viewerOrientation === "straight") {
+    return viewerGender === "male" ? candidateGender === "female" : candidateGender === "male";
+  }
+
+  if (viewerOrientation === "gay") {
+    return candidateGender === viewerGender;
+  }
+
+  if (viewerOrientation === "lesbian") {
+    return viewerGender === "female" && candidateGender === "female";
+  }
+
+  return true;
+}
+
+function calculatePhase1EligibleAge(dateOfBirth?: string | null): number | null {
+  if (!dateOfBirth) return null;
+  const today = new Date();
+  const birthDate = new Date(dateOfBirth);
+  if (isNaN(birthDate.getTime())) return null;
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return Number.isFinite(age) && age >= 18 && age < 120 ? age : null;
+}
+
+function getPhase1ExploreDistanceKm(
+  viewer: Doc<"users">,
+  target: Doc<"users">,
+): number | null {
+  if (
+    typeof viewer.latitude !== "number" ||
+    !Number.isFinite(viewer.latitude) ||
+    typeof viewer.longitude !== "number" ||
+    !Number.isFinite(viewer.longitude)
+  ) {
+    return null;
+  }
+
+  const targetLat = target.publishedLat ?? target.latitude;
+  const targetLng = target.publishedLng ?? target.longitude;
+  if (
+    typeof targetLat !== "number" ||
+    !Number.isFinite(targetLat) ||
+    typeof targetLng !== "number" ||
+    !Number.isFinite(targetLng)
+  ) {
+    return null;
+  }
+
+  const distance = calculateDistance(viewer.latitude, viewer.longitude, targetLat, targetLng);
+  return Number.isFinite(distance) ? distance : null;
+}
+
+async function hasPhase1ReportBetweenUsers(
+  ctx: QueryCtx,
+  userAId: Id<"users">,
+  userBId: Id<"users">,
+): Promise<boolean> {
+  const reportAtoB = await ctx.db
+    .query("reports")
+    .withIndex("by_reporter_reported_created", (q) =>
+      q.eq("reporterId", userAId).eq("reportedUserId", userBId),
+    )
+    .first();
+  if (reportAtoB) return true;
+
+  const reportBtoA = await ctx.db
+    .query("reports")
+    .withIndex("by_reporter_reported_created", (q) =>
+      q.eq("reporterId", userBId).eq("reportedUserId", userAId),
+    )
+    .first();
+  return !!reportBtoA;
+}
+
+async function getPhase1ExplorePreviewDistanceIfEligible(
+  ctx: QueryCtx,
+  viewer: Doc<"users">,
+  target: Doc<"users">,
+): Promise<number | null> {
+  if (viewer.onboardingCompleted !== true || target.onboardingCompleted !== true) return null;
+  if (!target.isActive || target.isBanned || target.deletedAt) return null;
+  if ((target.verificationStatus || "unverified") !== "verified") return null;
+  if (target.verificationEnforcementLevel === "security_only") return null;
+  if (target.hideFromDiscover === true || isDiscoveryPaused(target)) return null;
+  if (target.incognitoMode === true && !canViewerSeeIncognitoProfile(viewer)) return null;
+  if (await hasPhase1ReportBetweenUsers(ctx, viewer._id, target._id)) return null;
+
+  const viewerAge = calculatePhase1EligibleAge(viewer.dateOfBirth);
+  const targetAge = calculatePhase1EligibleAge(target.dateOfBirth);
+  if (viewerAge === null || targetAge === null) return null;
+
+  const viewerPrefs = normalizeDiscoveryPreferences(viewer);
+  const targetPrefs = normalizeDiscoveryPreferences(target);
+  if (targetAge < viewerPrefs.minAge || targetAge > viewerPrefs.maxAge) return null;
+  if (viewerAge < targetPrefs.minAge || viewerAge > targetPrefs.maxAge) return null;
+
+  const viewerLookingFor = Array.isArray(viewer.lookingFor) ? viewer.lookingFor : [];
+  const targetLookingFor = Array.isArray(target.lookingFor) ? target.lookingFor : [];
+  if (!viewerLookingFor.includes(target.gender) || !targetLookingFor.includes(viewer.gender)) {
+    return null;
+  }
+
+  const orientationPasses =
+    orientationAllowsPhase1CandidateGender({
+      viewerGender: viewer.gender,
+      viewerOrientation: viewer.orientation ?? undefined,
+      candidateGender: target.gender,
+    }) &&
+    orientationAllowsPhase1CandidateGender({
+      viewerGender: target.gender,
+      viewerOrientation: target.orientation ?? undefined,
+      candidateGender: viewer.gender,
+    });
+  if (!orientationPasses) return null;
+
+  const distance = getPhase1ExploreDistanceKm(viewer, target);
+  if (distance === null) return null;
+  if (distance > viewerPrefs.maxDistance || distance > targetPrefs.maxDistance) return null;
+
+  return distance;
 }
 
 // Get user by ID (for viewing profiles)
@@ -467,6 +612,7 @@ export const getUserById = query({
     if (!viewer || !viewer.isActive || viewer.isBanned || viewer.deletedAt) return null;
 
     const isSelfProfile = userId === viewerId;
+    const isPhase1ExploreProfile = isPhase1ExploreProfileSource(args.source);
     if (!isSelfProfile && isPhase1ProfileSource(args.source)) {
       if (user.hideFromDiscover === true || isDiscoveryPaused(user)) return null;
       if (user.incognitoMode === true && !canViewerSeeIncognitoProfile(viewer)) {
@@ -493,6 +639,13 @@ export const getUserById = query({
 
     if (reverseBlocked) return null;
 
+    let phase1ExploreDistance: number | undefined;
+    if (!isSelfProfile && isPhase1ExploreProfile) {
+      const eligibleDistance = await getPhase1ExplorePreviewDistanceIfEligible(ctx, viewer, user);
+      if (eligibleDistance === null) return null;
+      phase1ExploreDistance = eligibleDistance;
+    }
+
     // Get photos
     const photos = await ctx.db
       .query("photos")
@@ -500,6 +653,7 @@ export const getUserById = query({
       .collect();
 
     const orderedPhotos = orderSafePhase1DisplayPhotos(photos);
+    if (!isSelfProfile && isPhase1ExploreProfile && orderedPhotos.length === 0) return null;
 
     const isNearbySource = args.source === "nearby" || args.source === "crossed_paths";
 
@@ -507,12 +661,18 @@ export const getUserById = query({
     // deliberately do not return current/raw coordinate distance; Nearby has
     // its own coarse, event-bound distance context.
     let distance: number | undefined;
-    if (
+    if (phase1ExploreDistance !== undefined) {
+      distance = phase1ExploreDistance;
+    } else if (
       !isNearbySource &&
-      user.latitude &&
-      user.longitude &&
-      viewer?.latitude &&
-      viewer?.longitude
+      typeof user.latitude === "number" &&
+      Number.isFinite(user.latitude) &&
+      typeof user.longitude === "number" &&
+      Number.isFinite(user.longitude) &&
+      typeof viewer.latitude === "number" &&
+      Number.isFinite(viewer.latitude) &&
+      typeof viewer.longitude === "number" &&
+      Number.isFinite(viewer.longitude)
     ) {
       distance = calculateDistance(
         user.latitude,
