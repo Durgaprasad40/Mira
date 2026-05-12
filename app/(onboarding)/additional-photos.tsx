@@ -114,7 +114,7 @@ export default function AdditionalPhotosScreen() {
   // BUG FIX: Query backend to get reference photo URL if we only have storageId
   const userQuery = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Query onboarding status for reference photo existence check (source of truth)

@@ -49,6 +49,7 @@ export default function MatchCelebrationScreen() {
     alreadyMatched?: string;
   }>();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const otherUserId = routeOtherUserId ?? routeUserId;
   const isConfessionSource = source === 'confession';
   const confessionConversationId =
@@ -76,11 +77,10 @@ export default function MatchCelebrationScreen() {
       ? { matchId: matchIdValue, userId }
       : "skip",
   );
-  // FIX: Backend expects { userId, viewerId }, not { token, authUserId }
   const otherUserQuery = useQuery(
     api.users.getUserById as any,
-    !isPhase2 && !isDemo && otherUserIdValue && userId
-      ? { userId: otherUserIdValue, viewerId: userId }
+    !isPhase2 && !isDemo && otherUserIdValue && token
+      ? { userId: otherUserIdValue, token }
       : "skip",
   );
   const phase2OtherProfileQuery = useQuery(
@@ -95,10 +95,9 @@ export default function MatchCelebrationScreen() {
       ? { conversationId: confessionConversationId as any, authUserId: userId }
       : "skip",
   );
-  // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
-    !isPhase2 && !isDemo && userId ? { userId } : "skip",
+    !isPhase2 && !isDemo && token ? { token } : "skip",
   );
 
   // In demo mode, use demo data directly; in live mode, use Convex queries

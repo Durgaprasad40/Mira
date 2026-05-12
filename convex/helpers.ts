@@ -294,12 +294,23 @@ export async function validateSessionToken(
 ): Promise<Id<"users"> | null> {
   const now = Date.now();
 
-  // Demo auth (EXPO_PUBLIC_DEMO_AUTH_MODE): token is demo_<users._id>, no sessions row
+  const isValidDemoSessionUser = (
+    user: Doc<"users"> | null | undefined
+  ): user is Doc<"users"> =>
+    !!user &&
+    user.isDemo === true &&
+    user.isActive &&
+    !user.deletedAt &&
+    !user.isBanned;
+
+  // Demo auth (EXPO_PUBLIC_DEMO_AUTH_MODE): token is demo_<users._id>, no sessions row.
+  // Only users explicitly created/marked as demo users may authenticate this way;
+  // otherwise `demo_<realUserId>` would let a forged token impersonate a live user.
   if (token.startsWith('demo_')) {
     const userIdPart = token.substring(5);
     try {
       const user = await ctx.db.get(userIdPart as Id<'users'>);
-      if (user && user.isActive && !user.deletedAt && !user.isBanned) {
+      if (isValidDemoSessionUser(user)) {
         return user._id;
       }
     } catch {
@@ -310,7 +321,7 @@ export async function validateSessionToken(
       .query('users')
       .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', userIdPart))
       .first();
-    if (usersByDemo && usersByDemo.isActive && !usersByDemo.deletedAt && !usersByDemo.isBanned) {
+    if (isValidDemoSessionUser(usersByDemo)) {
       return usersByDemo._id;
     }
 
@@ -318,7 +329,7 @@ export async function validateSessionToken(
       .query('users')
       .withIndex('by_auth_user_id', (q) => q.eq('authUserId', userIdPart))
       .first();
-    if (usersByAuth && usersByAuth.isActive && !usersByAuth.deletedAt && !usersByAuth.isBanned) {
+    if (isValidDemoSessionUser(usersByAuth)) {
       return usersByAuth._id;
     }
 

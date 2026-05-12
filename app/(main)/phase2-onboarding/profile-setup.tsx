@@ -60,7 +60,7 @@ export default function Phase2ReviewScreen() {
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId } : 'skip'
+    token ? { token } : 'skip'
   );
   // FIX: Use getByAuthUserId with authUserId instead of getCurrentOnboardingProfile with token
   const currentPrivateProfile = useQuery(

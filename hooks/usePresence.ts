@@ -84,16 +84,6 @@ function derivePresenceInfo(
   };
 }
 
-function useCurrentViewerId(): Id<'users'> | undefined {
-  const token = useAuthStore((s) => s.token);
-  const trimmed = typeof token === 'string' ? token.trim() : '';
-  const session = useQuery(
-    api.users.getSessionViewerId,
-    trimmed.length > 0 ? { token: trimmed } : 'skip',
-  );
-  return session?.userId as Id<'users'> | undefined;
-}
-
 // =============================================================================
 // PRESENCE HEARTBEAT HOOK (Global)
 // =============================================================================
@@ -134,11 +124,12 @@ export function useUserPresence(
   userId: Id<'users'> | null | undefined,
   options: PresenceQueryOptions = {}
 ): PresenceInfo | undefined {
-  const viewerId = useCurrentViewerId();
+  const token = useAuthStore((s) => s.token);
+  const trimmed = typeof token === 'string' ? token.trim() : '';
   const profile = useQuery(
     api.users.getUserById,
-    userId && viewerId
-      ? { userId, viewerId }
+    userId && trimmed.length > 0
+      ? { userId, token: trimmed }
       : 'skip'
   );
 

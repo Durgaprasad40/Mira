@@ -3,9 +3,12 @@ import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import { softMaskText } from './softMask';
+import { DEFAULT_MIN_AGE, normalizeDiscoveryPreferences } from '../lib/discoveryDefaults';
+import { getSafePhase1PrimaryPhoto } from './phase1Media';
 
 const DAILY_LIKE_LIMIT_FREE = 25;
 const DAILY_STANDOUT_LIMIT_FREE = 2; // stand-out == super_like in this codebase
+const PROFILE_UNAVAILABLE_ERROR = 'This profile is no longer available.';
 
 function getUtcDayStartMs(nowMs: number): number {
   const d = new Date(nowMs);
@@ -41,24 +44,218 @@ async function getPhase1PrimaryPhoto(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
   userId: Id<'users'>
-) {
+): Promise<Doc<'photos'> | null> {
   const photos = await ctx.db
     .query('photos')
     .withIndex('by_user_order', (q: any) => q.eq('userId', userId))
-    .filter((q: any) => q.neq(q.field('photoType'), 'verification_reference'))
-    .collect();
+    .collect() as Doc<'photos'>[];
 
-  photos.sort((a: any, b: any) => {
-    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
-    if (a.order !== b.order) return a.order - b.order;
-    return a.createdAt - b.createdAt;
-  });
-
-  return photos[0] ?? null;
+  return getSafePhase1PrimaryPhoto(photos);
 }
 
 function isPhase1UserAvailable(user: Doc<'users'> | null): user is Doc<'users'> {
   return !!user && user.isActive !== false && user.isBanned !== true && !user.deletedAt;
+}
+
+function isDiscoveryPaused(user: Pick<Doc<'users'>, 'isDiscoveryPaused' | 'discoveryPausedUntil'>): boolean {
+  return (
+    user.isDiscoveryPaused === true &&
+    (typeof user.discoveryPausedUntil !== 'number' || user.discoveryPausedUntil > Date.now())
+  );
+}
+
+function isEffectivelyHiddenFromDiscover(
+  user: Pick<Doc<'users'>, 'hideFromDiscover' | 'isDiscoveryPaused' | 'discoveryPausedUntil'>
+): boolean {
+  return user.hideFromDiscover === true || isDiscoveryPaused(user);
+}
+
+function canViewerSeeIncognitoTarget(viewer: Doc<'users'>): boolean {
+  return viewer.gender === 'female' || viewer.subscriptionTier === 'premium';
+}
+
+function orientationAllowsCandidateGender(args: {
+  viewerGender: string | undefined;
+  viewerOrientation: string | undefined;
+  candidateGender: string | undefined;
+}): boolean {
+  const { viewerGender, viewerOrientation, candidateGender } = args;
+
+  if (!viewerOrientation || viewerOrientation === 'prefer_not_to_say') return true;
+  if (candidateGender !== 'male' && candidateGender !== 'female') return true;
+  if (viewerGender !== 'male' && viewerGender !== 'female') return true;
+
+  if (viewerOrientation === 'bisexual') {
+    return candidateGender === 'male' || candidateGender === 'female';
+  }
+
+  if (viewerOrientation === 'straight') {
+    return viewerGender === 'male' ? candidateGender === 'female' : candidateGender === 'male';
+  }
+
+  if (viewerOrientation === 'gay') {
+    return candidateGender === viewerGender;
+  }
+
+  if (viewerOrientation === 'lesbian') {
+    return viewerGender === 'female' && candidateGender === 'female';
+  }
+
+  return true;
+}
+
+function calculateDiscoverEligibleAge(dateOfBirth?: string | null): number | null {
+  if (!dateOfBirth) return null;
+  const today = new Date();
+  const birthDate = new Date(dateOfBirth);
+  if (isNaN(birthDate.getTime())) return null;
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return Number.isFinite(age) && age >= DEFAULT_MIN_AGE && age < 120 ? age : null;
+}
+
+function toRad(deg: number): number {
+  return deg * (Math.PI / 180);
+}
+
+function calculateDistanceKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
+async function hasReportBetweenUsers(
+  ctx: QueryCtx | MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  const report1 = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userId1).eq('reportedUserId', userId2)
+    )
+    .first();
+  if (report1) return true;
+
+  const report2 = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userId2).eq('reportedUserId', userId1)
+    )
+    .first();
+  return !!report2;
+}
+
+function throwProfileUnavailable(): never {
+  throw new Error(PROFILE_UNAVAILABLE_ERROR);
+}
+
+async function requirePhase1SwipeDiscoverEligibility(
+  ctx: MutationCtx,
+  viewer: Doc<'users'>,
+  targetUserId: Id<'users'>
+): Promise<Doc<'users'>> {
+  const target = await ctx.db.get(targetUserId);
+  if (!isPhase1UserAvailable(target)) throwProfileUnavailable();
+
+  if ((target.verificationStatus || 'unverified') !== 'verified') {
+    throwProfileUnavailable();
+  }
+
+  if (isEffectivelyHiddenFromDiscover(target)) {
+    throwProfileUnavailable();
+  }
+
+  if (target.incognitoMode === true && !canViewerSeeIncognitoTarget(viewer)) {
+    throwProfileUnavailable();
+  }
+
+  if (await isBlockedBidirectional(ctx, viewer._id, target._id)) {
+    throwProfileUnavailable();
+  }
+
+  if (await hasReportBetweenUsers(ctx, viewer._id, target._id)) {
+    throwProfileUnavailable();
+  }
+
+  const viewerAge = calculateDiscoverEligibleAge(viewer.dateOfBirth);
+  const targetAge = calculateDiscoverEligibleAge(target.dateOfBirth);
+  if (viewerAge === null || targetAge === null) {
+    throwProfileUnavailable();
+  }
+
+  const viewerPrefs = normalizeDiscoveryPreferences(viewer);
+  const targetPrefs = normalizeDiscoveryPreferences(target);
+  if (targetAge < viewerPrefs.minAge || targetAge > viewerPrefs.maxAge) {
+    throwProfileUnavailable();
+  }
+  if (viewerAge < targetPrefs.minAge || viewerAge > targetPrefs.maxAge) {
+    throwProfileUnavailable();
+  }
+
+  const viewerLookingFor = Array.isArray(viewer.lookingFor) ? viewer.lookingFor : [];
+  const targetLookingFor = Array.isArray(target.lookingFor) ? target.lookingFor : [];
+  if (!viewerLookingFor.includes(target.gender) || !targetLookingFor.includes(viewer.gender)) {
+    throwProfileUnavailable();
+  }
+
+  const orientationPasses =
+    orientationAllowsCandidateGender({
+      viewerGender: viewer.gender,
+      viewerOrientation: viewer.orientation ?? undefined,
+      candidateGender: target.gender,
+    }) &&
+    orientationAllowsCandidateGender({
+      viewerGender: target.gender,
+      viewerOrientation: target.orientation ?? undefined,
+      candidateGender: viewer.gender,
+    });
+  if (!orientationPasses) {
+    throwProfileUnavailable();
+  }
+
+  if (
+    typeof viewer.latitude !== 'number' ||
+    !Number.isFinite(viewer.latitude) ||
+    typeof viewer.longitude !== 'number' ||
+    !Number.isFinite(viewer.longitude) ||
+    typeof target.latitude !== 'number' ||
+    !Number.isFinite(target.latitude) ||
+    typeof target.longitude !== 'number' ||
+    !Number.isFinite(target.longitude)
+  ) {
+    throwProfileUnavailable();
+  }
+
+  const distance = calculateDistanceKm(
+    viewer.latitude,
+    viewer.longitude,
+    target.latitude,
+    target.longitude
+  );
+  if (
+    !Number.isFinite(distance) ||
+    distance > viewerPrefs.maxDistance ||
+    distance > targetPrefs.maxDistance
+  ) {
+    throwProfileUnavailable();
+  }
+
+  return target;
 }
 
 async function getActivePhase1Match(
@@ -608,7 +805,7 @@ export const swipe = mutation({
     }
 
     const fromUser = await ctx.db.get(fromUserId);
-    if (!fromUser) throw new Error('User not found');
+    if (!isPhase1UserAvailable(fromUser)) throw new Error('User not found');
 
     // 8B: Check email verification before allowing swipe (except pass)
     if (action !== 'pass' && fromUser.emailVerified !== true) {
@@ -629,15 +826,6 @@ export const swipe = mutation({
       throw new Error(statusMessages[fromStatus] || 'Verification required to swipe.');
     }
 
-    // 8A: Check target user is also verified (shouldn't appear in deck but double-check)
-    const toUser = await ctx.db.get(toUserId);
-    if (toUser) {
-      const toStatus = toUser.verificationStatus || 'unverified';
-      if (toStatus !== 'verified') {
-        throw new Error('This user is no longer available.');
-      }
-    }
-
     // TODO: Subscription restrictions disabled for testing mode.
     // Re-enable usage limits once testing is complete.
     // if (fromUser.gender === 'male') { ... }
@@ -654,13 +842,10 @@ export const swipe = mutation({
       throw new Error('Already swiped on this user');
     }
 
-    // P1 SECURITY: Block check for like/super_like actions (not just text)
-    // Prevents blocked users from liking each other and creating matches
-    if (action === 'like' || action === 'super_like') {
-      if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
-        throw new Error('Cannot like this user');
-      }
-    }
+    // Stage-2 Discover auth hardening: re-check hard Discover eligibility
+    // server-side before any swipe write. The client may hold stale cards or
+    // send arbitrary target IDs, so the backend must fail closed here.
+    const toUser = await requirePhase1SwipeDiscoverEligibility(ctx, fromUser, toUserId);
 
     // P0-1: Server-side daily like / stand-out enforcement (backend is source of truth)
     // Policy alignment: premium and female accounts are treated as unlimited; basic remains subject to limits.
@@ -1590,15 +1775,8 @@ export const getLikedUsers = query({
 
       const c: any = candidate;
 
-      // Live primary photo: prefer the canonical `users.primaryPhotoUrl`
-      // (kept in sync by setPrimaryPhoto / reorderPhotos). Fall back to the
-      // photos table when the user doc has not been backfilled yet, and
-      // always exclude verification_reference photos.
-      let livePhotoUrl: string | null = c.primaryPhotoUrl ?? null;
-      if (!livePhotoUrl) {
-        const fallback = await getPhase1PrimaryPhoto(ctx, candidateId);
-        livePhotoUrl = fallback?.url ?? null;
-      }
+      const livePhoto = await getPhase1PrimaryPhoto(ctx, candidateId);
+      const livePhotoUrl: string | null = livePhoto?.url ?? null;
 
       // Server-derived age (never client-supplied)
       const computedAge = c.dateOfBirth ? calculateAge(c.dateOfBirth) : 0;

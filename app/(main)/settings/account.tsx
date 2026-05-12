@@ -37,7 +37,7 @@ export default function AccountSettingsScreen() {
   // Query current user for email display (live mode only)
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
   const [timedOut, setTimedOut] = useState(false);

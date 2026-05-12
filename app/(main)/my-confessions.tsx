@@ -63,7 +63,7 @@ export default function MyConfessionsScreen() {
   // Convex current user for effectiveViewerId
   const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const effectiveViewerId = isDemoMode ? currentUserId : convexCurrentUser?._id;
 

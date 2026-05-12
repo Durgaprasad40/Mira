@@ -60,7 +60,7 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
   };
 
   const currentUserQuery = useQuery(
-    api.users.getCurrentUserFromToken,
+    api.users.getCurrentUser,
     !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;

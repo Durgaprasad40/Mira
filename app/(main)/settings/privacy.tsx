@@ -22,7 +22,7 @@ export default function PrivacySettingsScreen() {
   // Query current user privacy settings (live mode only)
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Mutations for backend sync

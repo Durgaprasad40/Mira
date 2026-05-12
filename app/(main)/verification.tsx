@@ -57,7 +57,7 @@ export default function VerificationScreen() {
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : "skip"
+    !isDemoMode && token ? { token } : "skip"
   );
   const isLocked = !isDemoMode && currentUser
     ? (currentUser.verificationEnforcementLevel === "security_only" ||

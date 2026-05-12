@@ -37,7 +37,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 
 import { api } from '@/convex/_generated/api';
-import { asUserId } from '@/convex/id';
 import { COLORS, FONT_SIZE, SPACING, lineHeight, moderateScale } from '@/lib/constants';
 import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -264,8 +263,8 @@ export default function ConfessionThreadScreen() {
   );
   const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && currentUserId
-      ? { userId: asUserId(currentUserId) ?? currentUserId }
+    !isDemoMode && token
+      ? { token }
       : 'skip'
   );
   // Primary-display-photo source of truth.

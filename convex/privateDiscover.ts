@@ -141,9 +141,13 @@ function distanceBetweenUsersKm(
 ): number | undefined {
   if (
     typeof viewer.latitude !== 'number' ||
+    !Number.isFinite(viewer.latitude) ||
     typeof viewer.longitude !== 'number' ||
+    !Number.isFinite(viewer.longitude) ||
     typeof candidate.latitude !== 'number' ||
-    typeof candidate.longitude !== 'number'
+    !Number.isFinite(candidate.latitude) ||
+    typeof candidate.longitude !== 'number' ||
+    !Number.isFinite(candidate.longitude)
   ) {
     return undefined;
   }
@@ -156,8 +160,7 @@ function distanceBetweenUsersKm(
 }
 
 function isDistanceAllowed(distanceKm: number | undefined, maxDistanceKm: number): boolean {
-  if (distanceKm == null) return true;
-  return distanceKm <= maxDistanceKm;
+  return typeof distanceKm === 'number' && Number.isFinite(distanceKm) && distanceKm <= maxDistanceKm;
 }
 
 function getProfileIntentKeys(profile: { privateIntentKeys?: string[]; privateIntentKey?: string | null | undefined }): string[] {

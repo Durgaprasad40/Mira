@@ -644,6 +644,10 @@ export default function MessagesScreen() {
     () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
     [convexUserId, retryKey]
   );
+  const currentUserQueryArgs = useMemo(
+    () => (!isDemoMode && token ? { token } : 'skip' as const),
+    [isDemoMode, retryKey, token]
+  );
   const convexMatchesArgs = useMemo(
     () => (!isDemoMode && userId ? { authUserId: userId } : 'skip' as const),
     [isDemoMode, retryKey, userId]
@@ -656,7 +660,7 @@ export default function MessagesScreen() {
   // Convex queries (skipped in demo mode)
   const convexConversations = useQuery(api.messages.getConversations, convexConversationsArgs);
   const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexUnreadArgs);
-  const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
+  const convexCurrentUser = useQuery(api.users.getCurrentUser, currentUserQueryArgs);
   const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
   const convexMatches = useQuery(api.matches.getMatches, convexMatchesArgs);
   const incomingStandOutsResult = useQuery(api.likes.getIncomingStandOuts, standOutQueryArgs);
@@ -890,7 +894,7 @@ export default function MessagesScreen() {
     messagesNudgeStatus === 'needs_both' && !dismissedNudges.includes('messages');
 
   const refetchLiveMessagesData = useCallback(async () => {
-    if (isDemoMode || !userId || !convexUserId) {
+    if (isDemoMode || !userId || !convexUserId || !token) {
       return;
     }
 
@@ -899,14 +903,14 @@ export default function MessagesScreen() {
     await Promise.all([
       convex.query(api.messages.getConversations, { authUserId: userId }),
       convex.query(api.messages.getUnreadCount, { userId }),
-      convex.query(api.users.getCurrentUser, { userId: convexUserId }),
+      convex.query(api.users.getCurrentUser, { token }),
       convex.query(api.likes.getLikesReceived, { userId: convexUserId }),
       convex.query(api.matches.getMatches, { authUserId: userId }),
       convex.query(api.likes.getIncomingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
       convex.query(api.likes.getOutgoingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
       convex.query(api.likes.getStandOutCounts, { userId: convexUserId, refreshKey: retryKey }),
     ]);
-  }, [convex, convexUserId, isDemoMode, retryKey, userId]);
+  }, [convex, convexUserId, isDemoMode, retryKey, token, userId]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);

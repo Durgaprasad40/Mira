@@ -196,7 +196,7 @@ export default function ReviewScreen() {
   // which excludes verification_reference photos
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   // Extract photos from currentUser (includes verification_reference)
   const backendPhotos = currentUser?.photos ?? [];

@@ -47,12 +47,12 @@ export function HeaderAvatarButton({
   style,
 }: HeaderAvatarButtonProps) {
   const router = useRouter();
-  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // Live-mode current user (skipped in demo)
   const convexUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Demo-mode fallback: pick the current demo user's profile from the store map

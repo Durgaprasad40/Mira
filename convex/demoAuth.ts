@@ -10,7 +10,7 @@
  * - getDemoOnboardingStatus: Get onboarding status
  * - ensureDemoUserConsent: Ensure consent is set
  */
-import { mutation, query, type MutationCtx } from "./_generated/server";
+import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { Doc, Id } from "./_generated/dataModel";
 
@@ -74,6 +74,67 @@ async function findDemoUserByEmail(
   return user;
 }
 
+function hasDemoIdentity(user: Doc<"users"> | null | undefined): boolean {
+  if (!user) return false;
+  if (user.isDemo === true) return true;
+  return (
+    user.authUserId?.startsWith("demo_") === true ||
+    user.demoUserId?.startsWith("demo_") === true ||
+    user.authUserId === "demo_user_stable_001" ||
+    user.demoUserId === "demo_user_stable_001"
+  );
+}
+
+function isActiveDemoUser(user: Doc<"users"> | null | undefined): user is Doc<"users"> {
+  return (
+    !!user &&
+    user.isDemo === true &&
+    user.isActive === true &&
+    user.isBanned !== true &&
+    !user.deletedAt
+  );
+}
+
+async function markLegacyDemoUser(ctx: MutationCtx, user: Doc<"users">) {
+  if (user.isDemo !== true) {
+    await ctx.db.patch(user._id, { isDemo: true });
+  }
+}
+
+async function findActiveDemoUserFromToken(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+): Promise<Doc<"users"> | null> {
+  if (!token.startsWith("demo_")) {
+    return null;
+  }
+
+  const tokenSubject = token.substring(5);
+  let user: Doc<"users"> | null = null;
+
+  try {
+    user = await ctx.db.get(tokenSubject as Id<"users">);
+  } catch {
+    // Not a valid Convex id string; fall back to demo/auth ids below.
+  }
+
+  if (!user) {
+    user = await ctx.db
+      .query("users")
+      .withIndex("by_demo_user_id", (q) => q.eq("demoUserId", tokenSubject))
+      .first();
+  }
+
+  if (!user) {
+    user = await ctx.db
+      .query("users")
+      .withIndex("by_auth_user_id", (q) => q.eq("authUserId", tokenSubject))
+      .first();
+  }
+
+  return isActiveDemoUser(user) ? user : null;
+}
+
 /**
  * Demo auth: login (existing email only) OR register (new email only).
  * - mode "login": NEVER creates a user; fails if no account for this email.
@@ -106,7 +167,7 @@ export const loginOrCreateDemoUser = mutation({
     const existing = await findDemoUserByEmail(ctx, rawEmail);
 
     if (args.mode === "login") {
-      if (!existing) {
+      if (!existing || !hasDemoIdentity(existing)) {
         return {
           success: false,
           message:
@@ -131,6 +192,7 @@ export const loginOrCreateDemoUser = mutation({
         };
       }
 
+      await markLegacyDemoUser(ctx, existing);
       await ctx.db.patch(existing._id, { lastActive: now });
       const token = `demo_${existing._id}`;
       return {
@@ -173,6 +235,7 @@ export const loginOrCreateDemoUser = mutation({
 
       isVerified: true,
       emailVerified: true,
+      isDemo: true,
 
       lookingFor: ["female"],
       relationshipIntent: [],
@@ -288,36 +351,7 @@ export const validateDemoSession = query({
     token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { token } = args;
-
-    // Demo tokens have format: demo_<userId>
-    if (!token.startsWith("demo_")) {
-      return {
-        valid: false,
-        userId: null,
-        onboardingCompleted: false,
-      };
-    }
-
-    // Extract the Convex ID portion (after "demo_")
-    const convexIdPart = token.substring(5);
-
-    // Query by authUserId (demo users have authUserId set)
-    const users = await ctx.db
-      .query("users")
-      .withIndex("by_auth_user_id", (q) => q.eq("authUserId", convexIdPart))
-      .take(1);
-
-    // Also check by demoUserId
-    let user = users.length > 0 ? users[0] : null;
-    if (!user) {
-      const usersByDemo = await ctx.db
-        .query("users")
-        .withIndex("by_demo_user_id", (q) => q.eq("demoUserId", convexIdPart))
-        .take(1);
-      user = usersByDemo.length > 0 ? usersByDemo[0] : null;
-    }
-
+    const user = await findActiveDemoUserFromToken(ctx, args.token);
     if (!user) {
       return {
         valid: false,
@@ -345,40 +379,7 @@ export const getDemoOnboardingStatus = query({
     token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { token } = args;
-
-    // Demo tokens have format: demo_<userId>
-    if (!token.startsWith("demo_")) {
-      return null;
-    }
-
-    // Extract the Convex ID portion
-    const convexIdPart = token.substring(5);
-
-    // Try direct lookup by _id first (token format is demo_<user._id>)
-    let user: Doc<"users"> | null = null;
-    try {
-      user = await ctx.db.get(convexIdPart as Id<"users">);
-    } catch {
-      // Not a valid Convex ID format, try field lookups
-    }
-
-    // Fallback: Query by authUserId or demoUserId
-    if (!user) {
-      const usersByAuth = await ctx.db
-        .query("users")
-        .withIndex("by_auth_user_id", (q) => q.eq("authUserId", convexIdPart))
-        .first();
-      user = usersByAuth;
-    }
-    if (!user) {
-      const usersByDemo = await ctx.db
-        .query("users")
-        .withIndex("by_demo_user_id", (q) => q.eq("demoUserId", convexIdPart))
-        .first();
-      user = usersByDemo;
-    }
-
+    const user = await findActiveDemoUserFromToken(ctx, args.token);
     if (!user) {
       return null;
     }
@@ -442,67 +443,20 @@ export const ensureDemoUserConsent = mutation({
     token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { token } = args;
-
-    // Demo tokens have format: demo_<userId> where userId is the Convex document _id
-    if (!token.startsWith("demo_")) {
-      console.log("[DEMO_AUTH] ensureDemoUserConsent: Invalid token format (not demo_)");
-      return { success: false };
-    }
-
-    // Extract the Convex document ID from token
-    const convexIdPart = token.substring(5);
-    let userId: Id<"users"> | null = null;
-
-    // Direct lookup by _id (token contains user._id, not authUserId/demoUserId)
-    try {
-      const user = await ctx.db.get(convexIdPart as Id<"users">);
-      if (user) {
-        userId = user._id;
-      }
-    } catch (error) {
-      // Not a valid Convex ID format - fall through to field lookup
-    }
-
-    // Fallback: try by authUserId/demoUserId in case of old tokens
-    if (!userId) {
-      console.log("[DEMO_AUTH] ensureDemoUserConsent: User not found by _id, trying fallback");
-      const usersByAuth = await ctx.db
-        .query("users")
-        .withIndex("by_auth_user_id", (q) => q.eq("authUserId", convexIdPart))
-        .take(1);
-      if (usersByAuth.length > 0) {
-        userId = usersByAuth[0]._id;
-      } else {
-        const usersByDemo = await ctx.db
-          .query("users")
-          .withIndex("by_demo_user_id", (q) => q.eq("demoUserId", convexIdPart))
-          .take(1);
-        if (usersByDemo.length > 0) {
-          userId = usersByDemo[0]._id;
-        }
-      }
-    }
-
-    if (!userId) {
+    const user = await findActiveDemoUserFromToken(ctx, args.token);
+    if (!user) {
       console.log("[DEMO_AUTH] ensureDemoUserConsent: User not found by any method");
       return { success: false };
     }
 
     // CRITICAL FIX: Actually write consentAcceptedAt if not already set
     // This is the field checked by photos:uploadVerificationReferencePhoto
-    const user = await ctx.db.get(userId);
-    if (!user) {
-      console.log("[DEMO_AUTH] ensureDemoUserConsent: User disappeared after lookup");
-      return { success: false };
-    }
-
     if (!user.consentAcceptedAt) {
       const now = Date.now();
-      await ctx.db.patch(userId, { consentAcceptedAt: now });
-      console.log(`[DEMO_AUTH] ensureDemoUserConsent: Set consentAcceptedAt=${now} for user=${userId}`);
+      await ctx.db.patch(user._id, { consentAcceptedAt: now });
+      console.log(`[DEMO_AUTH] ensureDemoUserConsent: Set consentAcceptedAt=${now} for user=${user._id}`);
     } else {
-      console.log(`[DEMO_AUTH] ensureDemoUserConsent: consentAcceptedAt already set for user=${userId}`);
+      console.log(`[DEMO_AUTH] ensureDemoUserConsent: consentAcceptedAt already set for user=${user._id}`);
     }
 
     return { success: true };
@@ -528,45 +482,8 @@ export const updateDemoUserBasicInfo = mutation({
     handle: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { token, name, dateOfBirth, gender, handle } = args;
-
-    // Demo tokens have format: demo_<userId>
-    if (!token.startsWith("demo_")) {
-      return { success: false, message: "Invalid demo token" };
-    }
-
-    // Extract the Convex ID portion (this is the actual user _id)
-    const convexIdPart = token.substring(5);
-
-    // Try to get the user directly by _id first
-    let user: Doc<"users"> | null = null;
-    try {
-      const maybeUser = await ctx.db.get(convexIdPart as Id<"users">);
-      if (maybeUser && "name" in maybeUser) {
-        user = maybeUser as Doc<"users">;
-      }
-    } catch {
-      // Not a valid ID format, try other lookups
-    }
-
-    // Fallback: Query by authUserId
-    if (!user) {
-      const users = await ctx.db
-        .query("users")
-        .withIndex("by_auth_user_id", (q) => q.eq("authUserId", convexIdPart))
-        .take(1);
-      user = users.length > 0 ? users[0] : null;
-    }
-
-    // Fallback: Query by demoUserId
-    if (!user) {
-      const usersByDemo = await ctx.db
-        .query("users")
-        .withIndex("by_demo_user_id", (q) => q.eq("demoUserId", convexIdPart))
-        .take(1);
-      user = usersByDemo.length > 0 ? usersByDemo[0] : null;
-    }
-
+    const { name, dateOfBirth, gender, handle } = args;
+    const user = await findActiveDemoUserFromToken(ctx, args.token);
     if (!user) {
       return { success: false, message: "Demo user not found" };
     }

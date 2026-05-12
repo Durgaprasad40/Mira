@@ -153,7 +153,7 @@ export default function MainLayout() {
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : "skip"
+    !isDemoMode && token ? { token } : "skip"
   );
 
   // DELIVERY_ACK: Mount app-wide foreground delivery acknowledgement for Phase-1.

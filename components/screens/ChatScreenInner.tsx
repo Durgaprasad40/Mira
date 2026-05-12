@@ -307,7 +307,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [router, conversationId]);
 
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const flatListRef = useRef<FlashListRef<RenderMessage>>(null);
 
   // Track screen focus to check for camera-composer handoff data
@@ -516,7 +516,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemo && userId ? { userId: asUserId(userId) } : 'skip'
+    !isDemo && token ? { token } : 'skip'
   ) as CurrentUserSummary | null | undefined;
 
   // Live typing presence — backend returns `{ isTyping }` for the OTHER participant

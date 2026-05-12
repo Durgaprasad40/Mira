@@ -231,10 +231,12 @@ const PRESENCE_HEARTBEAT_INTERVAL = 15000; // 15 seconds
 function Phase2ChatThreadPrefetcher({
   conversationId,
   userId,
+  token,
   onReady,
 }: {
   conversationId: string;
   userId: string;
+  token: string;
   onReady: () => void;
 }) {
   const conv = useQuery(api.privateConversations.getPrivateConversation, {
@@ -248,7 +250,7 @@ function Phase2ChatThreadPrefetcher({
   });
   const cu = useQuery(api.users.getUserById, {
     userId: userId as any,
-    viewerId: userId as any,
+    token,
   });
   const gs = useQuery(api.games.getBottleSpinSession, { conversationId, authUserId: userId });
   const ready =
@@ -1555,10 +1557,11 @@ export default function ChatsScreen() {
        * navigates anyway if the warm-up is unexpectedly slow, so the user
        * is never blocked.
        */}
-      {openingId && currentUserId ? (
+      {openingId && currentUserId && token ? (
         <Phase2ChatThreadPrefetcher
           conversationId={openingId}
           userId={currentUserId}
+          token={token}
           onReady={() => navigateToThread(openingId)}
         />
       ) : null}

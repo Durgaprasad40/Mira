@@ -19,7 +19,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 
 export default function SubscriptionScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
   const subscriptionStatus = useQuery(
     api.subscriptions.getSubscriptionStatus,
@@ -28,7 +28,7 @@ export default function SubscriptionScreen() {
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   const purchaseSubscription = useMutation(api.subscriptions.purchaseSubscription);

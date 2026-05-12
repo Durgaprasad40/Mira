@@ -138,7 +138,7 @@ export default function ProfileScreen() {
   // FIX: Use getCurrentUser with userId instead of getCurrentUserProfileState with token
   const currentUserData = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const convexUser = !isDemoMode ? (currentUserData ?? undefined) : undefined;
   const isCurrentUserLoading = !isDemoMode && !!userId && currentUserData === undefined;

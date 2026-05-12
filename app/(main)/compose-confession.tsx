@@ -84,6 +84,7 @@ export default function ComposeConfessionScreen() {
   const editId = isEditMode ? (params.editId as Id<'confessions'>) : undefined;
 
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
 
   const demoAddConfession = useConfessionStore((s) => s.addConfession);
@@ -96,7 +97,7 @@ export default function ComposeConfessionScreen() {
 
   const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && currentUserId ? { userId: asUserId(currentUserId) ?? currentUserId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const convexCurrentUserId = !isDemoMode ? (convexCurrentUser?._id ?? asUserId(currentUserId ?? '')) : undefined;
   const likedUsersQuery = useQuery(

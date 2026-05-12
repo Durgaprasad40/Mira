@@ -350,7 +350,7 @@ export default function Phase2ChatThread() {
 
   const currentUser = useQuery(
     api.users.getUserById,
-    userId ? { userId, viewerId: userId } : 'skip'
+    userId && token ? { userId, token } : 'skip'
   );
 
   const gameSession = useQuery(

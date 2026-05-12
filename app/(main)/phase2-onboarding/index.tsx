@@ -64,7 +64,7 @@ export default function Phase2OnboardingConsentScreen() {
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken with token
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId } : 'skip'
+    token ? { token } : 'skip'
   );
   const currentPrivateProfile = useQuery(
     api.privateProfiles.getByAuthUserId,

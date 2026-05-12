@@ -330,7 +330,7 @@ export default function ViewProfileScreen() {
   const { userId: currentUserId, token } = useAuthStore();
   const currentViewer = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentViewerId = currentViewer?._id as Id<'users'> | undefined;
   const confessTagActionEligibility = useQuery(
@@ -388,15 +388,19 @@ export default function ViewProfileScreen() {
     return { stickyHeaderShowThreshold: showAt, stickyHeaderHideThreshold: hideAt };
   }, [insets.top]);
   const setDiscoverProfileActionResult = useInteractionStore((s) => s.setDiscoverProfileActionResult);
+  const shouldPassPhase1ProfileSource =
+    isNearbyPrivacySource ||
+    normalizedSource === 'phase1_discover' ||
+    normalizedSource === 'phase1_explore';
 
   // Phase-1: Use users.getUserById
   const convexPhase1Profile = useQuery(
     api.users.getUserById,
-    !isDemoMode && !isPhase2 && userId && currentViewerId
+    !isDemoMode && !isPhase2 && userId && token
       ? {
           userId: userId as Id<'users'>,
-          viewerId: currentViewerId,
-          ...(isNearbyPrivacySource ? { source: normalizedSource } : {}),
+          token,
+          ...(shouldPassPhase1ProfileSource ? { source: normalizedSource } : {}),
         }
       : 'skip'
   );

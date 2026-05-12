@@ -202,7 +202,7 @@ export default function ConfessionsScreen() {
 
   const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && currentUserId ? { userId: asUserId(currentUserId) ?? currentUserId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const convexCurrentUserId = !isDemoMode ? (convexCurrentUser?._id ?? asUserId(currentUserId ?? '')) : undefined;
 

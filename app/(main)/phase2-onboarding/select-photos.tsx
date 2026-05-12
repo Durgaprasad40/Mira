@@ -43,7 +43,7 @@ export default function Phase2SelectPhotosScreen() {
   // FIX: Fetch Phase-1 photos DIRECTLY from Convex instead of relying on store hydration
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId } : 'skip'
+    token ? { token } : 'skip'
   );
 
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);

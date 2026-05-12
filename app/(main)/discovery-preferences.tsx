@@ -21,7 +21,6 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { asUserId } from '@/convex/id';
 import type { Gender, Orientation } from '@/types';
 import {
   DEFAULT_MAX_AGE,
@@ -59,12 +58,11 @@ export default function DiscoveryPreferencesScreen() {
   const isPhase2 = mode === 'phase2' || (mode === undefined && isInPrivateRoute);
 
   const { userId, token } = useAuthStore();
-  const convexUserId = userId ? asUserId(userId) : undefined;
 
   // Fetch current user preferences from Convex (source of truth for Phase-1 prefs on users table)
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Phase-2: "What are you looking for" lives on userPrivateProfiles.privateIntentKeys — must load separately
@@ -362,8 +360,11 @@ export default function DiscoveryPreferencesScreen() {
 
       // Update backend if not in demo mode (backend uses km)
       if (!isDemoMode) {
+        if (!token) {
+          throw new Error('Missing session token');
+        }
         await updatePreferences({
-          userId: userId as any,
+          token,
           minAge: parsedMinAge,
           maxAge: parsedMaxAge,
           maxDistance: parsedDistanceKm,

@@ -450,7 +450,7 @@ export default function NearbyScreen() {
   const token = useAuthStore((s) => s.token);
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
-    !isDemo && userId ? { userId } : 'skip'
+    !isDemo && token ? { token } : 'skip'
   );
   const incognitoMode = currentUserQuery?.incognitoMode === true;
   const nearbyPaused =

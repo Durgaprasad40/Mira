@@ -25,6 +25,7 @@ import {
 import {
   normalizeDiscoveryPreferences,
 } from "../lib/discoveryDefaults";
+import { orderSafePhase1DisplayPhotos } from "./phase1Media";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 const PROFILE_NAME_MAX_LENGTH = 50;
@@ -226,6 +227,8 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     isVerified: user.isVerified,
     verificationStatus: user.verificationStatus,
     verificationCompletedAt: user.verificationCompletedAt,
+    verificationReferencePhotoId: user.verificationReferencePhotoId,
+    verificationReferencePhotoUrl: user.verificationReferencePhotoUrl,
     verificationEnforcementLevel: user.verificationEnforcementLevel,
     lookingFor: user.lookingFor ?? [],
     relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
@@ -279,13 +282,14 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
 // Get current user profile
 export const getCurrentUser = query({
   args: {
-    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (READ-ONLY, no creation)
-    const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const sessionToken = args.token.trim();
+    if (!sessionToken.length) return null;
+
+    const convexUserId = await validateSessionToken(ctx, sessionToken);
     if (!convexUserId) {
-      console.log("[getCurrentUser] User not found for authUserId:", args.userId);
       return null;
     }
 
@@ -419,21 +423,56 @@ export const ensureCurrentUser = mutation({
   },
 });
 
+function isPhase1ProfileSource(source: string | undefined): boolean {
+  return (
+    source === "phase1_discover" ||
+    source === "phase1_explore" ||
+    source === "discover" ||
+    source === "explore"
+  );
+}
+
+function isDiscoveryPaused(user: Doc<"users">, now = Date.now()): boolean {
+  if (user.isDiscoveryPaused !== true) return false;
+  if (!user.discoveryPausedUntil) return true;
+  return user.discoveryPausedUntil > now;
+}
+
+function canViewerSeeIncognitoProfile(viewer: Doc<"users">): boolean {
+  return viewer.gender === "female" || viewer.subscriptionTier === "premium";
+}
+
 // Get user by ID (for viewing profiles)
 export const getUserById = query({
   args: {
     userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
-    viewerId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
+    token: v.string(),
     source: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const sessionToken = args.token.trim();
+    if (!sessionToken.length) return null;
+
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) return null;
+
     // Map authUserId -> Convex Id<"users"> if needed
     const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    const viewerId = await resolveUserIdByAuthId(ctx, args.viewerId as string);
-    if (!userId || !viewerId) return null;
+    if (!userId) return null;
 
     const user = await ctx.db.get(userId);
-    if (!user || !user.isActive || user.isBanned) return null;
+    if (!user || !user.isActive || user.isBanned || user.deletedAt) return null;
+
+    const viewer = await ctx.db.get(viewerId);
+    if (!viewer || !viewer.isActive || viewer.isBanned || viewer.deletedAt) return null;
+
+    const isSelfProfile = userId === viewerId;
+    if (!isSelfProfile && isPhase1ProfileSource(args.source)) {
+      if (user.hideFromDiscover === true || isDiscoveryPaused(user)) return null;
+      if (user.incognitoMode === true && !canViewerSeeIncognitoProfile(viewer)) {
+        return null;
+      }
+    }
 
     // Check if blocked
     const blocked = await ctx.db
@@ -460,28 +499,13 @@ export const getUserById = query({
       .withIndex("by_user_order", (q) => q.eq("userId", userId))
       .collect();
 
-    const publicPhotos = photos.filter(
-      (p) => p.photoType !== "verification_reference"
-    );
-
-    const primaryPhoto = publicPhotos.find(
-      (p) => p.isPrimary === true
-    );
-
-    const otherPhotos = publicPhotos
-      .filter((p) => p.isPrimary !== true)
-      .sort((a, b) => a.order - b.order);
-
-    const orderedPhotos = primaryPhoto
-      ? [primaryPhoto, ...otherPhotos]
-      : [...publicPhotos].sort((a, b) => a.order - b.order);
+    const orderedPhotos = orderSafePhase1DisplayPhotos(photos);
 
     const isNearbySource = args.source === "nearby" || args.source === "crossed_paths";
 
     // Calculate distance if both have location. Profiles opened from Nearby
     // deliberately do not return current/raw coordinate distance; Nearby has
     // its own coarse, event-bound distance context.
-    const viewer = await ctx.db.get(viewerId);
     let distance: number | undefined;
     if (
       !isNearbySource &&
@@ -802,7 +826,7 @@ export const updateProfile = mutation({
 // Update preferences
 export const updatePreferences = mutation({
   args: {
-    userId: v.id("users"),
+    token: v.string(),
     lookingFor: v.optional(
       v.array(
         v.union(
@@ -853,7 +877,16 @@ export const updatePreferences = mutation({
     maxDistance: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, minAge, maxAge, maxDistance, ...otherUpdates } = args;
+    const { token, minAge, maxAge, maxDistance, ...otherUpdates } = args;
+    const sessionToken = token.trim();
+    if (!sessionToken.length) {
+      throw new Error("Unauthorized: missing session token");
+    }
+
+    const userId = await validateSessionToken(ctx, sessionToken);
+    if (!userId) {
+      throw new Error("Unauthorized: invalid session token");
+    }
 
     // BUGFIX #37: Age bounds validation
     if (minAge !== undefined) {

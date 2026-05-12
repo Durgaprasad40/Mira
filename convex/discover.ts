@@ -22,6 +22,7 @@ import { v } from 'convex/values';
 import { mutation, query, QueryCtx } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { orderSafePhase1DisplayPhotos } from './phase1Media';
 import {
   FRONTEND_EXPLORE_CATEGORY_IDS,
   FRONTEND_RELATIONSHIP_INTENT_IDS,
@@ -253,11 +254,22 @@ function toRad(deg: number): number {
 
 /**
  * Check if a calculated distance is within the allowed max.
- * Mirrors lib/distanceRules.ts - profiles without distance are allowed.
+ * Distance is a hard Discover/Explore gate: if it cannot be calculated,
+ * fail closed so missing coordinates cannot create a global deck.
  */
 function isDistanceAllowed(distance: number | undefined, maxDistanceKm: number): boolean {
-  if (distance == null) return true;
-  return distance <= maxDistanceKm;
+  return typeof distance === 'number' && Number.isFinite(distance) && distance <= maxDistanceKm;
+}
+
+function hasUsableDistanceLocation<T extends { latitude?: number; longitude?: number }>(
+  user: T
+): user is T & { latitude: number; longitude: number } {
+  return (
+    typeof user.latitude === 'number' &&
+    Number.isFinite(user.latitude) &&
+    typeof user.longitude === 'number' &&
+    Number.isFinite(user.longitude)
+  );
 }
 
 function hasEligibleAdultAge(age: number | null): age is number {
@@ -821,41 +833,46 @@ export const getDiscoverProfiles = query({
       }
 
       // Distance
-      let distance: number | undefined;
-      if (
-        typeof currentUser.latitude === 'number' &&
-        typeof currentUser.longitude === 'number' &&
-        typeof user.latitude === 'number' &&
-        typeof user.longitude === 'number'
-      ) {
-        distance = calculateDistance(
-          currentUser.latitude, currentUser.longitude,
-          user.latitude, user.longitude,
-        );
-        if (!isDistanceAllowed(distance, currentPrefs.maxDistance)) {
-          prefFailCount++;
-          if (DISCOVER_AUDIT_ENABLED) {
-            console.log('[DISCOVER_AUDIT][compatibility] distance_exceeds_viewer_max', {
-              viewer: currentUser._id,
-              candidate: user._id,
-              distanceKm: distance,
-              viewerMaxDistance: currentPrefs.maxDistance,
-            });
-          }
-          continue;
+      if (!hasUsableDistanceLocation(currentUser) || !hasUsableDistanceLocation(user)) {
+        prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] missing_distance_location', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            viewerHasCoords: hasUsableDistanceLocation(currentUser),
+            candidateHasCoords: hasUsableDistanceLocation(user),
+          });
         }
-        if (!isDistanceAllowed(distance, candidatePrefs.maxDistance)) {
-          prefFailCount++;
-          if (DISCOVER_AUDIT_ENABLED) {
-            console.log('[DISCOVER_AUDIT][compatibility] distance_exceeds_candidate_max', {
-              viewer: currentUser._id,
-              candidate: user._id,
-              distanceKm: distance,
-              candidateMaxDistance: candidatePrefs.maxDistance,
-            });
-          }
-          continue;
+        continue;
+      }
+
+      const distance = calculateDistance(
+        currentUser.latitude, currentUser.longitude,
+        user.latitude, user.longitude,
+      );
+      if (!isDistanceAllowed(distance, currentPrefs.maxDistance)) {
+        prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] distance_exceeds_viewer_max', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            distanceKm: distance,
+            viewerMaxDistance: currentPrefs.maxDistance,
+          });
         }
+        continue;
+      }
+      if (!isDistanceAllowed(distance, candidatePrefs.maxDistance)) {
+        prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] distance_exceeds_candidate_max', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            distanceKm: distance,
+            candidateMaxDistance: candidatePrefs.maxDistance,
+          });
+        }
+        continue;
       }
 
       // PERF #8: O(1) Set lookups instead of database queries
@@ -968,10 +985,8 @@ export const getDiscoverProfiles = query({
       const { user, distance } = filteredCandidates[i];
       const photos = photoResults[i];
 
-      const safePublicPhotos = photos.filter(
-        (p) => !p.isNsfw && p.photoType !== 'verification_reference'
-      );
-      if (safePublicPhotos.length === 0) {
+      const orderedPublicPhotos = orderSafePhase1DisplayPhotos(photos);
+      if (orderedPublicPhotos.length === 0) {
         if (DISCOVER_AUDIT_ENABLED) {
           console.log('[DISCOVER_AUDIT][visibility] no_public_safe_photos', {
             viewer: currentUser._id,
@@ -981,18 +996,6 @@ export const getDiscoverProfiles = query({
         }
         continue; // at least 1 public-safe photo required
       }
-
-      // Photo ordering: mirror full-profile contract (convex/users.ts:427-431) so
-      // the user's chosen primary photo is always at position 0 on the swipe card.
-      // Prepend isPrimary photo, then sort the rest by `order`. NSFW filtering
-      // above is unchanged.
-      const primaryPhoto = safePublicPhotos.find((p) => p.isPrimary === true);
-      const nonPrimaryPhotos = safePublicPhotos
-        .filter((p) => p._id !== primaryPhoto?._id)
-        .sort((a, b) => a.order - b.order);
-      const orderedPublicPhotos = primaryPhoto
-        ? [primaryPhoto, ...nonPrimaryPhotos]
-        : nonPrimaryPhotos;
 
       const userAge = calculateAge(user.dateOfBirth);
       if (!hasEligibleAdultAge(userAge)) {
@@ -1032,7 +1035,7 @@ export const getDiscoverProfiles = query({
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
-        photoCount: safePublicPhotos.length,
+        photoCount: orderedPublicPhotos.length,
         isIncognito: user.incognitoMode === true,
         // Client live distance (Step 9): approximate position for haversine when viewer GPS updates
         latitude: user.latitude,
@@ -1442,12 +1445,7 @@ function createEmptyExploreCounts(): Record<string, number> {
 }
 
 function hasUsableExploreLocation(user: { latitude?: number; longitude?: number }): boolean {
-  return (
-    typeof user.latitude === 'number' &&
-    Number.isFinite(user.latitude) &&
-    typeof user.longitude === 'number' &&
-    Number.isFinite(user.longitude)
-  );
+  return hasUsableDistanceLocation(user);
 }
 
 function getExploreNearbyAvailabilityStatus(user: {
@@ -1962,20 +1960,7 @@ async function hydrateExploreProfiles(
 
     for (let index = 0; index < chunk.length; index += 1) {
       const candidate = chunk[index];
-      // Photo ordering: mirror full-profile contract (convex/users.ts:427-431) so
-      // the user's chosen primary photo is always at position 0 on Explore cards.
-      // Prepend isPrimary photo, then sort the rest by `order`. NSFW filtering
-      // is unchanged.
-      const safePhotos = chunkPhotos[index].filter(
-        (photo) => !photo.isNsfw && photo.photoType !== 'verification_reference'
-      );
-      const primaryPhoto = safePhotos.find((p) => p.isPrimary === true);
-      const nonPrimaryPhotos = safePhotos
-        .filter((p) => p._id !== primaryPhoto?._id)
-        .sort((a, b) => a.order - b.order);
-      const orderedSafePhotos = primaryPhoto
-        ? [primaryPhoto, ...nonPrimaryPhotos]
-        : nonPrimaryPhotos;
+      const orderedSafePhotos = orderSafePhase1DisplayPhotos(chunkPhotos[index]);
       const publicPhotos = orderedSafePhotos.map((photo) => ({ url: photo.url }));
 
       if (publicPhotos.length === 0) continue;

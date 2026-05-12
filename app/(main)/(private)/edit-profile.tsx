@@ -317,7 +317,7 @@ export default function EditProfileScreen() {
   // Phase-1 fallback source for old Phase-2 profiles (read-only)
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const phase1User = currentUser as unknown as Phase1FallbackUser | undefined;
   const isSignedOut = !isDemoMode && !userId;

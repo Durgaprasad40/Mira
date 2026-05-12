@@ -29,7 +29,7 @@ export default function NotificationsSettingsScreen() {
   // Query current user to get notification setting (backend source of truth)
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   // Mutation to update notification setting

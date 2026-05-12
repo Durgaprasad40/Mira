@@ -44,7 +44,7 @@ export default function SettingsScreen() {
   // FIX: Use getCurrentUser with userId instead of getCurrentUserFromToken
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 

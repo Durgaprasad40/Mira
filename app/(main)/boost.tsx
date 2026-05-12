@@ -26,7 +26,7 @@ const BOOST_OPTIONS = [
 export default function BoostScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const { tier } = useSubscriptionStore();
   const isPremium = tier === 'premium';
   const [selectedBoost, setSelectedBoost] = useState<string>('4hr');
@@ -34,7 +34,7 @@ export default function BoostScreen() {
 
   const user = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   const activateBoost = useMutation(api.subscriptions.activateBoost);

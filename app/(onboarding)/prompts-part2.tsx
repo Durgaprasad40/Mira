@@ -99,7 +99,7 @@ export default function PromptsPart2Screen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Query existing profilePrompts from user (for edit flow or resumption)
-  const currentUser = useQuery(api.users.getCurrentUser, userId ? { userId } : 'skip');
+  const currentUser = useQuery(api.users.getCurrentUser, token ? { token } : 'skip');
 
   // Initialize from existing data
   useEffect(() => {

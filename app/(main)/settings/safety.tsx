@@ -62,7 +62,7 @@ export default function SafetySettingsScreen() {
 
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
   const verificationDetails = useQuery(

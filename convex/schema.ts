@@ -10,6 +10,7 @@ export default defineSchema({
     passwordHash: v.optional(v.string()),
     authProvider: v.optional(v.union(v.literal('email'), v.literal('phone'), v.literal('google'), v.literal('apple'), v.literal('facebook'))),
     externalId: v.optional(v.string()), // For social auth
+    isDemo: v.optional(v.boolean()), // True only for Convex-backed demo-auth users
 
     // Basic Info
     name: v.string(),
