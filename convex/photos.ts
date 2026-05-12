@@ -109,8 +109,14 @@ async function getGridPrimaryPhotoUrl(
 
 // Generate upload URL
 export const generateUploadUrl = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await validateSessionToken(ctx, args.token.trim());
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
     return await ctx.storage.generateUploadUrl();
   },
 });

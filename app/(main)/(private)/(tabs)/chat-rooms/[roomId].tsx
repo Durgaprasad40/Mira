@@ -449,6 +449,7 @@ export default function ChatRoomScreen() {
   // AUTH & SESSION
   // ─────────────────────────────────────────────────────────────────────────
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   /** listMessages only — same sanity as getRoom; independent of membership gate */
   const canLoadMessages =
@@ -2799,7 +2800,10 @@ export default function ChatRoomScreen() {
           const uploadTypeMap = { image: 'photo' as const, video: 'video' as const, doodle: 'doodle' as const };
           const newStorageId = await uploadMediaToConvexWithProgress(
             localUri,
-            generateUploadUrlMutation,
+            () => {
+              if (!token) throw new Error('Session expired');
+              return generateUploadUrlMutation({ token });
+            },
             uploadTypeMap[mediaType],
             (progressPct) => {
               const now = Date.now();
@@ -2889,7 +2893,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [authUserId, generateUploadUrlMutation, hasValidRoomId, isDemoMode, roomIdStr, sendMessageMutation, routeToPolicyConsent]
+    [authUserId, token, generateUploadUrlMutation, hasValidRoomId, isDemoMode, roomIdStr, sendMessageMutation, routeToPolicyConsent]
   );
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
@@ -2995,7 +2999,10 @@ export default function ChatRoomScreen() {
           const uploadHint = uploadTypeMap[mediaType];
           const storageId = await uploadMediaToConvexWithProgress(
             uri,
-            generateUploadUrlMutation,
+            () => {
+              if (!token) throw new Error('Session expired');
+              return generateUploadUrlMutation({ token });
+            },
             uploadHint,
             (progressPct) => {
               const now = Date.now();
@@ -3087,7 +3094,7 @@ export default function ChatRoomScreen() {
         uploadingMediaUriRef.current = null;
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, token, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -3141,7 +3148,10 @@ export default function ChatRoomScreen() {
           // Step 1: Upload audio to Convex storage
           const storageId = await uploadMediaToConvex(
             result.audioUri,
-            generateUploadUrlMutation,
+            () => {
+              if (!token) throw new Error('Session expired');
+              return generateUploadUrlMutation({ token });
+            },
             'audio'
           );
 
@@ -3181,7 +3191,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, token, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
   );
 
   const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({

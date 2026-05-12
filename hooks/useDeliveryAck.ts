@@ -38,12 +38,12 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 
 export function useDeliveryAck() {
-  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // Re-render nudge for the flush effect on foreground transitions.
   const [foregroundTick, setForegroundTick] = useState(0);
 
-  const isAuthed = !isDemoMode && !!userId;
+  const isAuthed = !isDemoMode && !!token;
 
   const markMessagesDelivered = useMutation(api.messages.markMessagesDelivered);
 
@@ -52,7 +52,7 @@ export function useDeliveryAck() {
   // returns to foreground we already have a cached result to flush.
   const undelivered = useQuery(
     api.messages.listUndeliveredIncomingMessages,
-    isAuthed ? { authUserId: userId as string } : 'skip'
+    isAuthed ? { token: token as string } : 'skip'
   );
 
   const lastSyncKeyRef = useRef<string>('');
@@ -83,7 +83,7 @@ export function useDeliveryAck() {
       if (__DEV__) {
         if (isDemoMode) {
           console.log('[DELIVERY_ACK] demo_mode');
-        } else if (!userId) {
+        } else if (!token) {
           console.log('[DELIVERY_ACK] no_user');
         }
       }
@@ -110,7 +110,7 @@ export function useDeliveryAck() {
     inFlightRef.current = true;
     lastSyncKeyRef.current = syncKey;
 
-    markMessagesDelivered({ messageIds: ids as any, authUserId: userId as string })
+    markMessagesDelivered({ messageIds: ids as any, token: token as string })
       .then((res) => {
         if (__DEV__) console.log('[DELIVERY_ACK] success', res);
       })
@@ -122,5 +122,5 @@ export function useDeliveryAck() {
       .finally(() => {
         inFlightRef.current = false;
       });
-  }, [undelivered, isAuthed, userId, markMessagesDelivered, foregroundTick]);
+  }, [undelivered, isAuthed, token, markMessagesDelivered, foregroundTick]);
 }

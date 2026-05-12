@@ -153,7 +153,10 @@ export default function Phase2SelectPhotosScreen() {
       }
 
       setIsUploading(true);
-      const storageId = await uploadPhotoToConvex(result.assets[0].uri, generateUploadUrl);
+      if (!token) {
+        throw new Error('Session expired. Please sign in again.');
+      }
+      const storageId = await uploadPhotoToConvex(result.assets[0].uri, () => generateUploadUrl({ token }));
       await trackPendingUpload({ userId, storageId });
       const permanentUrl = await getStorageUrl({ storageId });
 

@@ -16,6 +16,7 @@ import { useDemoStore } from "@/stores/demoStore";
 import { Toast } from "@/components/ui/Toast";
 import { trackEvent } from "@/lib/analytics";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useAuthStore } from "@/stores/authStore";
 import type { Id } from "@/convex/_generated/dataModel";
 
 interface Props {
@@ -66,13 +67,13 @@ export function ReportBlockModal({
   onClose,
   reportedUserId,
   reportedUserName,
-  currentUserId,
   conversationId,
   matchId,
   onBlockSuccess,
   onUnmatchSuccess,
 }: Props) {
   const [viewState, setViewState] = useState<ViewState>('main');
+  const token = useAuthStore((s) => s.token);
   const insets = useSafeAreaInsets();
   const bottomClearance = Math.max(16, insets.bottom + 12);
 
@@ -127,16 +128,15 @@ export function ReportBlockModal({
             }
 
             // Convex mode: call unmatch mutation
-            if (!matchId) {
+            if (!matchId || !token) {
               Alert.alert("Error", "Cannot unmatch: match information not available.");
               return;
             }
 
             try {
-              // AUTH FIX: Pass authUserId for server-side resolution
               await unmatchMutation({
                 matchId: asMatchId(matchId),
-                authUserId: currentUserId,
+                token,
               });
               Toast.show(`Unmatched with ${reportedUserName}`);
               resetAndClose();
@@ -162,8 +162,12 @@ export function ReportBlockModal({
     }
 
     try {
+      if (!token) {
+        Alert.alert("Error", "Session expired. Please sign in again.");
+        return;
+      }
       await blockMutation({
-        authUserId: currentUserId,
+        token,
         blockedUserId: asUserId(reportedUserId),
       });
       resetAndClose();
@@ -184,8 +188,12 @@ export function ReportBlockModal({
     }
 
     try {
+      if (!token) {
+        Alert.alert("Error", "Session expired. Please sign in again.");
+        return;
+      }
       await reportMutation({
-        authUserId: currentUserId,
+        token,
         reportedUserId: asUserId(reportedUserId),
         reason,
       });
@@ -208,8 +216,12 @@ export function ReportBlockModal({
     }
 
     try {
+      if (!token) {
+        Alert.alert("Error", "Session expired. Please sign in again.");
+        return;
+      }
       await reportMutation({
-        authUserId: currentUserId,
+        token,
         reportedUserId: asUserId(reportedUserId),
         reason: 'other',
         description: 'Scam/fraudulent behavior',

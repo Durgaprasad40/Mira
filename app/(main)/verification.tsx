@@ -144,7 +144,7 @@ export default function VerificationScreen() {
     setIsUploading(true);
     try {
       // Upload the selfie
-      const uploadUrl = await generateUploadUrl();
+      const uploadUrl = await generateUploadUrl({ token: sessionToken });
       const response = await fetch(capturedUri);
       const blob = await response.blob();
 

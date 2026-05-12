@@ -176,7 +176,7 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
       return;
     }
 
-    if (!authUserId) {
+    if (!authUserId || !token) {
       Alert.alert('Error', 'Not authenticated. Please try again.');
       return;
     }
@@ -188,7 +188,7 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
 
       if (pendingAvatarLocalUri) {
         // Step 1: Get upload URL
-        const uploadUrl = await generateUploadUrl({ authUserId });
+        const uploadUrl = await generateUploadUrl({ token });
 
         // Step 2: Upload the image
         const response = await fetch(pendingAvatarLocalUri);
@@ -223,7 +223,7 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
     } finally {
       setIsSubmitting(false);
     }
-  }, [nickname, bio, authUserId, pendingAvatarLocalUri, createOrUpdateProfile, generateUploadUrl, getAvatarUrl, onComplete]);
+  }, [nickname, bio, authUserId, token, pendingAvatarLocalUri, createOrUpdateProfile, generateUploadUrl, getAvatarUrl, onComplete]);
 
   const isValid = isValidChatRoomNickname(nickname);
 

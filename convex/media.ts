@@ -1,12 +1,12 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { resolveUserIdByAuthId } from './helpers';
+import { validateSessionToken } from './helpers';
 
 // Create a protected media message with per-recipient permissions
 export const createMediaMessage = mutation({
   args: {
     chatId: v.id('conversations'),
-    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(),
     objectKey: v.id('_storage'),
     mediaType: v.union(v.literal('image'), v.literal('video')),
     timerSeconds: v.optional(v.number()),
@@ -16,7 +16,7 @@ export const createMediaMessage = mutation({
   handler: async (ctx, args) => {
     const {
       chatId,
-      authUserId,
+      token,
       objectKey,
       mediaType,
       timerSeconds,
@@ -25,11 +25,11 @@ export const createMediaMessage = mutation({
     } = args;
     const now = Date.now();
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       throw new Error('Unauthorized: authentication required');
     }
-    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    const senderId = await validateSessionToken(ctx, sessionToken);
     if (!senderId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -110,11 +110,14 @@ export const createMediaMessage = mutation({
 export const openMedia = query({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId, token } = args;
     const now = Date.now();
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) return { error: 'not_authorized' };
 
     const media = await ctx.db.get(mediaId);
     if (!media) return { error: 'not_found' };
@@ -209,11 +212,14 @@ export const openMedia = query({
 export const recordMediaOpened = mutation({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId, token } = args;
     const now = Date.now();
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) throw new Error('Not authorized');
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
@@ -263,11 +269,14 @@ export const recordMediaOpened = mutation({
 export const expireMedia = mutation({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId, token } = args;
     const now = Date.now();
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) throw new Error('Not authorized');
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
@@ -309,10 +318,13 @@ export const expireMedia = mutation({
 export const getMediaInfo = query({
   args: {
     mediaId: v.id('media'),
-    userId: v.id('users'),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { mediaId, userId } = args;
+    const { mediaId, token } = args;
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) return null;
 
     const media = await ctx.db.get(mediaId);
     if (!media) return null;
@@ -325,6 +337,9 @@ export const getMediaInfo = query({
       .first();
 
     const isOwner = media.ownerId === userId;
+    if (!isOwner && (!permission || permission.revoked || !permission.canView)) {
+      return null;
+    }
 
     // EXPIRY-SYNC-FIX: Check global expiry first (applies to both owner and recipient)
     // media.expiredAt is the single source of truth set by markExpired

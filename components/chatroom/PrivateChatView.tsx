@@ -209,6 +209,7 @@ export default function PrivateChatView({
 
   // Auth
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const convex = useConvex();
 
   // THEME: Get current chat theme colors
@@ -264,8 +265,8 @@ export default function PrivateChatView({
   // DM-ID-FIX: Use Convex query for real-time messages (Phase-1 messages table)
   const messagesResult = useQuery(
     api.messages.getDmMessages,
-    threadId && authUserId
-      ? { authUserId, threadId, paginationOpts: { numItems: DM_PAGE_SIZE, cursor: null } }
+    threadId && token
+      ? { token, threadId, paginationOpts: { numItems: DM_PAGE_SIZE, cursor: null } }
       : 'skip'
   );
   const isExpiredThread = (messagesResult as { expired?: boolean } | undefined)?.expired === true;
@@ -292,12 +293,12 @@ export default function PrivateChatView({
 
   // Mark messages as read when opening DM and when new incoming messages arrive
   useEffect(() => {
-    if (threadId && authUserId && unreadIncomingMessageIds.length > 0) {
-      markConversationRead({ authUserId, conversationId: threadId }).catch((err) => {
+    if (threadId && token && unreadIncomingMessageIds.length > 0) {
+      markConversationRead({ token, conversationId: threadId }).catch((err) => {
         if (__DEV__) console.warn('[DM] Failed to mark messages read:', err);
       });
     }
-  }, [threadId, authUserId, unreadIncomingMessageIds, markConversationRead]);
+  }, [threadId, token, unreadIncomingMessageIds, markConversationRead]);
 
   useEffect(() => {
     setOlderMessages([]);
@@ -353,7 +354,7 @@ export default function PrivateChatView({
   }, [dm.peerId]);
 
   const handleLoadOlderMessages = useCallback(async () => {
-    if (isExpiredThread || !threadId || !authUserId || !hasOlderMessages || !olderMessagesCursor || isLoadingOlderMessages) {
+    if (isExpiredThread || !threadId || !token || !hasOlderMessages || !olderMessagesCursor || isLoadingOlderMessages) {
       return;
     }
 
@@ -363,7 +364,7 @@ export default function PrivateChatView({
 
     try {
       const nextPage = await convex.query(api.messages.getDmMessages, {
-        authUserId,
+        token,
         threadId,
         paginationOpts: {
           numItems: DM_PAGE_SIZE,
@@ -381,7 +382,7 @@ export default function PrivateChatView({
     } finally {
       setIsLoadingOlderMessages(false);
     }
-  }, [authUserId, convex, hasOlderMessages, isExpiredThread, isLoadingOlderMessages, olderMessagesCursor, threadId]);
+  }, [convex, hasOlderMessages, isExpiredThread, isLoadingOlderMessages, olderMessagesCursor, threadId, token]);
 
   // ==========================================================================
   // HELPER: Check if currently near bottom
@@ -653,7 +654,7 @@ export default function PrivateChatView({
   // UNIFIED-SCROLL: Send always resets scroll state and forces scroll to latest
   const handleSend = useCallback(async () => {
     const trimmed = inputText.trim();
-    if (!trimmed || !threadId || !authUserId) return;
+    if (!trimmed || !threadId || !token) return;
     if (isExpiredThread) {
       Alert.alert('Chat Expired', 'This chat expired.');
       return;
@@ -665,7 +666,7 @@ export default function PrivateChatView({
     try {
       await sendConversationMessage({
         conversationId: threadId,
-        authUserId,
+        token,
         type: 'text',
         content: trimmed,
       });
@@ -697,12 +698,12 @@ export default function PrivateChatView({
       // Restore input on error
       setInputText(trimmed);
     }
-  }, [inputText, isExpiredThread, threadId, authUserId, sendConversationMessage, onSendComplete, scrollWithRetry, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]);
+  }, [inputText, isExpiredThread, threadId, token, sendConversationMessage, onSendComplete, scrollWithRetry, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]);
 
   // DM-MEDIA-FIX: Full media upload implementation for DMs
   const handleSendMedia = useCallback(
     async (uri: string, mediaType: 'image' | 'video' | 'doodle' | 'audio') => {
-      if (!threadId || !authUserId) return;
+      if (!threadId || !token) return;
       if (isExpiredThread) {
         Alert.alert('Chat Expired', 'This chat expired.');
         return;
@@ -715,7 +716,10 @@ export default function PrivateChatView({
         const uploadHint = mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'audio' : 'photo';
         const storageId = await uploadMediaToConvex(
           uri,
-          () => generateUploadUrl({}),
+          () => {
+            if (!token) throw new Error('Session expired');
+            return generateUploadUrl({ token });
+          },
           uploadHint
         );
 
@@ -725,14 +729,14 @@ export default function PrivateChatView({
           mediaType === 'audio'
             ? {
                 conversationId: threadId,
-                authUserId,
+                token,
                 type: 'voice',
                 content: '',
                 audioStorageId: storageId,
               }
             : {
                 conversationId: threadId,
-                authUserId,
+                token,
                 type: mediaType === 'video' ? 'video' : 'image',
                 content: '',
                 imageStorageId: storageId,
@@ -763,7 +767,7 @@ export default function PrivateChatView({
         }
       }
     },
-    [threadId, authUserId, generateUploadUrl, sendConversationMessage, scrollWithRetry, onSendComplete, isExpiredThread, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
+    [threadId, token, generateUploadUrl, sendConversationMessage, scrollWithRetry, onSendComplete, isExpiredThread, clearComposerSafetyMessage, showComposerSafetyMessage, routeToPolicyConsent]
   );
 
   // ─────────────────────────────────────────────────────────────────────────

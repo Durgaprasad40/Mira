@@ -994,8 +994,12 @@ export default function ConfessionsScreen() {
     pendingBlockAuthorsRef.current.add(authorId);
 
     try {
+      if (!token) {
+        Alert.alert('Unable to block user right now');
+        return;
+      }
       await blockUserMutation({
-        authUserId: currentUserId,
+        token,
         blockedUserId: authorId as any,
       });
       blockUserLocal(authorId);
@@ -1004,7 +1008,7 @@ export default function ConfessionsScreen() {
     } finally {
       pendingBlockAuthorsRef.current.delete(authorId);
     }
-  }, [blockUserLocal, blockUserMutation, currentUserId, isDemoMode]);
+  }, [blockUserLocal, blockUserMutation, currentUserId, isDemoMode, token]);
 
   // Open the premium menu sheet instead of alert
   const handleOpenMenuSheet = useCallback((confessionId: string, authorId: string) => {

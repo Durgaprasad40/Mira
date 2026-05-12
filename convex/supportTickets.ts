@@ -59,8 +59,14 @@ async function requireTicketOwner(
 
 /** Convex file upload handoff for Phase-1 support attachments. */
 export const generateUploadUrl = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await validateSessionToken(ctx, args.token.trim());
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
     return await ctx.storage.generateUploadUrl();
   },
 });

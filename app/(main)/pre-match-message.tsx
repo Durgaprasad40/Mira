@@ -53,7 +53,10 @@ export default function PreMatchMessageScreen() {
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
 
   const handleSend = async () => {
-    if (!userId || !targetUserId) return;
+    if (!token || !targetUserId) {
+      Alert.alert('Error', 'Session expired. Please sign in again.');
+      return;
+    }
 
     const message = selectedTemplate
       ? templates?.find((t) => t.id === selectedTemplate)?.text || customMessage
@@ -75,10 +78,8 @@ export default function PreMatchMessageScreen() {
 
     setSending(true);
     try {
-      // MSG-002 FIX: Use authUserId for server-side verification
-      // FIX: Backend expects { authUserId }, not { token }
       await sendPreMatchMessage({
-        authUserId: userId!,
+        token,
         toUserId: targetUserId as any,
         content: message,
         templateId: selectedTemplate || undefined,

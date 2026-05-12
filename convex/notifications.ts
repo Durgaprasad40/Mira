@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { internal } from './_generated/api';
 import { mutation, query, internalMutation, type MutationCtx, type QueryCtx } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import { bellNotificationCountsForPhase } from './notificationBellPhase';
 
 // Server-side Phase-1 row guard. A row is Phase-1 iff:
@@ -449,14 +449,14 @@ export const markReadByDedupeKey = mutation({
 // P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markReadForConversation = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     conversationId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, conversationId } = args;
+    const { token, conversationId } = args;
 
-    // P1 SECURITY: Resolve auth ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }

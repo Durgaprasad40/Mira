@@ -27,6 +27,7 @@ import {
 } from "../lib/discoveryDefaults";
 import { orderSafePhase1DisplayPhotos } from "./phase1Media";
 import { isDiscoveryExcluded, loadDiscoveryExclusions } from "./discoveryExclusions";
+import { isChatRoomPrivateDmConversation } from "./chatRoomDmRetention";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 const PROFILE_NAME_MAX_LENGTH = 50;
@@ -42,6 +43,7 @@ const PHASE2_MIN_PRIVATE_PHOTOS = 2;
 const PHASE2_MIN_PRIVATE_INTENT_KEYS = 1;
 const PHASE2_MAX_PRIVATE_INTENT_KEYS = 3;
 const DEBUG_PHASE2_BACKEND = process.env.DEBUG_PHASE2 === "true";
+const PHASE1_MESSAGES_RELATIONSHIP_SCAN_LIMIT = 1000;
 
 function normalizeOptionalTrimmedString(
   value: string | undefined,
@@ -447,6 +449,19 @@ function isNearbyCrossedPathProfileSource(source: string | undefined): boolean {
   );
 }
 
+function isPhase1MessagesProfileSource(source: string | undefined): boolean {
+  return (
+    source === "messages" ||
+    source === "message" ||
+    source === "phase1_messages" ||
+    source === "phase1-message" ||
+    source === "phase1_chat" ||
+    source === "phase1-chat" ||
+    source === "chat" ||
+    source === "match"
+  );
+}
+
 function isDiscoveryPaused(user: Doc<"users">, now = Date.now()): boolean {
   if (user.isDiscoveryPaused !== true) return false;
   if (!user.discoveryPausedUntil) return true;
@@ -548,6 +563,88 @@ async function hasPhase1ReportBetweenUsers(
     )
     .first();
   return !!reportBtoA;
+}
+
+async function hasActivePhase1MatchBetweenUsers(
+  ctx: QueryCtx,
+  userAId: Id<"users">,
+  userBId: Id<"users">,
+): Promise<boolean> {
+  const canonicalUser1Id = String(userAId) < String(userBId) ? userAId : userBId;
+  const canonicalUser2Id = String(userAId) < String(userBId) ? userBId : userAId;
+
+  const [canonicalMatches, reverseMatches] = await Promise.all([
+    ctx.db
+      .query("matches")
+      .withIndex("by_users", (q) =>
+        q.eq("user1Id", canonicalUser1Id).eq("user2Id", canonicalUser2Id),
+      )
+      .collect(),
+    ctx.db
+      .query("matches")
+      .withIndex("by_users", (q) =>
+        q.eq("user1Id", canonicalUser2Id).eq("user2Id", canonicalUser1Id),
+      )
+      .collect(),
+  ]);
+
+  return [...canonicalMatches, ...reverseMatches].some((match) => match.isActive !== false);
+}
+
+function isPhase1MessagesConversationForProfilePreview(
+  conversation: Doc<"conversations">,
+): boolean {
+  if (isChatRoomPrivateDmConversation(conversation)) return false;
+  if (
+    conversation.connectionSource &&
+    conversation.connectionSource !== "match" &&
+    conversation.connectionSource !== "confession"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function hasActivePhase1ConversationBetweenUsers(
+  ctx: QueryCtx,
+  viewerId: Id<"users">,
+  targetId: Id<"users">,
+  now: number,
+): Promise<boolean> {
+  const participantRows = await ctx.db
+    .query("conversationParticipants")
+    .withIndex("by_user", (q) => q.eq("userId", viewerId))
+    .take(PHASE1_MESSAGES_RELATIONSHIP_SCAN_LIMIT);
+
+  for (const participantRow of participantRows) {
+    const conversation = await ctx.db.get(participantRow.conversationId);
+    if (!conversation) continue;
+    if (!conversation.participants.includes(viewerId)) continue;
+    if (!conversation.participants.includes(targetId)) continue;
+    if (!isPhase1MessagesConversationForProfilePreview(conversation)) continue;
+    if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
+      continue;
+    }
+    if (conversation.matchId) {
+      const match = await ctx.db.get(conversation.matchId);
+      if (!match || match.isActive === false) continue;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+async function hasActivePhase1MessagesRelationshipForProfilePreview(
+  ctx: QueryCtx,
+  viewerId: Id<"users">,
+  targetId: Id<"users">,
+  now: number,
+): Promise<boolean> {
+  if (await hasActivePhase1MatchBetweenUsers(ctx, viewerId, targetId)) {
+    return true;
+  }
+  return hasActivePhase1ConversationBetweenUsers(ctx, viewerId, targetId, now);
 }
 
 function hasCurrentNearbyConsentForProfilePreview(user: Doc<"users">): boolean {
@@ -701,6 +798,7 @@ export const getUserById = query({
     const isSelfProfile = userId === viewerId;
     const isPhase1ExploreProfile = isPhase1ExploreProfileSource(args.source);
     const isNearbySource = isNearbyCrossedPathProfileSource(args.source);
+    const isMessagesSource = isPhase1MessagesProfileSource(args.source);
     if (!isSelfProfile && isPhase1ProfileSource(args.source)) {
       if (user.hideFromDiscover === true || isDiscoveryPaused(user)) return null;
       if (user.incognitoMode === true && !canViewerSeeIncognitoProfile(viewer)) {
@@ -726,6 +824,17 @@ export const getUserById = query({
       .first();
 
     if (reverseBlocked) return null;
+
+    if (!isSelfProfile && isMessagesSource) {
+      if (await hasPhase1ReportBetweenUsers(ctx, viewerId, userId)) return null;
+      const hasRelationship = await hasActivePhase1MessagesRelationshipForProfilePreview(
+        ctx,
+        viewerId,
+        userId,
+        Date.now(),
+      );
+      if (!hasRelationship) return null;
+    }
 
     if (!isSelfProfile && isNearbySource) {
       const now = Date.now();
@@ -1944,15 +2053,14 @@ export const markVerified = mutation({
 // Block user
 export const blockUser = mutation({
   args: {
-    // C2 SECURITY: Use authUserId for server-side validation
-    authUserId: v.string(),
+    token: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { authUserId, blockedUserId } = args;
+    const { token, blockedUserId } = args;
 
-    // C2 SECURITY: Resolve auth ID to Convex user ID
-    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const blockerId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!blockerId) {
       return { success: false, error: 'unauthorized' };
     }
@@ -2045,8 +2153,7 @@ export const unblockUser = mutation({
 // Report user
 export const reportUser = mutation({
   args: {
-    // C2 SECURITY: Use authUserId for server-side validation
-    authUserId: v.string(),
+    token: v.string(),
     reportedUserId: v.id("users"),
     reason: v.union(
       v.literal("fake_profile"),
@@ -2067,13 +2174,13 @@ export const reportUser = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { authUserId, reportedUserId, reason, description, evidence } = args;
+    const { token, reportedUserId, reason, description, evidence } = args;
     const now = Date.now();
     const REPORT_FLAG_WINDOW_DAYS = 30;
     const REPORT_FLAG_THRESHOLD = 3;
 
-    // C2 SECURITY: Resolve auth ID to Convex user ID
-    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const reporterId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!reporterId) {
       return { success: false, error: 'unauthorized' };
     }

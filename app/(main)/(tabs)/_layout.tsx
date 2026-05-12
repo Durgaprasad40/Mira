@@ -80,7 +80,7 @@ export default function MainTabsLayout() {
   // Convex mode: query unread count from server
   const convexUnreadCount = useQuery(
     api.messages.getUnreadCount,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   const unreadChats = isDemoMode ? demoUnreadCount : (convexUnreadCount ?? 0);

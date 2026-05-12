@@ -20,6 +20,7 @@ import { COLORS } from '@/lib/constants';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
 import { deleteCachedMedia, getMediaUri } from '@/lib/mediaCache';
+import { useAuthStore } from '@/stores/authStore';
 import type { Id } from '@/convex/_generated/dataModel';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -90,6 +91,7 @@ export function ProtectedMediaViewer({
   // error = image failed to load or storage unavailable
   // expired = media expired or revoked
   const [viewerState, setViewerState] = useState<ViewerState>('loading');
+  const token = useAuthStore((s) => s.token);
 
   // 5-1: Track mounted state
   React.useEffect(() => {
@@ -104,14 +106,10 @@ export function ProtectedMediaViewer({
     };
   }, []);
 
-  // [P1_MEDIA_FIX] Backend validator for `protectedMedia.getMediaUrl` strictly
-  // accepts only `{ messageId, authUserId }`. Passing a `token` field triggers
-  // ArgumentValidationError ("Object contains extra field `token`") and crashes
-  // the viewer. Gate on userId (authenticated user) instead of token.
   const mediaData = useQuery(
     api.protectedMedia.getMediaUrl,
-    visible && messageId && userId
-      ? { messageId: asMessageId(messageId), authUserId: userId }
+    visible && messageId && token
+      ? { messageId: asMessageId(messageId), token }
       : 'skip'
   );
 
@@ -185,16 +183,15 @@ export function ProtectedMediaViewer({
     }
 
     // 5-2: If view-once, expire on close (only once)
-    // MSG-006 FIX: Use authUserId for server-side verification
-    // [P1_MEDIA_FIX] `markExpired` validator accepts only `{ messageId, authUserId }`.
+    // SECURE_TIMER: `markExpired` is token-bound; only sender/recipient can expire.
     // SECURE_TIMER: sender must never consume the timer on their own media —
     // skip markExpired entirely when the current user is the sender.
-    if (mediaData?.viewOnce && !hasExpired.current && !isSender) {
+    if (mediaData?.viewOnce && !hasExpired.current && !isSender && token) {
       hasExpired.current = true;
       if (__DEV__) console.log('[SECURE_TIMER] markExpired', { messageRef, reason: 'viewonce_close' });
       void markExpired({
         messageId: asMessageId(messageId),
-        authUserId: userId,
+        token,
       }).catch(() => {});
       cleanupCachedMedia();
     } else if (mediaData?.viewOnce && isSender) {
@@ -211,7 +208,7 @@ export function ProtectedMediaViewer({
     hasMarkedViewed.current = false;
     hasExpired.current = false; // Reset for next open
     onClose();
-  }, [mediaData, messageId, messageRef, userId, markExpired, onClose, isSender, cleanupCachedMedia]);
+  }, [mediaData, messageId, messageRef, token, markExpired, onClose, isSender, cleanupCachedMedia]);
 
   // P1_SECURE_BACK: Android hardware back must close the secure viewer (and
   // funnel through handleClose so view-once expiry / timer cleanup runs)
@@ -301,12 +298,11 @@ export function ProtectedMediaViewer({
       return;
     }
 
-    // MSG-006 FIX: Use authUserId for server-side verification
-    // [P1_MEDIA_FIX] `markViewed` validator accepts only `{ messageId, authUserId }`.
+    if (!token) return;
     if (__DEV__) console.log('[SECURE_TIMER] markViewed', { messageRef });
     void markViewed({
       messageId: asMessageId(messageId),
-      authUserId: userId,
+      token,
     }).catch(() => {});
 
     // ONCE-VIEW-FIX: Skip timer for view-once media
@@ -337,10 +333,10 @@ export function ProtectedMediaViewer({
       });
       setTimeLeft(mediaData.timerSeconds);
     }
-  }, [visible, mediaData, mediaUrl, viewerState, markViewed, messageId, messageRef, userId, isSender]);
+  }, [visible, mediaData, mediaUrl, viewerState, markViewed, messageId, messageRef, token, isSender]);
 
   // 6-2: handleExpire now includes handleClose in deps (no stale closure)
-  // MSG-006 FIX: Use authUserId for server-side verification
+  // MSG-006 FIX: Use the session token for server-side verification.
   const handleExpire = useCallback(() => {
     if (hasExpired.current) return; // Already expired
     hasExpired.current = true;
@@ -350,15 +346,18 @@ export function ProtectedMediaViewer({
       handleClose();
       return;
     }
-    // [P1_MEDIA_FIX] `markExpired` validator accepts only `{ messageId, authUserId }`.
+    if (!token) {
+      handleClose();
+      return;
+    }
     if (__DEV__) console.log('[SECURE_TIMER] markExpired', { messageRef, reason: 'timer_zero' });
     void markExpired({
       messageId: asMessageId(messageId),
-      authUserId: userId,
+      token,
     }).catch(() => {});
     cleanupCachedMedia();
     handleClose();
-  }, [messageId, messageRef, userId, markExpired, handleClose, isSender, cleanupCachedMedia]);
+  }, [messageId, messageRef, token, markExpired, handleClose, isSender, cleanupCachedMedia]);
 
   // STABILITY FIX: C-5 - Fix timer infinite loop by using proper dependency pattern
   // Compute stable boolean outside effect to avoid expression in dependency array

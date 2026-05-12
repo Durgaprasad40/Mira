@@ -1,8 +1,7 @@
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { type Doc, Id } from './_generated/dataModel';
-import { asUserId } from './id';
-import { resolveUserIdByAuthId, getPhase2DisplayName } from './helpers';
+import { resolveUserIdByAuthId, getPhase2DisplayName, validateSessionToken } from './helpers';
 import {
   BOTTLE_SPIN_COOLDOWN_MS,
   BOTTLE_SPIN_PENDING_INVITE_TIMEOUT_MS,
@@ -28,12 +27,49 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════
 
 type TodSystemSubtype = 'tod_perm' | 'tod_temp';
+type GameActor = {
+  userId: Id<'users'>;
+  authUserId: string;
+  identityRefs: Set<string>;
+};
+
+async function resolveLiveGameActor(
+  ctx: QueryCtx | MutationCtx,
+  token: string
+): Promise<GameActor | null> {
+  const sessionToken = token.trim();
+  if (!sessionToken) return null;
+
+  const userId = await validateSessionToken(ctx, sessionToken);
+  if (!userId) return null;
+
+  const user = await ctx.db.get(userId);
+  if (!user || isUnavailableUser(user)) return null;
+
+  const refs = new Set<string>([String(userId)]);
+  if (typeof user.authUserId === 'string' && user.authUserId.trim().length > 0) {
+    refs.add(user.authUserId);
+  }
+  if (typeof user.demoUserId === 'string' && user.demoUserId.trim().length > 0) {
+    refs.add(user.demoUserId);
+  }
+
+  return {
+    userId,
+    authUserId: String(userId),
+    identityRefs: refs,
+  };
+}
+
+function isGameActorRef(actor: GameActor, value: string | undefined | null): boolean {
+  return typeof value === 'string' && actor.identityRefs.has(value);
+}
 
 async function insertTodSystemMessage(
   ctx: MutationCtx,
   args: {
     conversationId: string;
-    authUserId: string;
+    senderId: Id<'users'>;
     content: string;
     subtype: TodSystemSubtype;
     eventKey: string;
@@ -50,16 +86,11 @@ async function insertTodSystemMessage(
     return;
   }
 
-  const senderId = await resolveUserIdByAuthId(ctx, args.authUserId);
-  if (!senderId) {
-    return;
-  }
-
   // Verify the conversation still exists and the actor is a participant
   // (defence-in-depth — the calling game mutation already authenticated).
   const conversation = await ctx.db.get(conversationId);
   if (!conversation) return;
-  if (!conversation.participants.includes(senderId)) return;
+  if (!conversation.participants.includes(args.senderId)) return;
 
   const existing = await ctx.db
     .query('privateMessages')
@@ -72,7 +103,7 @@ async function insertTodSystemMessage(
   const now = Date.now();
   await ctx.db.insert('privateMessages', {
     conversationId,
-    senderId,
+    senderId: args.senderId,
     type: 'system',
     systemSubtype: args.subtype,
     systemEventKey: args.eventKey,
@@ -88,10 +119,8 @@ async function insertTodSystemMessage(
 
 async function todDisplayName(
   ctx: MutationCtx,
-  authUserId: string
+  userId: Id<'users'>
 ): Promise<string> {
-  const userId = await resolveUserIdByAuthId(ctx, authUserId);
-  if (!userId) return 'Someone';
   return (await getPhase2DisplayName(ctx, userId)) ?? 'Someone';
 }
 
@@ -215,18 +244,14 @@ export const getBottleSpinSkips = query({
   args: {
     convoId: v.string(),
     windowKey: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { convoId, windowKey }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  handler: async (ctx, { convoId, windowKey, token }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       return { skipCount: 0 };
     }
-    const userId = asUserId(identity.subject);
-    if (!userId) {
-      return { skipCount: 0 };
-    }
-    const access = await getBottleSpinConversationAccess(ctx, convoId, userId);
+    const access = await getBottleSpinConversationAccess(ctx, convoId, actor.userId);
     if (!access.ok) {
       return { skipCount: 0 };
     }
@@ -235,7 +260,7 @@ export const getBottleSpinSkips = query({
     const record = await ctx.db
       .query('userGameLimits')
       .withIndex('by_user_game_convo', (q) =>
-        q.eq('userId', userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
+        q.eq('userId', actor.userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
       )
       .first();
 
@@ -248,15 +273,15 @@ export const incrementBottleSpinSkip = mutation({
   args: {
     convoId: v.string(),
     windowKey: v.string(),
-    authUserId: v.string(),
+    token: v.string(),
     delta: v.optional(v.number()),
   },
-  handler: async (ctx, { convoId, windowKey, authUserId, delta = 1 }) => {
-    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+  handler: async (ctx, { convoId, windowKey, token, delta = 1 }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
-    await assertBottleSpinConversationUsable(ctx, convoId, userId);
+    await assertBottleSpinConversationUsable(ctx, convoId, actor.userId);
 
     const now = Date.now();
 
@@ -264,7 +289,7 @@ export const incrementBottleSpinSkip = mutation({
     const existing = await ctx.db
       .query('userGameLimits')
       .withIndex('by_user_game_convo', (q) =>
-        q.eq('userId', userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
+        q.eq('userId', actor.userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
       )
       .first();
 
@@ -281,7 +306,7 @@ export const incrementBottleSpinSkip = mutation({
       // Create new record
       newSkipCount = delta;
       await ctx.db.insert('userGameLimits', {
-        userId,
+        userId: actor.userId,
         game: 'bottleSpin',
         convoId,
         windowKey,
@@ -299,18 +324,14 @@ export const resetBottleSpinSkips = mutation({
   args: {
     convoId: v.string(),
     windowKey: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { convoId, windowKey }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { convoId, windowKey, token }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
+      throw new Error('Unauthorized: user not found');
     }
-    const userId = asUserId(identity.subject);
-    if (!userId) {
-      throw new Error('Invalid user identity');
-    }
-    const access = await getBottleSpinConversationAccess(ctx, convoId, userId);
+    const access = await getBottleSpinConversationAccess(ctx, convoId, actor.userId);
     if (!access.ok) {
       return { success: true };
     }
@@ -319,7 +340,7 @@ export const resetBottleSpinSkips = mutation({
     const existing = await ctx.db
       .query('userGameLimits')
       .withIndex('by_user_game_convo', (q) =>
-        q.eq('userId', userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
+        q.eq('userId', actor.userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
       )
       .first();
 
@@ -333,19 +354,18 @@ export const resetBottleSpinSkips = mutation({
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BOTTLE SPIN V2: Per-User Global Skip Tracking (not per-conversation)
-// Uses app's custom auth pattern (authUserId + resolveUserIdByAuthId)
+// Uses the app's session-token auth pattern.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Get global bottle spin skip count for user (across all conversations)
 export const getGlobalBottleSpinSkips = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     windowKey: v.string(),
   },
-  handler: async (ctx, { authUserId, windowKey }) => {
-    // Resolve auth ID to Convex user ID using app's custom auth pattern
-    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+  handler: async (ctx, { token, windowKey }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       return { skipCount: 0 };
     }
 
@@ -353,7 +373,7 @@ export const getGlobalBottleSpinSkips = query({
     const record = await ctx.db
       .query('userGameLimits')
       .withIndex('by_user_game_convo', (q) =>
-        q.eq('userId', userId).eq('game', 'bottleSpin').eq('convoId', '_global_').eq('windowKey', windowKey)
+        q.eq('userId', actor.userId).eq('game', 'bottleSpin').eq('convoId', '_global_').eq('windowKey', windowKey)
       )
       .first();
 
@@ -364,14 +384,13 @@ export const getGlobalBottleSpinSkips = query({
 // Increment global bottle spin skip count for user
 export const incrementGlobalBottleSpinSkip = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     windowKey: v.string(),
     delta: v.optional(v.number()),
   },
-  handler: async (ctx, { authUserId, windowKey, delta = 1 }) => {
-    // Resolve auth ID to Convex user ID using app's custom auth pattern
-    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+  handler: async (ctx, { token, windowKey, delta = 1 }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -382,7 +401,7 @@ export const incrementGlobalBottleSpinSkip = mutation({
     const existing = await ctx.db
       .query('userGameLimits')
       .withIndex('by_user_game_convo', (q) =>
-        q.eq('userId', userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
+        q.eq('userId', actor.userId).eq('game', 'bottleSpin').eq('convoId', convoId).eq('windowKey', windowKey)
       )
       .first();
 
@@ -399,7 +418,7 @@ export const incrementGlobalBottleSpinSkip = mutation({
       // Create new record
       newSkipCount = delta;
       await ctx.db.insert('userGameLimits', {
-        userId,
+        userId: actor.userId,
         game: 'bottleSpin',
         convoId,
         windowKey,
@@ -437,7 +456,7 @@ async function expireStalePendingSessions(
   ctx: MutationCtx,
   sessions: BottleSpinSessionDoc[],
   now: number,
-  authUserId: string
+  actorUserId: Id<'users'>
 ) {
   const stalePendingSessions = sessions.filter((session) => isPendingInviteExpired(session, now));
 
@@ -454,7 +473,7 @@ async function expireStalePendingSessions(
 
     await insertTodSystemMessage(ctx, {
       conversationId: session.conversationId,
-      authUserId,
+      senderId: actorUserId,
       content: 'Game invite expired',
       subtype: 'tod_temp',
       eventKey: `tod:${session._id}:invite_expired`,
@@ -467,14 +486,14 @@ async function expireStalePendingSessions(
 export const getBottleSpinSession = query({
   args: {
     conversationId: v.string(),
-    authUserId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, authUserId }) => {
-    const viewerUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!viewerUserId) {
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       return { state: 'none' as const };
     }
-    const conversationAccess = await getBottleSpinConversationAccess(ctx, conversationId, viewerUserId);
+    const conversationAccess = await getBottleSpinConversationAccess(ctx, conversationId, actor.userId);
     if (!conversationAccess.ok) {
       return { state: 'none' as const };
     }
@@ -599,17 +618,13 @@ export const getBottleSpinSession = query({
 // CRITICAL FIX: Check ALL sessions for active/pending status
 export const sendBottleSpinInvite = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     conversationId: v.string(),
     otherUserId: v.string(),
   },
-  handler: async (ctx, { authUserId, conversationId, otherUserId }) => {
-    if (authUserId === otherUserId) {
-      throw new Error('You cannot invite yourself');
-    }
-
-    const inviterUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!inviterUserId) {
+  handler: async (ctx, { token, conversationId, otherUserId }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -617,9 +632,12 @@ export const sendBottleSpinInvite = mutation({
     if (!inviteeUserId) {
       throw new Error('Invited user not found');
     }
-    await assertBottleSpinConversationUsable(ctx, conversationId, inviterUserId, inviteeUserId);
+    if (actor.userId === inviteeUserId) {
+      throw new Error('You cannot invite yourself');
+    }
+    await assertBottleSpinConversationUsable(ctx, conversationId, actor.userId, inviteeUserId);
 
-    if (await hasBlockBetween(ctx, inviterUserId, inviteeUserId)) {
+    if (await hasBlockBetween(ctx, actor.userId, inviteeUserId)) {
       throw new Error('You can’t invite this user');
     }
 
@@ -628,7 +646,7 @@ export const sendBottleSpinInvite = mutation({
     // FIX: Check ALL sessions for this conversation
     const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
-    await expireStalePendingSessions(ctx, allSessions, now, authUserId);
+    await expireStalePendingSessions(ctx, allSessions, now, actor.userId);
 
     const freshPendingSession = allSessions.find(
       (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
@@ -654,20 +672,20 @@ export const sendBottleSpinInvite = mutation({
     // Create new invite session using the auth IDs passed by the Messages UI.
     const sessionId = await ctx.db.insert('bottleSpinSessions', {
       conversationId,
-      inviterId: authUserId,
+      inviterId: actor.authUserId,
       inviteeId: otherUserId,
       status: 'pending',
       createdAt: now,
     });
 
     // P2-TOD-CHAT-EVENTS: Permanent transcript chip — invite sent.
-    const inviterName = await todDisplayName(ctx, authUserId);
+    const inviterName = await todDisplayName(ctx, actor.userId);
     await insertTodSystemMessage(ctx, {
       conversationId,
-      authUserId,
+      senderId: actor.userId,
       content: `${inviterName} invited you to play Truth or Dare`,
       subtype: 'tod_perm',
-      eventKey: `tod:${sessionId}:invite_sent:${authUserId}:${otherUserId}`,
+      eventKey: `tod:${sessionId}:invite_sent:${actor.authUserId}:${otherUserId}`,
     });
 
     return { success: true };
@@ -678,13 +696,13 @@ export const sendBottleSpinInvite = mutation({
 // CRITICAL FIX: Find the PENDING session specifically
 export const respondToBottleSpinInvite = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     conversationId: v.string(),
     accept: v.boolean(),
   },
-  handler: async (ctx, { authUserId, conversationId, accept }) => {
-    const responderUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!responderUserId) {
+  handler: async (ctx, { token, conversationId, accept }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -694,7 +712,7 @@ export const respondToBottleSpinInvite = mutation({
     const allSessions = await listRecentBottleSpinSessions(ctx, conversationId);
 
     const hadAnyPendingSession = allSessions.some((session) => session.status === 'pending');
-    await expireStalePendingSessions(ctx, allSessions, now, authUserId);
+    await expireStalePendingSessions(ctx, allSessions, now, actor.userId);
 
     const pendingSessions = allSessions.filter(
       (session) => session.status === 'pending' && !isPendingInviteExpired(session, now)
@@ -708,15 +726,15 @@ export const respondToBottleSpinInvite = mutation({
     const session = pendingSessions[0];
 
     // Only the invitee can respond
-    if (session.inviteeId !== authUserId) {
+    if (!isGameActorRef(actor, session.inviteeId)) {
       throw new Error('Only the invited user can respond');
     }
 
     const inviterUserId = await resolveLiveUserIdByAuthId(ctx, session.inviterId);
     if (inviterUserId) {
-      await assertBottleSpinConversationUsable(ctx, conversationId, responderUserId, inviterUserId);
+      await assertBottleSpinConversationUsable(ctx, conversationId, actor.userId, inviterUserId);
     }
-    if (!inviterUserId || (await hasBlockBetween(ctx, inviterUserId, responderUserId))) {
+    if (!inviterUserId || (await hasBlockBetween(ctx, inviterUserId, actor.userId))) {
       throw new Error('This invite is no longer available');
     }
 
@@ -737,13 +755,13 @@ export const respondToBottleSpinInvite = mutation({
       });
 
       // P2-TOD-CHAT-EVENTS: Transient chip — invite accepted.
-      const accepterName = await todDisplayName(ctx, authUserId);
+      const accepterName = await todDisplayName(ctx, actor.userId);
       await insertTodSystemMessage(ctx, {
         conversationId,
-        authUserId,
+        senderId: actor.userId,
         content: `${accepterName} accepted the invite`,
         subtype: 'tod_temp',
-        eventKey: `tod:${session._id}:invite_accepted:${authUserId}`,
+        eventKey: `tod:${session._id}:invite_accepted:${actor.authUserId}`,
       });
 
       return { success: true, status: 'active' as const };
@@ -756,13 +774,13 @@ export const respondToBottleSpinInvite = mutation({
       });
 
       // P2-TOD-CHAT-EVENTS: Transient chip — invite declined.
-      const declinerName = await todDisplayName(ctx, authUserId);
+      const declinerName = await todDisplayName(ctx, actor.userId);
       await insertTodSystemMessage(ctx, {
         conversationId,
-        authUserId,
+        senderId: actor.userId,
         content: `${declinerName} declined the invite`,
         subtype: 'tod_temp',
-        eventKey: `tod:${session._id}:invite_declined:${authUserId}`,
+        eventKey: `tod:${session._id}:invite_declined:${actor.authUserId}`,
       });
 
       return { success: true, status: 'rejected' as const };
@@ -774,12 +792,12 @@ export const respondToBottleSpinInvite = mutation({
 // CRITICAL FIX: Find the ACTIVE session specifically
 export const endBottleSpinGame = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     conversationId: v.string(),
   },
-  handler: async (ctx, { authUserId, conversationId }) => {
-    const actorUserId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!actorUserId) {
+  handler: async (ctx, { token, conversationId }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -798,10 +816,10 @@ export const endBottleSpinGame = mutation({
     const session = activeSessions[0];
 
     // Either participant can end the game
-    if (session.inviterId !== authUserId && session.inviteeId !== authUserId) {
+    if (!isGameActorRef(actor, session.inviterId) && !isGameActorRef(actor, session.inviteeId)) {
       throw new Error('Only participants can end the game');
     }
-    await assertBottleSpinConversationUsable(ctx, conversationId, actorUserId);
+    await assertBottleSpinConversationUsable(ctx, conversationId, actor.userId);
 
     // TD-LIFECYCLE: End the game with proper reason tracking
     await ctx.db.patch(session._id, {
@@ -812,13 +830,13 @@ export const endBottleSpinGame = mutation({
     });
 
     // P2-TOD-CHAT-EVENTS: Transient chip — game ended manually.
-    const enderName = await todDisplayName(ctx, authUserId);
+    const enderName = await todDisplayName(ctx, actor.userId);
     await insertTodSystemMessage(ctx, {
       conversationId,
-      authUserId,
+      senderId: actor.userId,
       content: `${enderName} ended the game`,
       subtype: 'tod_temp',
-      eventKey: `tod:${session._id}:manual_end:${authUserId}`,
+      eventKey: `tod:${session._id}:manual_end:${actor.authUserId}`,
     });
 
     return { success: true };
@@ -829,12 +847,12 @@ export const endBottleSpinGame = mutation({
 // This is the critical fix: game modal should only open after this mutation succeeds
 export const startBottleSpinGame = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     conversationId: v.string(),
   },
-  handler: async (ctx, { authUserId, conversationId }) => {
-    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+  handler: async (ctx, { token, conversationId }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -852,10 +870,10 @@ export const startBottleSpinGame = mutation({
     const session = activeSessions[0];
 
     // Only the INVITER can start the game
-    if (session.inviterId !== authUserId) {
+    if (!isGameActorRef(actor, session.inviterId)) {
       return { success: false, reason: 'only_inviter_can_start' as const };
     }
-    await assertBottleSpinConversationUsable(ctx, conversationId, userId);
+    await assertBottleSpinConversationUsable(ctx, conversationId, actor.userId);
 
     // Check if game already started (idempotent)
     if (session.gameStartedAt) {
@@ -871,7 +889,7 @@ export const startBottleSpinGame = mutation({
     // P2-TOD-CHAT-EVENTS: Transient chip — game started.
     await insertTodSystemMessage(ctx, {
       conversationId,
-      authUserId,
+      senderId: actor.userId,
       content: `Game started`,
       subtype: 'tod_temp',
       eventKey: `tod:${session._id}:game_started`,
@@ -885,7 +903,7 @@ export const startBottleSpinGame = mutation({
 // Called by frontend when it detects an expired state
 export const cleanupExpiredSession = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     conversationId: v.string(),
     endedReason: v.union(
       v.literal('invite_expired'),
@@ -893,12 +911,12 @@ export const cleanupExpiredSession = mutation({
       v.literal('timeout')
     ),
   },
-  handler: async (ctx, { authUserId, conversationId, endedReason }) => {
-    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+  handler: async (ctx, { token, conversationId, endedReason }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
-    const conversationAccess = await getBottleSpinConversationAccess(ctx, conversationId, userId);
+    const conversationAccess = await getBottleSpinConversationAccess(ctx, conversationId, actor.userId);
     if (!conversationAccess.ok) {
       return { success: true, cleanedCount: 0 };
     }
@@ -960,7 +978,7 @@ export const cleanupExpiredSession = mutation({
       const isInviteExpiry = endedReason === 'invite_expired';
       await insertTodSystemMessage(ctx, {
         conversationId,
-        authUserId,
+        senderId: actor.userId,
         content: isInviteExpiry
           ? 'Game invite expired'
           : 'Game ended due to inactivity',
@@ -983,7 +1001,7 @@ export const cleanupExpiredSession = mutation({
 // CRITICAL FIX: Find the ACTIVE session specifically, not just the latest one
 export const setBottleSpinTurn = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     conversationId: v.string(),
     // Role-based turn tracking (avoids ID format mismatch issues)
     currentTurnRole: v.optional(v.union(
@@ -998,9 +1016,9 @@ export const setBottleSpinTurn = mutation({
     ),
     lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip'
   },
-  handler: async (ctx, { authUserId, conversationId, currentTurnRole, turnPhase, lastSpinResult }) => {
-    const userId = await resolveLiveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+  handler: async (ctx, { token, conversationId, currentTurnRole, turnPhase, lastSpinResult }) => {
+    const actor = await resolveLiveGameActor(ctx, token);
+    if (!actor) {
       throw new Error('Unauthorized: user not found');
     }
 
@@ -1019,12 +1037,12 @@ export const setBottleSpinTurn = mutation({
     const session = activeSessions[0];
 
     // Only participants can update turn state
-    if (session.inviterId !== authUserId && session.inviteeId !== authUserId) {
+    if (!isGameActorRef(actor, session.inviterId) && !isGameActorRef(actor, session.inviteeId)) {
       throw new Error('Only participants can update turn state');
     }
 
     // SPIN-TURN-FIX: Determine caller's role for ownership enforcement.
-    const callerRole: 'inviter' | 'invitee' = session.inviterId === authUserId ? 'inviter' : 'invitee';
+    const callerRole: 'inviter' | 'invitee' = isGameActorRef(actor, session.inviterId) ? 'inviter' : 'invitee';
     const otherParticipantUserId = await resolveLiveUserIdByAuthId(
       ctx,
       callerRole === 'inviter' ? session.inviteeId : session.inviterId
@@ -1032,7 +1050,7 @@ export const setBottleSpinTurn = mutation({
     await assertBottleSpinConversationUsable(
       ctx,
       conversationId,
-      userId,
+      actor.userId,
       otherParticipantUserId ?? undefined
     );
 
@@ -1165,32 +1183,32 @@ export const setBottleSpinTurn = mutation({
     // ═══════════════════════════════════════════════════════════════════════
     if (turnPhase === 'choosing' && lastSpinResult === 'skip') {
       // Skip during the choose step — transient.
-      const skipperName = await todDisplayName(ctx, authUserId);
+      const skipperName = await todDisplayName(ctx, actor.userId);
       await insertTodSystemMessage(ctx, {
         conversationId,
-        authUserId,
+        senderId: actor.userId,
         content: `${skipperName} skipped 😅`,
         subtype: 'tod_temp',
-        eventKey: `tod:${session._id}:skip_choosing:${previousActionAt}:${authUserId}`,
+        eventKey: `tod:${session._id}:skip_choosing:${previousActionAt}:${actor.authUserId}`,
       });
     } else if (turnPhase === 'complete' && lastSpinResult) {
-      const actorName = await todDisplayName(ctx, authUserId);
+      const actorName = await todDisplayName(ctx, actor.userId);
       if (lastSpinResult === 'truth' || lastSpinResult === 'dare') {
         const label = lastSpinResult === 'truth' ? 'TRUTH 🔥' : 'DARE 😈';
         await insertTodSystemMessage(ctx, {
           conversationId,
-          authUserId,
+          senderId: actor.userId,
           content: `${actorName} chose ${label}`,
           subtype: 'tod_perm',
-          eventKey: `tod:${session._id}:choice:${previousActionAt}:${authUserId}:${lastSpinResult}`,
+          eventKey: `tod:${session._id}:choice:${previousActionAt}:${actor.authUserId}:${lastSpinResult}`,
         });
       } else if (lastSpinResult === 'skip') {
         await insertTodSystemMessage(ctx, {
           conversationId,
-          authUserId,
+          senderId: actor.userId,
           content: `${actorName} skipped 😅`,
           subtype: 'tod_temp',
-          eventKey: `tod:${session._id}:choice:${previousActionAt}:${authUserId}:skip`,
+          eventKey: `tod:${session._id}:choice:${previousActionAt}:${actor.authUserId}:skip`,
         });
       }
     }

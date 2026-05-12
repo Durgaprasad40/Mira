@@ -32,7 +32,7 @@ export default function LikesScreen() {
 
   const convexLikes = useQuery(
     api.likes.getLikesReceived,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && token ? { token } : 'skip'
   );
 
   const swipeMutation = useMutation(api.likes.swipe);

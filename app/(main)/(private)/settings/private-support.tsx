@@ -112,7 +112,7 @@ interface PhotoAttachment {
 export default function PrivateSupportScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
   // FAQ expansion state
   const [expandedTopic, setExpandedTopic] = useState<string | null>(null);
@@ -182,7 +182,7 @@ export default function PrivateSupportScreen() {
       return;
     }
 
-    if (!userId) {
+    if (!userId || !token) {
       Toast.show('Please log in to submit a request');
       return;
     }
@@ -199,10 +199,9 @@ export default function PrivateSupportScreen() {
           const attachment = attachments[i];
           setUploadProgress(`Uploading ${i + 1} of ${attachments.length}...`);
 
-          // CONTRACT FIX: generateUploadUrl expects {}
           const storageId = await uploadMediaToConvex(
             attachment.uri,
-            () => generateUploadUrl(),
+            () => generateUploadUrl({ token }),
             'photo'
           );
 

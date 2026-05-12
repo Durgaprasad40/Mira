@@ -6,7 +6,7 @@
  */
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import { Id } from './_generated/dataModel';
 
 // Category type for type safety
@@ -373,8 +373,14 @@ export const sendSupportMessage = mutation({
  * Uses Convex storage.
  */
 export const generateUploadUrl = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await validateSessionToken(ctx, args.token.trim());
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
     return await ctx.storage.generateUploadUrl();
   },
 });

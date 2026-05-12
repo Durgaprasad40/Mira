@@ -383,7 +383,6 @@ export default function MessagesScreen() {
 
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
-  const convexUserId = asUserId(userId);
   const convex = useConvex();
   const [refreshing, setRefreshing] = useState(false);
   const [inboxTimeReferenceMs, setInboxTimeReferenceMs] = useState(() => Date.now());
@@ -633,28 +632,28 @@ export default function MessagesScreen() {
   // Creating new object references on every render causes Convex to re-subscribe
   // FIX: Use correct argument names for each API endpoint
   const convexConversationsArgs = useMemo(
-    () => (!isDemoMode && userId ? { authUserId: userId } : 'skip' as const),
-    [userId, retryKey]
+    () => (!isDemoMode && token ? { token } : 'skip' as const),
+    [token, retryKey]
   );
   const convexUnreadArgs = useMemo(
-    () => (!isDemoMode && userId ? { userId } : 'skip' as const),
-    [userId, retryKey]
+    () => (!isDemoMode && token ? { token } : 'skip' as const),
+    [isDemoMode, retryKey, token]
   );
   const convexQueryArgs = useMemo(
-    () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
-    [convexUserId, retryKey]
+    () => (!isDemoMode && token ? { token } : 'skip' as const),
+    [isDemoMode, retryKey, token]
   );
   const currentUserQueryArgs = useMemo(
     () => (!isDemoMode && token ? { token } : 'skip' as const),
     [isDemoMode, retryKey, token]
   );
   const convexMatchesArgs = useMemo(
-    () => (!isDemoMode && userId ? { authUserId: userId } : 'skip' as const),
-    [isDemoMode, retryKey, userId]
+    () => (!isDemoMode && token ? { token } : 'skip' as const),
+    [isDemoMode, retryKey, token]
   );
   const standOutQueryArgs = useMemo(
-    () => (!isDemoMode && convexUserId ? { userId: convexUserId, refreshKey: retryKey } : 'skip' as const),
-    [convexUserId, isDemoMode, retryKey]
+    () => (!isDemoMode && token ? { token, refreshKey: retryKey } : 'skip' as const),
+    [isDemoMode, retryKey, token]
   );
 
   // Convex queries (skipped in demo mode)
@@ -721,8 +720,8 @@ export default function MessagesScreen() {
   // Note: This is separate from "read" (blue ticks) which only happens when user opens the chat.
   useEffect(() => {
     // Only run when we have conversation data (meaning messages have arrived)
-    if (!isDemoMode && userId && convexConversations && convexConversations.length > 0) {
-      markAllAsDelivered({ authUserId: userId }).catch((error) => {
+    if (!isDemoMode && token && convexConversations && convexConversations.length > 0) {
+      markAllAsDelivered({ token }).catch((error) => {
         if (__DEV__) {
           log.warn('[MESSAGES]', 'markAllAsDelivered failed', {
             reason: error instanceof Error ? error.message : 'unknown',
@@ -730,7 +729,7 @@ export default function MessagesScreen() {
         }
       });
     }
-  }, [isDemoMode, userId, convexConversations, markAllAsDelivered]);
+  }, [isDemoMode, token, convexConversations, markAllAsDelivered]);
 
   // Combine message threads
   const demoThreads = useMemo(() => {
@@ -873,7 +872,7 @@ export default function MessagesScreen() {
     const otherUserId = getNonEmptyString(item.otherUser?.id);
     if (!otherUserId) return;
 
-    safePush(router, asHref(`/(main)/profile/${otherUserId}`), 'messages->avatarProfile');
+    safePush(router, asHref(`/(main)/profile/${otherUserId}?source=messages`), 'messages->avatarProfile');
   }, [router]);
 
   // Pending likes count (for header badge)
@@ -894,23 +893,23 @@ export default function MessagesScreen() {
     messagesNudgeStatus === 'needs_both' && !dismissedNudges.includes('messages');
 
   const refetchLiveMessagesData = useCallback(async () => {
-    if (isDemoMode || !userId || !convexUserId || !token) {
+    if (isDemoMode || !token) {
       return;
     }
 
     setRetryKey((k) => k + 1);
 
     await Promise.all([
-      convex.query(api.messages.getConversations, { authUserId: userId }),
-      convex.query(api.messages.getUnreadCount, { userId }),
+      convex.query(api.messages.getConversations, { token }),
+      convex.query(api.messages.getUnreadCount, { token }),
       convex.query(api.users.getCurrentUser, { token }),
-      convex.query(api.likes.getLikesReceived, { userId: convexUserId }),
-      convex.query(api.matches.getMatches, { authUserId: userId }),
-      convex.query(api.likes.getIncomingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
-      convex.query(api.likes.getOutgoingStandOuts, { userId: convexUserId, refreshKey: retryKey }),
-      convex.query(api.likes.getStandOutCounts, { userId: convexUserId, refreshKey: retryKey }),
+      convex.query(api.likes.getLikesReceived, { token }),
+      convex.query(api.matches.getMatches, { token }),
+      convex.query(api.likes.getIncomingStandOuts, { token, refreshKey: retryKey }),
+      convex.query(api.likes.getOutgoingStandOuts, { token, refreshKey: retryKey }),
+      convex.query(api.likes.getStandOutCounts, { token, refreshKey: retryKey }),
     ]);
-  }, [convex, convexUserId, isDemoMode, retryKey, token, userId]);
+  }, [convex, isDemoMode, retryKey, token]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -1188,12 +1187,12 @@ export default function MessagesScreen() {
   }, [router]);
 
   const handleAcceptStandOut = useCallback(async (request: IncomingStandOutRow) => {
-    if (!userId || activeStandOutAction) return;
+    if (!token || activeStandOutAction) return;
     const actionKey = `accept:${request.likeId}`;
     setActiveStandOutAction(actionKey);
     try {
       const result = await acceptStandOutMutation({
-        authUserId: userId,
+        token,
         likeId: asLikeId(request.likeId),
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -1204,15 +1203,15 @@ export default function MessagesScreen() {
     } finally {
       setActiveStandOutAction(null);
     }
-  }, [acceptStandOutMutation, activeStandOutAction, finishStandOutAction, userId]);
+  }, [acceptStandOutMutation, activeStandOutAction, finishStandOutAction, token]);
 
   const handleIgnoreStandOut = useCallback(async (request: IncomingStandOutRow) => {
-    if (!userId || activeStandOutAction) return;
+    if (!token || activeStandOutAction) return;
     const actionKey = `ignore:${request.likeId}`;
     setActiveStandOutAction(actionKey);
     try {
       await ignoreStandOutMutation({
-        authUserId: userId,
+        token,
         likeId: asLikeId(request.likeId),
       });
       setStandOutDetailTarget(null);
@@ -1226,10 +1225,10 @@ export default function MessagesScreen() {
     } finally {
       setActiveStandOutAction(null);
     }
-  }, [activeStandOutAction, ignoreStandOutMutation, userId]);
+  }, [activeStandOutAction, ignoreStandOutMutation, token]);
 
   const handleSendStandOutReply = useCallback(async () => {
-    if (!userId || !standOutDetailTarget || activeStandOutAction) return;
+    if (!token || !standOutDetailTarget || activeStandOutAction) return;
     const replyText = standOutReplyText.trim();
     if (!replyText) {
       Toast.show('Write a reply to send.');
@@ -1240,7 +1239,7 @@ export default function MessagesScreen() {
     setActiveStandOutAction(actionKey);
     try {
       const result = await replyToStandOutMutation({
-        authUserId: userId,
+        token,
         likeId: asLikeId(standOutDetailTarget.likeId),
         replyText,
       });
@@ -1258,7 +1257,7 @@ export default function MessagesScreen() {
     replyToStandOutMutation,
     standOutDetailTarget,
     standOutReplyText,
-    userId,
+    token,
   ]);
 
   // Back to messages (for in-place header button)
@@ -1286,11 +1285,11 @@ export default function MessagesScreen() {
     const actionKey = `${source}:${matchId ?? getNonEmptyString(item?.otherUser?.id) ?? 'missing'}`;
     if (openingMatchKey) return;
 
-    if (!matchId || !userId) {
+    if (!matchId || !token) {
       if (__DEV__) {
         log.warn('[MESSAGES]', 'match conversation cannot be opened', {
           source,
-          reason: !matchId ? 'missing_match_id' : 'missing_user',
+          reason: !matchId ? 'missing_match_id' : 'missing_token',
           hasOtherUser: !!getNonEmptyString(item?.otherUser?.id),
         });
       }
@@ -1300,7 +1299,7 @@ export default function MessagesScreen() {
 
     setOpeningMatchKey(actionKey);
     try {
-      const result = await ensureConversation({ matchId: asMatchId(matchId), authUserId: userId });
+      const result = await ensureConversation({ matchId: asMatchId(matchId), token });
       const conversationId = getResultConversationId(result);
       if (!conversationId) {
         if (__DEV__) {
@@ -1330,7 +1329,7 @@ export default function MessagesScreen() {
     } finally {
       setOpeningMatchKey((current) => (current === actionKey ? null : current));
     }
-  }, [ensureConversation, openingMatchKey, router, userId]);
+  }, [ensureConversation, openingMatchKey, router, token]);
 
   // ── Render functions ──
 

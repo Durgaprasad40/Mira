@@ -70,11 +70,10 @@ export default function MatchCelebrationScreen() {
     ? (otherUserId as unknown as Id<"users">)
     : null;
 
-  // FIX: Backend expects { matchId, userId }, not { token, authUserId }
   const matchQuery = useQuery(
     api.matches.getMatch as any,
-    !isPhase2 && !isDemo && matchIdValue && userId
-      ? { matchId: matchIdValue, userId }
+    !isPhase2 && !isDemo && matchIdValue && token
+      ? { matchId: matchIdValue, token }
       : "skip",
   );
   const otherUserQuery = useQuery(
@@ -91,8 +90,8 @@ export default function MatchCelebrationScreen() {
   );
   const confessionConversationQuery = useQuery(
     api.messages.getConversation as any,
-    isConfessionSource && !isDemo && confessionConversationId && userId
-      ? { conversationId: confessionConversationId as any, authUserId: userId }
+    isConfessionSource && !isDemo && confessionConversationId && token
+      ? { conversationId: confessionConversationId as any, token }
       : "skip",
   );
   const currentUserQuery = useQuery(
@@ -392,7 +391,7 @@ export default function MatchCelebrationScreen() {
       return;
     }
 
-    if (!matchIdValue || !userId) {
+    if (!matchIdValue || !token) {
       Toast.show("Something went wrong. Please go back and try again.");
       sendingRef.current = false;
       return;
@@ -403,21 +402,22 @@ export default function MatchCelebrationScreen() {
       // STEP A: Ensure a conversation row exists for this match.
       // Idempotent — safe to retry if the previous attempt crashed mid-flow.
       // Returns the conversationId needed for Step B.
-      // MSG-005 FIX: Use authUserId for server-side verification
       const { conversationId: conversationIdFinal } = await ensureConversation({
         matchId: matchIdValue,
-        authUserId: userId,
+        token,
       });
       if (__DEV__) console.log("[SayHi] conversationId(after)", conversationIdFinal);
 
       // STEP B: Send the mandatory first message ("Hi 👋").
       // Must happen BEFORE navigation — otherwise the chat screen opens empty
       // and the message appears with a visible delay.
-      // MSG-001 FIX: Use authUserId for server-side verification
-      // FIX: Backend expects { authUserId }, not { token }
+      if (!token) {
+        Toast.show("Session expired. Please sign in again.");
+        return;
+      }
       await sendMessageMut({
         conversationId: conversationIdFinal,
-        authUserId: userId ?? '',
+        token,
         type: "text",
         content: "Hi 👋",
       });

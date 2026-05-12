@@ -959,9 +959,9 @@ export default function EditProfileScreen() {
       let backendUrl: string | null = null;
       let uploadedStorageId: Id<'_storage'> | null = null;
 
-      if (!isDemoMode && userId) {
+      if (!isDemoMode && userId && token) {
         try {
-          const storageId = await uploadPhotoToConvex(asset.uri, generateUploadUrl);
+          const storageId = await uploadPhotoToConvex(asset.uri, () => generateUploadUrl({ token }));
           uploadedStorageId = storageId;
           await trackPendingUpload({ userId, storageId });
           const permanentUrl = await getStorageUrl({ storageId });

@@ -866,10 +866,10 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
         demoMarkReadForConversation(normalizedId);
         return;
       }
-      if (!convexUserId || !userId) return;
+      if (!convexUserId || !userId || !token) return;
       if (phase === 'phase1') {
         markReadForConversationMutationP1({
-          authUserId: userId,
+          token,
           conversationId: normalizedId,
         }).catch(console.error);
       } else {
@@ -883,6 +883,7 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
       phase,
       demoMarkReadForConversation,
       convexUserId,
+      token,
       userId,
       markReadForConversationMutationP1,
       markReadForConversationMutationP2,

@@ -355,8 +355,8 @@ export default function Phase2ChatThread() {
 
   const gameSession = useQuery(
     api.games.getBottleSpinSession,
-    id && userId && !isConversationClosed
-      ? { conversationId: id, authUserId: userId }
+    id && token && !isConversationClosed
+      ? { conversationId: id, token }
       : 'skip'
   );
 
@@ -848,18 +848,18 @@ export default function Phase2ChatThread() {
     | 'timeout'
     | undefined;
   useEffect(() => {
-    if (!id || !userId) return;
+    if (!id || !token) return;
     if (isConversationClosed) return;
     if (tdState !== 'expired' || !endedReason) return;
     console.log('[P2_TD_CLEANUP]', { id, endedReason });
     cleanupExpired({
-      authUserId: userId,
+      token,
       conversationId: id,
       endedReason,
     }).catch((err) =>
       console.warn('[P2_TD_CLEANUP] failed:', err?.message ?? err)
     );
-  }, [id, userId, isConversationClosed, tdState, endedReason, cleanupExpired]);
+  }, [id, token, isConversationClosed, tdState, endedReason, cleanupExpired]);
 
   // Cleanup cooldown timer on unmount.
   useEffect(() => {
@@ -1072,8 +1072,8 @@ export default function Phase2ChatThread() {
       userId,
     });
 
-    if (!userId || !id) {
-      console.log('[P2_TD] missing user or id', { currentUserId: userId, id });
+    if (!userId || !token || !id) {
+      console.log('[P2_TD] missing user, token, or id', { currentUserId: userId, hasToken: !!token, id });
       return;
     }
     if (isConversationClosed) {
@@ -1101,7 +1101,7 @@ export default function Phase2ChatThread() {
           console.log('[P2_TD_MANUAL_START]', { id });
           try {
             await startGame({
-              authUserId: userId,
+              token,
               conversationId: id,
             });
             // P2_TD_PARITY: do NOT write a "[SYSTEM:truthdare]Game started!"
@@ -1183,6 +1183,7 @@ export default function Phase2ChatThread() {
     amInvitee,
     gameStartedAt,
     userId,
+    token,
     gameSession,
     otherUserName,
     showCooldownFor3s,
@@ -1192,7 +1193,7 @@ export default function Phase2ChatThread() {
 
   const handleSendInvite = useCallback(async () => {
     if (isConversationClosed) return;
-    if (!userId || !id || !otherUserId) {
+    if (!userId || !token || !id || !otherUserId) {
       Alert.alert('Not ready', 'Cannot send invite right now.');
       return;
     }
@@ -1213,7 +1214,7 @@ export default function Phase2ChatThread() {
     }
     try {
       await sendInvite({
-        authUserId: userId,
+        token,
         conversationId: id,
         otherUserId,
       });
@@ -1254,6 +1255,7 @@ export default function Phase2ChatThread() {
     }
   }, [
     userId,
+    token,
     id,
     otherUserId,
     tdState,
@@ -1265,10 +1267,10 @@ export default function Phase2ChatThread() {
 
   const handleAcceptInvite = useCallback(async () => {
     if (isConversationClosed) return;
-    if (!userId || !id) return;
+    if (!userId || !token || !id) return;
     try {
       await respondInvite({
-        authUserId: userId,
+        token,
         conversationId: id,
         accept: true,
       });
@@ -1281,14 +1283,14 @@ export default function Phase2ChatThread() {
     } catch (err: any) {
       Alert.alert('Could not accept', String(err?.message ?? err));
     }
-  }, [userId, id, respondInvite, isConversationClosed]);
+  }, [userId, token, id, respondInvite, isConversationClosed]);
 
   const handleDeclineInvite = useCallback(async () => {
     if (isConversationClosed) return;
-    if (!userId || !id) return;
+    if (!userId || !token || !id) return;
     try {
       await respondInvite({
-        authUserId: userId,
+        token,
         conversationId: id,
         accept: false,
       });
@@ -1299,7 +1301,7 @@ export default function Phase2ChatThread() {
     } catch (err: any) {
       Alert.alert('Could not decline', String(err?.message ?? err));
     }
-  }, [userId, id, respondInvite, isConversationClosed]);
+  }, [userId, token, id, respondInvite, isConversationClosed]);
 
   const handleSendText = useCallback(
     async (text: string) => {
@@ -1345,12 +1347,12 @@ export default function Phase2ChatThread() {
   const handleSendResultMessage = useCallback(
     async (msg: string) => {
       if (isConversationClosed) return;
-      if (!id || !userId) return;
+      if (!id || !token) return;
       const isEndGameSystemMessage = /^[^\s].* ended the game$/.test(msg);
       if (isEndGameSystemMessage) {
         console.log('[P2_TD_END]', { id, msg });
         endGame({
-          authUserId: userId,
+          token,
           conversationId: id,
         }).catch((err) =>
           console.warn('[P2_TD_END] failed:', (err as any)?.message ?? err)
@@ -1360,7 +1362,7 @@ export default function Phase2ChatThread() {
       // the local `tdToast` effect above and via the BottleSpinGame modal's
       // own inline UI for the active player.
     },
-    [id, userId, endGame, isConversationClosed]
+    [id, token, endGame, isConversationClosed]
   );
 
   const handleBottleGameClose = useCallback(() => {
@@ -1818,7 +1820,7 @@ export default function Phase2ChatThread() {
   // --------------------------------------------------------------------- safety handlers
   const handleBlock = useCallback(() => {
     setShowMenu(false);
-    if (!userId || !otherUserId) return;
+    if (!token || !otherUserId) return;
     Alert.alert(
       'Block this person?',
       `${otherUserName} will no longer be able to contact you. This conversation will be hidden.`,
@@ -1830,7 +1832,7 @@ export default function Phase2ChatThread() {
           onPress: async () => {
             try {
               await blockUser({
-                authUserId: userId,
+                token,
                 blockedUserId: otherUserId as any,
               });
               if (token && id) {
@@ -1852,12 +1854,11 @@ export default function Phase2ChatThread() {
       ]
     );
   }, [
-    userId,
+    token,
     otherUserId,
     otherUserName,
     blockUser,
     leaveConversation,
-    token,
     id,
     router,
   ]);
@@ -1926,10 +1927,10 @@ export default function Phase2ChatThread() {
         | 'underage'
     ) => {
       setShowReportSheet(false);
-      if (!userId || !otherUserId) return;
+      if (!token || !otherUserId) return;
       try {
         await reportUser({
-          authUserId: userId,
+          token,
           reportedUserId: otherUserId as any,
           reason,
         });
@@ -1941,7 +1942,7 @@ export default function Phase2ChatThread() {
         Alert.alert('Could not submit report', String(err?.message ?? err));
       }
     },
-    [userId, otherUserId, reportUser]
+    [token, otherUserId, reportUser]
   );
 
   // MENU-CLEANUP: Phase-2 Scam quick action. Frontend-only mapping to
@@ -1949,10 +1950,10 @@ export default function Phase2ChatThread() {
   // required. Moderators see the descriptive label in the audit row.
   const handleScam = useCallback(async () => {
     setShowMenu(false);
-    if (!userId || !otherUserId) return;
+    if (!token || !otherUserId) return;
     try {
       await reportUser({
-        authUserId: userId,
+        token,
         reportedUserId: otherUserId as any,
         reason: 'other',
         description: 'Scam/fraudulent behavior',
@@ -1964,7 +1965,7 @@ export default function Phase2ChatThread() {
     } catch (err: any) {
       Alert.alert('Could not submit report', String(err?.message ?? err));
     }
-  }, [userId, otherUserId, reportUser]);
+  }, [token, otherUserId, reportUser]);
 
   // --------------------------------------------------------------------- render helpers
   // MESSAGES-STABILIZE: Convex `useQuery` returns `undefined` whenever its
@@ -2957,6 +2958,7 @@ export default function Phase2ChatThread() {
           onCancel={handleBottleGameCancel}
           conversationId={id}
           userId={userId}
+          token={token ?? undefined}
           currentUserName={currentUserName}
           otherUserName={otherUserName}
           onSendResultMessage={handleSendResultMessage}

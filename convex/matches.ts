@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, type MutationCtx } from './_generated/server';
 import { Id, type Doc } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { validateSessionToken } from './helpers';
 
 type Phase1MatchSource = 'like' | 'super_like' | 'confession';
 
@@ -91,12 +91,13 @@ export async function ensureActiveMatchForPair(
 // FIX: Excludes blocked users (bidirectional)
 export const getMatches = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, limit = 50 } = args;
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const { token, limit = 50 } = args;
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) return [];
 
     // Get matches where user is either user1 or user2
@@ -284,12 +285,12 @@ export const getMatches = query({
 export const getMatch = query({
   args: {
     matchId: v.id('matches'),
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { matchId } = args;
-    // Map authUserId -> Convex Id<"users"> if needed
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const { matchId, token } = args;
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) return null;
 
     const match = await ctx.db.get(matchId);
@@ -362,17 +363,18 @@ export const getMatch = query({
 });
 
 // Unmatch
-// AUTH FIX: Use authUserId + server-side resolution to prevent client spoofing
+// AUTH FIX: Use token + server-side resolution to prevent client spoofing
 export const unmatch = mutation({
   args: {
     matchId: v.id('matches'),
-    authUserId: v.string(), // Auth ID from client, resolved server-side
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { matchId, authUserId } = args;
+    const { matchId, token } = args;
 
     // Resolve auth ID to actual user ID server-side (prevents spoofing)
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) {
       throw new Error('User not found');
     }
@@ -459,14 +461,15 @@ export const getNewMatches = query({
 // P1 SECURITY: Added authorization (caller must be one of the users) and block check
 export const areMatched = query({
   args: {
-    authUserId: v.string(), // Caller's auth ID for authorization
+    token: v.string(),
     otherUserId: v.id('users'), // The other user to check match with
   },
   handler: async (ctx, args) => {
-    const { authUserId, otherUserId } = args;
+    const { token, otherUserId } = args;
 
     // P1 SECURITY: Resolve caller's auth ID to Convex user ID
-    const callerId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const callerId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!callerId) {
       return false; // Unauthorized
     }

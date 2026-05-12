@@ -64,8 +64,9 @@
  */
 
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
-import { resolveUserIdByAuthId } from './helpers';
+import { type Id } from './_generated/dataModel';
+import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
+import { validateSessionToken } from './helpers';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -95,25 +96,131 @@ const answerTypeValidator = v.union(
 // ─── Auth Helper ──────────────────────────────────────────────────────────────
 
 /**
- * TOD-009 FIX: Verify caller identity and that it matches the claimed callerId.
- * This ensures clients cannot impersonate other users.
+ * Legacy chatTod remains a deployed Convex surface even though the active chat
+ * game path uses convex/games.ts. Keep this token-bound so direct API calls
+ * cannot impersonate another participant with callerId/authUserId.
  */
-async function verifyCallerIdentity(
-  ctx: any,
-  authUserId: string,
-  callerId: string
-): Promise<void> {
-  if (!authUserId || authUserId.trim().length === 0) {
+type ChatTodActor = {
+  userId: Id<'users'>;
+  identityRefs: Set<string>;
+};
+
+function isUnavailableUser(user: any): boolean {
+  return (
+    !user ||
+    user.deletedAt !== undefined ||
+    user.isActive === false ||
+    user.isBanned === true
+  );
+}
+
+async function resolveChatTodActor(
+  ctx: QueryCtx | MutationCtx,
+  token: string
+): Promise<ChatTodActor | null> {
+  const sessionToken = token.trim();
+  if (!sessionToken) return null;
+
+  const userId = await validateSessionToken(ctx, sessionToken);
+  if (!userId) return null;
+
+  const user = await ctx.db.get(userId);
+  if (isUnavailableUser(user)) return null;
+
+  const refs = new Set<string>([String(userId)]);
+  if (typeof user?.authUserId === 'string' && user.authUserId.trim().length > 0) {
+    refs.add(user.authUserId);
+  }
+  if (typeof user?.demoUserId === 'string' && user.demoUserId.trim().length > 0) {
+    refs.add(user.demoUserId);
+  }
+
+  return {
+    userId,
+    identityRefs: refs,
+  };
+}
+
+async function requireChatTodActor(
+  ctx: QueryCtx | MutationCtx,
+  token: string
+): Promise<ChatTodActor> {
+  const actor = await resolveChatTodActor(ctx, token);
+  if (!actor) {
     throw new Error('Unauthorized: authentication required');
   }
-  const resolvedUserId = await resolveUserIdByAuthId(ctx, authUserId);
-  if (!resolvedUserId) {
-    throw new Error('Unauthorized: user not found');
+  return actor;
+}
+
+function isActorRef(actor: ChatTodActor, value: string | null | undefined): boolean {
+  return typeof value === 'string' && actor.identityRefs.has(value);
+}
+
+async function getConversationParticipants(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: string,
+  actor: ChatTodActor
+): Promise<string[] | null> {
+  const phase1ConversationId = ctx.db.normalizeId('conversations', conversationId);
+  if (phase1ConversationId) {
+    const conversation = await ctx.db.get(phase1ConversationId);
+    if (conversation) {
+      if (conversation.expiresAt !== undefined && conversation.expiresAt <= Date.now()) {
+        return null;
+      }
+      if (!conversation.participants.some((participantId) => participantId === actor.userId)) {
+        return null;
+      }
+      return conversation.participants.map((participantId) => String(participantId));
+    }
   }
-  // Verify the authenticated user matches who they claim to be
-  if (resolvedUserId !== callerId) {
-    throw new Error('Unauthorized: caller identity mismatch');
+
+  const privateConversationId = ctx.db.normalizeId('privateConversations', conversationId);
+  if (privateConversationId) {
+    const conversation = await ctx.db.get(privateConversationId);
+    if (conversation) {
+      if (!conversation.participants.some((participantId) => participantId === actor.userId)) {
+        return null;
+      }
+      return conversation.participants.map((participantId) => String(participantId));
+    }
   }
+
+  return null;
+}
+
+async function getGameForActor(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: string,
+  actor: ChatTodActor
+) {
+  const game = await ctx.db
+    .query('chatTodGames')
+    .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+    .first();
+
+  if (!game) return null;
+
+  const participants = await getConversationParticipants(ctx, conversationId, actor);
+  if (!participants) return null;
+
+  if (!isActorRef(actor, game.participant1Id) && !isActorRef(actor, game.participant2Id)) {
+    return null;
+  }
+
+  return game;
+}
+
+async function requireGameForActor(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: string,
+  actor: ChatTodActor
+) {
+  const game = await getGameForActor(ctx, conversationId, actor);
+  if (!game) {
+    throw new Error('Game not found');
+  }
+  return game;
 }
 
 // ─── Queries ─────────────────────────────────────────────────────────────────
@@ -125,13 +232,13 @@ async function verifyCallerIdentity(
 export const getChatTod = query({
   args: {
     conversationId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId }) => {
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await resolveChatTodActor(ctx, token);
+    if (!actor) return null;
 
+    const game = await getGameForActor(ctx, conversationId, actor);
     if (!game) return null;
 
     // Convert stored format to client-friendly format
@@ -170,13 +277,13 @@ export const getChatTod = query({
 export const isMandatoryComplete = query({
   args: {
     conversationId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId }) => {
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await resolveChatTodActor(ctx, token);
+    if (!actor) return false;
 
+    const game = await getGameForActor(ctx, conversationId, actor);
     return game?.isMandatoryComplete ?? false;
   },
 });
@@ -193,17 +300,15 @@ export const initGame = mutation({
     conversationId: v.string(),
     participant1Id: v.string(),
     participant2Id: v.string(),
-    callerId: v.string(), // The user initiating (for participant check)
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, participant1Id, participant2Id, callerId, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    // Security: caller must be a participant
-    if (callerId !== participant1Id && callerId !== participant2Id) {
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const participants = await getConversationParticipants(ctx, conversationId, actor);
+    if (!participants || participants.length < 2) {
       throw new Error('Only conversation participants can initialize T&D game');
     }
+    const [participant1Id, participant2Id] = participants;
 
     // Check if game already exists
     const existing = await ctx.db
@@ -255,26 +360,11 @@ export const initGame = mutation({
 export const spinBottle = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, callerId, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    // Security: caller must be a participant
-    if (callerId !== game.participant1Id && callerId !== game.participant2Id) {
-      throw new Error('Only participants can spin the bottle');
-    }
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     // Phase validation
     if (game.roundPhase !== 'idle' && game.roundPhase !== 'round_complete') {
@@ -308,27 +398,12 @@ export const spinBottle = mutation({
 export const completeSpinAnimation = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
     winnerId: v.string(), // Pre-determined winner from client animation
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, callerId, winnerId, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    // Security: caller must be a participant
-    if (callerId !== game.participant1Id && callerId !== game.participant2Id) {
-      throw new Error('Only participants can complete spin');
-    }
+  handler: async (ctx, { conversationId, winnerId, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     // Phase validation
     if (game.roundPhase !== 'spinning') {
@@ -362,25 +437,15 @@ export const completeSpinAnimation = mutation({
 export const chooseTruthOrDare = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
     promptType: promptTypeValidator,
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, callerId, promptType, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
+  handler: async (ctx, { conversationId, promptType, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     // Security: only the chooser can choose
-    if (callerId !== game.chooserUserId) {
+    if (!isActorRef(actor, game.chooserUserId)) {
       throw new Error('Only the chooser can select Truth or Dare');
     }
 
@@ -407,25 +472,15 @@ export const chooseTruthOrDare = mutation({
 export const setPrompt = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
     promptText: v.string(),
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, callerId, promptText, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
+  handler: async (ctx, { conversationId, promptText, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     // Security: only the chooser can set prompt
-    if (callerId !== game.chooserUserId) {
+    if (!isActorRef(actor, game.chooserUserId)) {
       throw new Error('Only the chooser can write the prompt');
     }
 
@@ -461,31 +516,21 @@ export const setPrompt = mutation({
 export const submitAnswer = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
     answerType: answerTypeValidator,
     answerText: v.optional(v.string()),
     answerMediaUri: v.optional(v.string()),
     answerDurationSec: v.optional(v.number()),
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
   handler: async (
     ctx,
-    { conversationId, callerId, answerType, answerText, answerMediaUri, answerDurationSec, authUserId }
+    { conversationId, answerType, answerText, answerMediaUri, answerDurationSec, token }
   ) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     // Security: only the responder can answer
-    if (callerId !== game.responderUserId) {
+    if (!isActorRef(actor, game.responderUserId)) {
       throw new Error('Only the responder can submit an answer');
     }
 
@@ -525,30 +570,15 @@ export const submitAnswer = mutation({
 export const useSkip = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, callerId, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    // Security: caller must be a participant
-    if (callerId !== game.participant1Id && callerId !== game.participant2Id) {
-      throw new Error('Only participants can use skip');
-    }
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     // Check skip eligibility based on phase
-    const isChooser = callerId === game.chooserUserId;
-    const isResponder = callerId === game.responderUserId;
+    const isChooser = isActorRef(actor, game.chooserUserId);
+    const isResponder = isActorRef(actor, game.responderUserId);
 
     if (game.roundPhase === 'choosing' && !isChooser) {
       throw new Error('Only the chooser can skip during choosing phase');
@@ -561,7 +591,7 @@ export const useSkip = mutation({
     }
 
     // Check remaining skips
-    const isParticipant1 = callerId === game.participant1Id;
+    const isParticipant1 = isActorRef(actor, game.participant1Id);
     const currentSkips = isParticipant1 ? game.participant1Skips : game.participant2Skips;
 
     if (currentSkips <= 0) {
@@ -611,26 +641,11 @@ export const useSkip = mutation({
 export const completeMandatoryRound = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, callerId, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    // Security: caller must be a participant
-    if (callerId !== game.participant1Id && callerId !== game.participant2Id) {
-      throw new Error('Only participants can unlock chat');
-    }
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     // Phase validation: must have completed at least 1 full round
     if (game.roundPhase !== 'round_complete') {
@@ -660,26 +675,11 @@ export const completeMandatoryRound = mutation({
 export const resetGame = mutation({
   args: {
     conversationId: v.string(),
-    callerId: v.string(),
-    authUserId: v.string(), // TOD-009: Auth verification required
+    token: v.string(),
   },
-  handler: async (ctx, { conversationId, callerId, authUserId }) => {
-    // TOD-009 FIX: Verify caller identity
-    await verifyCallerIdentity(ctx, authUserId, callerId);
-
-    const game = await ctx.db
-      .query('chatTodGames')
-      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
-      .first();
-
-    if (!game) {
-      throw new Error('Game not found');
-    }
-
-    // Security: caller must be a participant
-    if (callerId !== game.participant1Id && callerId !== game.participant2Id) {
-      throw new Error('Only participants can reset game');
-    }
+  handler: async (ctx, { conversationId, token }) => {
+    const actor = await requireChatTodActor(ctx, token);
+    const game = await requireGameForActor(ctx, conversationId, actor);
 
     await ctx.db.patch(game._id, {
       chooserUserId: null,

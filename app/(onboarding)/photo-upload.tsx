@@ -424,7 +424,10 @@ export default function PhotoUploadScreen() {
         }
 
         // Step 1: Upload photo to Convex storage (same as live mode)
-        const uploadUrl = await generateUploadUrl();
+        if (!token) {
+          throw new Error('Session expired. Please sign in again.');
+        }
+        const uploadUrl = await generateUploadUrl({ token });
         const response = await fetch(currentPhoto);
         const blob = await response.blob();
 
@@ -510,7 +513,10 @@ export default function PhotoUploadScreen() {
 
       // Step 1: Upload photo to Convex storage
       console.log('[PHOTO_GATE] Getting upload URL...');
-      const uploadUrl = await generateUploadUrl();
+      if (!token) {
+        throw new Error('Session expired. Please sign in again.');
+      }
+      const uploadUrl = await generateUploadUrl({ token });
 
       console.log('[PHOTO_GATE] Fetching image blob...');
       const response = await fetch(currentPhoto);

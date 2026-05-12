@@ -1283,11 +1283,14 @@ export const rewind = mutation({
 // LIFECYCLE: Filter out expired likes (opened > 24h ago with no action)
 export const getLikesReceived = query({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50 } = args;
+    const { token, limit = 50 } = args;
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) return [];
     const now = Date.now();
     const LIKE_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -1377,13 +1380,16 @@ export const getLikesReceived = query({
 // both users still available, and neither side has blocked the other.
 export const getIncomingStandOuts = query({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
     limit: v.optional(v.number()),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50, refreshKey } = args;
+    const { token, limit = 50, refreshKey } = args;
     void refreshKey;
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) return [];
 
     const viewer = await ctx.db.get(userId);
     if (!isPhase1UserAvailable(viewer)) return [];
@@ -1424,13 +1430,16 @@ export const getIncomingStandOuts = query({
 // Phase-1 Stand Out requests sent by the viewer that are still pending.
 export const getOutgoingStandOuts = query({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
     limit: v.optional(v.number()),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50, refreshKey } = args;
+    const { token, limit = 50, refreshKey } = args;
     void refreshKey;
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) return [];
 
     const viewer = await ctx.db.get(userId);
     if (!isPhase1UserAvailable(viewer)) return [];
@@ -1470,12 +1479,17 @@ export const getOutgoingStandOuts = query({
 
 export const getStandOutCounts = query({
   args: {
-    userId: v.id('users'),
+    token: v.string(),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, refreshKey } = args;
+    const { token, refreshKey } = args;
     void refreshKey;
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
+    if (!userId) {
+      return { incoming: 0, outgoing: 0, remainingToday: 0 };
+    }
 
     const viewer = await ctx.db.get(userId);
     if (!isPhase1UserAvailable(viewer)) {
@@ -1533,11 +1547,12 @@ export const getStandOutCounts = query({
 
 export const acceptStandOut = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     likeId: v.id('likes'),
   },
   handler: async (ctx, args) => {
-    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    const sessionToken = args.token.trim();
+    const receiverId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!receiverId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -1551,12 +1566,13 @@ export const acceptStandOut = mutation({
 
 export const replyToStandOut = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     likeId: v.id('likes'),
     replyText: v.string(),
   },
   handler: async (ctx, args) => {
-    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    const sessionToken = args.token.trim();
+    const receiverId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!receiverId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -1571,11 +1587,12 @@ export const replyToStandOut = mutation({
 
 export const ignoreStandOut = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     likeId: v.id('likes'),
   },
   handler: async (ctx, args) => {
-    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    const sessionToken = args.token.trim();
+    const receiverId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!receiverId) {
       throw new Error('Unauthorized: user not found');
     }

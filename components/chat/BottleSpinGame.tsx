@@ -72,6 +72,7 @@ interface BottleSpinGameProps {
   otherUserName: string;
   conversationId: string;
   userId: string;
+  token?: string;
   /** Called when spin completes to send result message to chat */
   onSendResultMessage?: (message: string) => void;
   /**
@@ -114,6 +115,7 @@ export function BottleSpinGame({
   otherUserName,
   conversationId,
   userId,
+  token,
   onSendResultMessage,
   autoAdvance = false,
   onCancel,
@@ -277,7 +279,7 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   const gameSession = useQuery(
     api.games.getBottleSpinSession,
-    visible && conversationId && userId ? { conversationId, authUserId: userId } : 'skip'
+    visible && conversationId && token ? { conversationId, token } : 'skip'
   );
   const setTurnMutation = useMutation(api.games.setBottleSpinTurn);
 
@@ -682,7 +684,7 @@ export function BottleSpinGame({
   const windowKey = getWindowKey();
   const skipDataQuery = useQuery(
     api.games.getGlobalBottleSpinSkips,
-    visible && userId ? { authUserId: userId, windowKey } : 'skip'
+    visible && token ? { token, windowKey } : 'skip'
   );
   const incrementSkipMutation = useMutation(api.games.incrementGlobalBottleSpinSkip);
 
@@ -691,13 +693,13 @@ export function BottleSpinGame({
   const canSkip = skipsRemaining > 0;
 
   const incrementSkipCount = useCallback(async () => {
-    if (!userId) return;
+    if (!token) return;
     try {
-      await incrementSkipMutation({ authUserId: userId, windowKey, delta: 1 });
+      await incrementSkipMutation({ token, windowKey, delta: 1 });
     } catch (error) {
       if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to increment skip count:', error);
     }
-  }, [userId, windowKey, incrementSkipMutation]);
+  }, [token, windowKey, incrementSkipMutation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // GAME ACTIONS
@@ -727,10 +729,10 @@ export function BottleSpinGame({
     spinAnim.setValue(0);
     currentRotation.current = 0;
 
-    if (userId && conversationId) {
+    if (token && conversationId) {
       try {
         await setTurnMutation({
-          authUserId: userId,
+          token,
           conversationId,
           currentTurnRole: undefined,
           turnPhase: 'idle',
@@ -739,7 +741,7 @@ export function BottleSpinGame({
         // Ignore errors during reset
       }
     }
-  }, [spinAnim, userId, conversationId, setTurnMutation, toastOpacity, autoAdvance]);
+  }, [spinAnim, token, conversationId, setTurnMutation, toastOpacity, autoAdvance]);
 
   // TD_PAUSE: Cancel = UI close only. Does NOT reset the game. Does NOT mutate
   // backend state. Does NOT trigger a spin. Parent receives onCancel (falls
@@ -834,8 +836,8 @@ export function BottleSpinGame({
       return;
     }
 
-    if (!userId || !conversationId) {
-      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - missing userId or conversationId');
+    if (!userId || !token || !conversationId) {
+      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - missing userId, token, or conversationId');
       return;
     }
 
@@ -852,7 +854,7 @@ export function BottleSpinGame({
       // Backend now performs the random selection authoritatively when
       // turnPhase === 'spinning' and returns { success, selectedTargetRole }.
       const result = await setTurnMutation({
-        authUserId: userId,
+        token,
         conversationId,
         currentTurnRole: undefined,
         turnPhase: 'spinning',
@@ -918,7 +920,7 @@ export function BottleSpinGame({
       // Transition to choosing phase (backend already knows the selected target)
       try {
         await setTurnMutation({
-          authUserId: userId,
+          token,
           conversationId,
           currentTurnRole: selectedRole, // Use the backend-selected role
           turnPhase: 'choosing',
@@ -938,7 +940,7 @@ export function BottleSpinGame({
       // to keep thread clean. Users see visual result in game modal.
       // Only meaningful messages (chose Truth/Dare/Skip) are persisted.
     });
-  }, [isSpinningLocally, isSessionActive, myRole, userId, inviterId, inviteeId, conversationId, setTurnMutation, spinAnim, currentSpinTurnRole, isMySpinTurn, backendSpinTurnRole, isAnimationLocked]);
+  }, [isSpinningLocally, isSessionActive, myRole, userId, token, inviterId, inviteeId, conversationId, setTurnMutation, spinAnim, currentSpinTurnRole, isMySpinTurn, backendSpinTurnRole, isAnimationLocked]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // HANDLE CHOICE (Truth/Dare/Skip)
@@ -957,10 +959,10 @@ export function BottleSpinGame({
     setChosenOption(choice);
 
     // Update backend
-    if (userId && conversationId) {
+    if (token && conversationId) {
       try {
         await setTurnMutation({
-          authUserId: userId,
+          token,
           conversationId,
           currentTurnRole: undefined,
           turnPhase: 'complete',
@@ -1032,12 +1034,12 @@ export function BottleSpinGame({
       autoAdvanceTimerRef.current = setTimeout(async () => {
         autoAdvanceTimerRef.current = null;
         setChosenOption(null);
-        if (userId && conversationId) {
+        if (token && conversationId) {
           // TD_FLOW: explicit payload log so it's unambiguous which mutation
           // the autoAdvance timer calls. This is setBottleSpinTurn with
           // turnPhase:'idle' — it does NOT end the session or set cooldown.
           const payload = {
-            authUserId: userId,
+            token,
             conversationId,
             currentTurnRole: undefined,
             turnPhase: 'idle' as const,
@@ -1046,7 +1048,7 @@ export function BottleSpinGame({
             console.log('[TD_FLOW] auto_advance_payload', {
               mutation: 'setBottleSpinTurn',
               payload: {
-                hasAuthUser: !!payload.authUserId,
+                hasToken: !!payload.token,
                 conversationRef: getSafeIdTail(payload.conversationId),
                 turnPhase: payload.turnPhase,
               },
@@ -1065,7 +1067,7 @@ export function BottleSpinGame({
         }
       }, 2000);
     }
-  }, [uiMode, currentUserName, incrementSkipCount, onSendResultMessage, userId, conversationId, setTurnMutation, autoAdvance]);
+  }, [uiMode, currentUserName, incrementSkipCount, onSendResultMessage, token, conversationId, setTurnMutation, autoAdvance]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SPIN AGAIN
@@ -1074,10 +1076,10 @@ export function BottleSpinGame({
     spinAnim.setValue(currentRotation.current);
     setChosenOption(null);
 
-    if (userId && conversationId) {
+    if (token && conversationId) {
       try {
         await setTurnMutation({
-          authUserId: userId,
+          token,
           conversationId,
           currentTurnRole: undefined,
           turnPhase: 'idle',
@@ -1091,7 +1093,7 @@ export function BottleSpinGame({
     setTimeout(() => {
       spinBottle();
     }, 100);
-  }, [spinAnim, spinBottle, userId, conversationId, setTurnMutation]);
+  }, [spinAnim, spinBottle, token, conversationId, setTurnMutation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ANIMATION

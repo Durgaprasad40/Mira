@@ -391,7 +391,15 @@ export default function ViewProfileScreen() {
   const shouldPassPhase1ProfileSource =
     isNearbyPrivacySource ||
     normalizedSource === 'phase1_discover' ||
-    normalizedSource === 'phase1_explore';
+    normalizedSource === 'phase1_explore' ||
+    normalizedSource === 'messages' ||
+    normalizedSource === 'message' ||
+    normalizedSource === 'phase1_messages' ||
+    normalizedSource === 'phase1-message' ||
+    normalizedSource === 'phase1_chat' ||
+    normalizedSource === 'phase1-chat' ||
+    normalizedSource === 'chat' ||
+    normalizedSource === 'match';
 
   // Phase-1: Use users.getUserById
   const convexPhase1Profile = useQuery(

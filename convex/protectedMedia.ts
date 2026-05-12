@@ -1,7 +1,12 @@
 import { v } from 'convex/values';
 import { internalMutation, mutation, query, type MutationCtx } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import {
+  isChatRoomPrivateDmConversation,
+  isChatRoomPrivateDmExpired,
+} from './chatRoomDmRetention';
+import { requireChatRoomTermsAccepted } from './lib/userPolicyGates';
 
 /**
  * Legacy compatibility layer.
@@ -10,6 +15,77 @@ import { resolveUserIdByAuthId } from './helpers';
  */
 
 type MediaDoc = Doc<'media'>;
+
+async function isBlockedBidirectional(
+  ctx: MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  const block1 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId1).eq('blockedUserId', userId2)
+    )
+    .first();
+  if (block1) return true;
+
+  const block2 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId2).eq('blockedUserId', userId1)
+    )
+    .first();
+  return !!block2;
+}
+
+async function hasReportBetween(
+  ctx: MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  const report1 = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userId1).eq('reportedUserId', userId2)
+    )
+    .first();
+  if (report1) return true;
+
+  const report2 = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', userId2).eq('reportedUserId', userId1)
+    )
+    .first();
+  return !!report2;
+}
+
+function isUnavailableDmUser(user: Doc<'users'> | null): boolean {
+  return !user || !user.isActive || user.isBanned === true || !!user.deletedAt;
+}
+
+function hasActiveLinkedMatch(
+  conversation: Doc<'conversations'>,
+  match: Doc<'matches'> | null
+): boolean {
+  if (!conversation.matchId) return true;
+  if (!match || match.isActive === false) return false;
+
+  const participantIds = new Set(conversation.participants.map((id) => id as string));
+  return participantIds.has(match.user1Id as string) && participantIds.has(match.user2Id as string);
+}
+
+async function hasActiveChatRoomPenalty(
+  ctx: MutationCtx,
+  userId: Id<'users'>
+): Promise<boolean> {
+  const now = Date.now();
+  const penalties = await ctx.db
+    .query('chatRoomPenalties')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .collect();
+  return penalties.some((p) => p.expiresAt > now);
+}
 
 async function revokeMediaPermissionsForMedia(
   ctx: MutationCtx,
@@ -54,12 +130,121 @@ async function finalizeExpiredMedia(
   }
 }
 
+async function assertCanSendProtectedMedia(
+  ctx: MutationCtx,
+  conversationId: Id<'conversations'>,
+  senderId: Id<'users'>,
+  now: number
+): Promise<{
+  conversation: Doc<'conversations'>;
+  sender: Doc<'users'>;
+  recipientId: Id<'users'> | undefined;
+}> {
+  if (await hasActiveChatRoomPenalty(ctx, senderId)) {
+    throw new Error('You are in read-only mode (24h)');
+  }
+
+  const conversation = await ctx.db.get(conversationId);
+  if (!conversation) throw new Error('Conversation not found');
+
+  const isChatRoomDm = isChatRoomPrivateDmConversation(conversation);
+  if (isChatRoomDm) {
+    await requireChatRoomTermsAccepted(ctx, senderId);
+  }
+
+  if (!conversation.participants.includes(senderId)) {
+    throw new Error('Not authorized');
+  }
+
+  const recipientId = conversation.participants.find((id) => id !== senderId);
+  if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
+    throw new Error('Cannot send message');
+  }
+  if (recipientId && await hasReportBetween(ctx, senderId, recipientId)) {
+    throw new Error('Cannot send message');
+  }
+
+  const sourceRoomId = conversation.sourceRoomId;
+  if (sourceRoomId && recipientId) {
+    const mutedByRecipient = await ctx.db
+      .query('chatRoomPerUserMutes')
+      .withIndex('by_room_muter_target', (q) =>
+        q
+          .eq('roomId', sourceRoomId)
+          .eq('muterId', recipientId)
+          .eq('targetUserId', senderId)
+      )
+      .first();
+    if (mutedByRecipient) {
+      throw new Error("You can't message this user right now.");
+    }
+  }
+
+  if (recipientId) {
+    const recipient = await ctx.db.get(recipientId);
+    if (isUnavailableDmUser(recipient)) {
+      throw new Error('Recipient unavailable');
+    }
+  }
+
+  if (conversation.matchId) {
+    const match = await ctx.db.get(conversation.matchId);
+    if (!hasActiveLinkedMatch(conversation, match)) {
+      throw new Error('This chat is no longer active.');
+    }
+  }
+
+  if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
+    throw new Error('This chat has expired');
+  }
+  if (isChatRoomPrivateDmExpired(conversation, now)) {
+    throw new Error('This chat expired');
+  }
+
+  if (isChatRoomDm && sourceRoomId) {
+    const senderBan = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', sourceRoomId).eq('userId', senderId))
+      .first();
+    if (senderBan) {
+      throw new Error('You can no longer message members of this room.');
+    }
+  }
+
+  const oneMinuteAgo = now - 60000;
+  const recentMessages = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
+    .filter((q) =>
+      q.and(
+        q.eq(q.field('senderId'), senderId),
+        q.gt(q.field('createdAt'), oneMinuteAgo)
+      )
+    )
+    .take(10);
+  if (recentMessages.length >= 10) {
+    throw new Error('You are sending messages too quickly');
+  }
+
+  const sender = await ctx.db.get(senderId);
+  if (!sender) throw new Error('Sender not found');
+  if (sender.emailVerified !== true) {
+    throw new Error('Please verify your email address before sending messages.');
+  }
+  const verificationStatus = sender.verificationStatus || 'unverified';
+  if (verificationStatus !== 'verified') {
+    throw new Error('Please complete profile verification before sending messages.');
+  }
+
+  return { conversation, sender, recipientId };
+}
+
 // Legacy: sendProtectedImage → delegates to media.createMediaMessage pattern
 // MSG-003 FIX: Auth hardening - verify caller identity server-side
 export const sendProtectedImage = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-003: Auth verification required
+    token: v.string(),
     imageStorageId: v.id('_storage'),
     timer: v.number(),
     screenshotAllowed: v.boolean(),
@@ -75,7 +260,7 @@ export const sendProtectedImage = mutation({
   handler: async (ctx, args) => {
     const {
       conversationId,
-      authUserId,
+      token,
       imageStorageId,
       timer,
       screenshotAllowed,
@@ -87,23 +272,21 @@ export const sendProtectedImage = mutation({
     } = args;
     const now = Date.now();
 
-    // MSG-003 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       throw new Error('Unauthorized: authentication required');
     }
-    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    const senderId = await validateSessionToken(ctx, sessionToken);
     if (!senderId) {
       throw new Error('Unauthorized: user not found');
     }
 
-    const conversation = await ctx.db.get(conversationId);
-    if (!conversation) throw new Error('Conversation not found');
-    if (!conversation.participants.includes(senderId)) {
-      throw new Error('Not authorized');
-    }
-
-    const sender = await ctx.db.get(senderId);
-    if (!sender) throw new Error('Sender not found');
+    const { conversation, sender } = await assertCanSendProtectedMedia(
+      ctx,
+      conversationId,
+      senderId,
+      now
+    );
 
     // MEDIA-BUG-001 FIX: Validate storage object exists before creating media
     // This prevents "blank media" bugs caused by failed uploads returning stale storageIds
@@ -181,20 +364,14 @@ export const sendProtectedImage = mutation({
 export const getMediaUrl = query({
   args: {
     messageId: v.id('messages'),
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageId, authUserId } = args;
+    const { messageId, token } = args;
     const now = Date.now();
 
-    // MSG-P1-001 FIX: Server-side auth verification
-    // Verify caller identity matches the requested authUserId
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject && identity.subject !== authUserId) {
-      return null;
-    }
-
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) return null;
 
     const message = await ctx.db.get(messageId);
@@ -349,23 +526,29 @@ export const getMediaUrl = query({
 export const markViewed = mutation({
   args: {
     messageId: v.id('messages'),
-    authUserId: v.string(), // MSG-006: Auth verification required
+    token: v.string(), // MSG-006: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { messageId, authUserId } = args;
+    const { messageId, token } = args;
     const now = Date.now();
 
     // MSG-006 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: true }; // Silent return for view tracking
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: true }; // Silent return for view tracking
     }
 
     const message = await ctx.db.get(messageId);
     if (!message || !message.mediaId) return { success: true };
+
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { success: true };
+    }
 
     const media = await ctx.db.get(message.mediaId);
     if (!media) return { success: true };
@@ -419,17 +602,17 @@ export const markViewed = mutation({
 export const markExpired = mutation({
   args: {
     messageId: v.id('messages'),
-    authUserId: v.string(), // MSG-006: Auth verification required
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageId, authUserId } = args;
+    const { messageId, token } = args;
     const now = Date.now();
 
-    // MSG-006 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: true }; // Silent return for expiry tracking
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: true }; // Silent return for expiry tracking
     }
@@ -439,6 +622,23 @@ export const markExpired = mutation({
 
     const media = await ctx.db.get(message.mediaId);
     if (!media) return { success: true };
+
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { success: true };
+    }
+
+    const permission = await ctx.db
+      .query('mediaPermissions')
+      .withIndex('by_media_recipient', (q) =>
+        q.eq('mediaId', media._id).eq('recipientId', userId)
+      )
+      .first();
+    const isSender = media.ownerId === userId;
+    const isRecipient = !!permission && !permission.revoked && permission.canView;
+    if (!isSender && !isRecipient) {
+      return { success: true };
+    }
 
     await finalizeExpiredMedia(ctx, media, now);
 

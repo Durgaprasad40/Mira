@@ -73,6 +73,7 @@ export default function ProfilePopover({
 }: ProfilePopoverProps) {
   // Auth for Convex
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   // Safe-area insets for footer breathing room above Android nav / iOS home indicator
   const insets = useSafeAreaInsets();
 
@@ -207,7 +208,7 @@ export default function ProfilePopover({
 
     const trimmedBio = editBio.trim();
 
-    if (!authUserId) {
+    if (!authUserId || !token) {
       Alert.alert('Error', 'Not authenticated. Please try again.');
       return;
     }
@@ -220,7 +221,7 @@ export default function ProfilePopover({
 
       if (pendingAvatarLocalUri) {
         // Step 1: Get upload URL from Convex
-        const uploadUrl = await generateUploadUrl({ authUserId });
+        const uploadUrl = await generateUploadUrl({ token });
 
         // Step 2: Upload the image file to Convex storage
         const response = await fetch(pendingAvatarLocalUri);

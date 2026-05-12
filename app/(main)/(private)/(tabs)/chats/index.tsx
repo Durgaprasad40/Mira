@@ -252,7 +252,7 @@ function Phase2ChatThreadPrefetcher({
     userId: userId as any,
     token,
   });
-  const gs = useQuery(api.games.getBottleSpinSession, { conversationId, authUserId: userId });
+  const gs = useQuery(api.games.getBottleSpinSession, { conversationId, token });
   const ready =
     conv !== undefined &&
     msgs !== undefined &&

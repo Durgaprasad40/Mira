@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { mutation } from './_generated/server';
-import { resolveUserIdByAuthId } from './helpers';
+import { validateSessionToken } from './helpers';
 
 /**
  * Ensure a conversation exists for a given match.
@@ -13,16 +13,16 @@ import { resolveUserIdByAuthId } from './helpers';
 export const getOrCreateForMatch = mutation({
   args: {
     matchId: v.id('matches'),
-    authUserId: v.string(), // MSG-005: Auth verification required
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { matchId, authUserId } = args;
+    const { matchId, token } = args;
 
-    // MSG-005 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       throw new Error('Unauthorized: authentication required');
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }

@@ -26,8 +26,6 @@ function getSafeIdTail(value?: string | null): string | undefined {
 
 const asMediaId = (value: string): Id<'media'> => value as Id<'media'>;
 const asMessageId = (value: string): Id<'messages'> => value as Id<'messages'>;
-const asUserId = (value: string): Id<'users'> => value as Id<'users'>;
-
 interface ProtectedMediaBubbleProps {
   messageId: string;
   mediaId?: string;
@@ -60,7 +58,6 @@ interface ProtectedMediaBubbleProps {
 export function ProtectedMediaBubble({
   messageId,
   mediaId,
-  userId,
   protectedMedia,
   timerEndsAt,
   isExpired: isExpiredProp,
@@ -73,12 +70,7 @@ export function ProtectedMediaBubble({
   onHoldEnd,
   onExpire,
 }: ProtectedMediaBubbleProps) {
-  // [P1_MEDIA_FIX] Backend validators require `userId` (media.getMediaInfo)
-  // and `authUserId` (protectedMedia.getMediaUrl). They do NOT accept a
-  // `token` field — passing it triggers ArgumentValidationError and crashes
-  // the chat. Read the authenticated user ID from the auth store and use
-  // the prop form only if nothing is available from the store.
-  const authUserId = useAuthStore((s) => s.userId) ?? userId ?? null;
+  const token = useAuthStore((s) => s.token);
   const messageRef = getSafeIdTail(messageId);
 
   // ============================================================================
@@ -89,7 +81,7 @@ export function ProtectedMediaBubble({
   // Fetch media info from Convex if mediaId is provided
   const mediaInfo = useQuery(
     api.media.getMediaInfo,
-    mediaId && authUserId ? { mediaId: asMediaId(mediaId), userId: asUserId(authUserId) } : 'skip'
+    mediaId && token ? { mediaId: asMediaId(mediaId), token } : 'skip'
   );
 
   // LOAD-FIRST: Receivers must explicitly tap to load before any URL fetch or
@@ -105,8 +97,8 @@ export function ProtectedMediaBubble({
   // LOAD-FIRST: Skip the URL query for receivers until they tap the load arrow.
   const mediaUrlData = useQuery(
     api.protectedMedia.getMediaUrl,
-    mediaId && authUserId && !isExpiredProp && gateOpen
-      ? { messageId: asMessageId(messageId), authUserId }
+    mediaId && token && !isExpiredProp && gateOpen
+      ? { messageId: asMessageId(messageId), token }
       : 'skip'
   );
 

@@ -4,7 +4,7 @@ import { softMaskText } from './softMask';
 import { internal } from './_generated/api';
 import { asUserId } from './id';
 import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import { shouldCreatePhase2ChatRoomsNotification } from './phase2NotificationPrefs';
 import {
   formatChatRoomContentPolicyError,
@@ -75,8 +75,14 @@ function generateJoinCode(): string {
  * Returns a short-lived URL that can be used with HTTP POST to upload.
  */
 export const generateUploadUrl = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await validateSessionToken(ctx, args.token.trim());
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -5920,13 +5926,14 @@ export const getRoomUserIdentities = query({
  */
 export const generateChatRoomAvatarUploadUrl = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { authUserId }) => {
-    if (!authUserId || authUserId.trim().length === 0) {
+  handler: async (ctx, { token }) => {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       throw new Error('Unauthorized: authentication required');
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }

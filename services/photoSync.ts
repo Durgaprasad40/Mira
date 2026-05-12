@@ -216,7 +216,7 @@ export async function uploadPhotoToBackend(
     }
 
     // Step 1: Get upload URL from Convex
-    const uploadUrl = await convex.mutation(api.photos.generateUploadUrl);
+    const uploadUrl = await convex.mutation(api.photos.generateUploadUrl, { token });
 
     // Step 2: Read file as blob
     const response = await fetch(localUri);

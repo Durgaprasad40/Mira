@@ -278,7 +278,7 @@ export default function SupportCaseThreadScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { requestId } = useLocalSearchParams<{ requestId: string }>();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
   const flatListRef = useRef<FlatList>(null);
   const [messageText, setMessageText] = useState('');
@@ -382,13 +382,13 @@ export default function SupportCaseThreadScreen() {
   };
 
   const handleMediaUpload = async (uri: string, type: 'image' | 'video') => {
-    if (!userId || !requestId || isUploading) return;
+    if (!userId || !token || !requestId || isUploading) return;
 
     setIsUploading(true);
     try {
       const storageId = await uploadMediaToConvex(
         uri,
-        () => generateUploadUrl({}),
+        () => generateUploadUrl({ token }),
         type === 'image' ? 'photo' : 'video'
       );
 
@@ -407,13 +407,13 @@ export default function SupportCaseThreadScreen() {
   };
 
   const handleVoiceUpload = async (audioUri: string) => {
-    if (!userId || !requestId) return;
+    if (!userId || !token || !requestId) return;
 
     setIsUploading(true);
     try {
       const storageId = await uploadMediaToConvex(
         audioUri,
-        () => generateUploadUrl({}),
+        () => generateUploadUrl({ token }),
         'audio'
       );
 

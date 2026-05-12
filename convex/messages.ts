@@ -2,7 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
 import { softMaskText } from './softMask';
-import { resolveUserIdByAuthId } from './helpers';
+import { validateSessionToken } from './helpers';
 import {
   CHAT_ROOM_PRIVATE_DM_INACTIVITY_MS,
   isChatRoomPrivateDmConversation,
@@ -14,6 +14,7 @@ import {
   validateChatRoomMessageContent,
 } from './lib/chatRoomContentPolicy';
 import { requireChatRoomTermsAccepted, requirePrivateRoomAdult } from './lib/userPolicyGates';
+import { getSafePhase1PrimaryPhoto } from './phase1Media';
 
 const PHASE1_TEXT_MESSAGE_MAX_LENGTH = 400;
 const SHARED_DM_MESSAGE_MAX_LENGTH = 5000;
@@ -128,16 +129,9 @@ async function getPhase1PrimaryPhoto(
   const photos = await ctx.db
     .query('photos')
     .withIndex('by_user_order', (q) => q.eq('userId', userId))
-    .filter((q) => q.neq(q.field('photoType'), 'verification_reference'))
     .collect();
 
-  photos.sort((a, b) => {
-    if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
-    if (a.order !== b.order) return a.order - b.order;
-    return a.createdAt - b.createdAt;
-  });
-
-  return photos[0] ?? null;
+  return getSafePhase1PrimaryPhoto(photos);
 }
 
 // UNREAD-RULE: Message types that count toward unread badges
@@ -445,7 +439,7 @@ function applyReadReceiptSenderView<T extends Record<string, unknown>>(
 export const sendMessage = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-001: Auth verification required
+    token: v.string(),
     type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('voice')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
@@ -457,18 +451,18 @@ export const sendMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
+    const { conversationId, token, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
     const now = Date.now();
     const normalizedContent =
       type === 'text' || type === 'template'
         ? content.trim()
         : content;
 
-    // MSG-001 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       throw new Error('Unauthorized: authentication required');
     }
-    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    const senderId = await validateSessionToken(ctx, sessionToken);
     if (!senderId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -734,14 +728,15 @@ export const sendMessage = mutation({
 export const deleteMessage = mutation({
   args: {
     messageId: v.id('messages'),
-    authUserId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { messageId, authUserId }) => {
-    if (!authUserId || authUserId.trim().length === 0) {
+  handler: async (ctx, { messageId, token }) => {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       throw new Error('Unauthorized: authentication required');
     }
 
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -798,7 +793,7 @@ export const deleteMessage = mutation({
 // MSG-002 FIX: Auth hardening - verify caller identity server-side
 export const sendPreMatchMessage = mutation({
   args: {
-    authUserId: v.string(), // MSG-002: Auth verification required
+    token: v.string(),
     toUserId: v.id('users'),
     content: v.string(),
     templateId: v.optional(v.string()),
@@ -806,15 +801,15 @@ export const sendPreMatchMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, toUserId, content, templateId, clientMessageId } = args;
+    const { token, toUserId, content, templateId, clientMessageId } = args;
     const now = Date.now();
     const normalizedContent = content.trim();
 
-    // MSG-002 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       throw new Error('Unauthorized: authentication required');
     }
-    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    const fromUserId = await validateSessionToken(ctx, sessionToken);
     if (!fromUserId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -999,20 +994,15 @@ export const sendPreMatchMessage = mutation({
 export const getMessages = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // Legacy support
-    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
+    token: v.string(),
     limit: v.optional(v.number()),
     before: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, limit = 50, before } = args;
+    const { conversationId, token, limit = 50, before } = args;
 
-    // SYNC-FIX: Resolve user ID consistently using auth helper
-    let userId: Id<'users'> | undefined = args.userId;
-    if (!userId && args.authUserId) {
-      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
-      userId = resolved ?? undefined;
-    }
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
 
     if (!userId) {
       return [];
@@ -1029,6 +1019,9 @@ export const getMessages = query({
     }
     const otherParticipantId = conversation.participants.find((id) => id !== userId);
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      return [];
+    }
+    if (otherParticipantId && await hasReportBetween(ctx, userId, otherParticipantId)) {
       return [];
     }
     if (isChatRoomPrivateDmExpired(conversation)) {
@@ -1159,17 +1152,18 @@ export const getMessages = query({
 export const markAsRead = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-004: Auth verification required
+    token: v.string(), // MSG-004: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
 
     // MSG-004 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return; // Silent return for mark-as-read (non-critical)
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return; // Silent return for mark-as-read (non-critical)
     }
@@ -1218,16 +1212,17 @@ export const markAsRead = mutation({
  */
 export const getDmMessages = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
     threadId: v.id('conversations'),
     paginationOpts: v.object({
       numItems: v.number(),
       cursor: v.union(v.string(), v.null()),
     }),
   },
-  handler: async (ctx, { authUserId, threadId, paginationOpts }) => {
+  handler: async (ctx, { token, threadId, paginationOpts }) => {
     try {
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      const sessionToken = token.trim();
+      const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
       if (!userId) {
         return { page: [], isDone: true, continueCursor: null };
       }
@@ -1389,17 +1384,18 @@ export const getDmMessages = query({
 export const markAsDelivered = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
 
     // Verify caller identity
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: false, count: 0 };
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: false, count: 0 };
     }
@@ -1441,16 +1437,17 @@ export const markAsDelivered = mutation({
 // This ensures "delivered" state is set when message reaches device, not when conversation is opened
 export const markAllAsDelivered = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
+    const { token } = args;
     const now = Date.now();
 
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: false, count: 0 };
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: false, count: 0 };
     }
@@ -1512,14 +1509,15 @@ export const markAllAsDelivered = mutation({
 
 export const listUndeliveredIncomingMessages = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
-    if (!authUserId || authUserId.trim().length === 0) {
+    const { token } = args;
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return [] as Array<{ _id: Id<'messages'>; conversationId: Id<'conversations'> }>;
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return [] as Array<{ _id: Id<'messages'>; conversationId: Id<'conversations'> }>;
     }
@@ -1562,19 +1560,20 @@ export const listUndeliveredIncomingMessages = query({
 export const markMessagesDelivered = mutation({
   args: {
     messageIds: v.array(v.id('messages')),
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { messageIds, authUserId } = args;
+    const { messageIds, token } = args;
     const now = Date.now();
 
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: false, count: 0 };
     }
     if (!messageIds || messageIds.length === 0) {
       return { success: true, count: 0 };
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: false, count: 0 };
     }
@@ -1613,16 +1612,17 @@ export const markMessagesDelivered = mutation({
 // Called periodically while user is in a conversation to show "Online" status
 export const updatePresence = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
+    const { token } = args;
     const now = Date.now();
 
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: false };
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: false };
     }
@@ -1637,19 +1637,14 @@ export const updatePresence = mutation({
 export const getConversation = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // Legacy support
-    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
 
-    // SYNC-FIX: Resolve user ID consistently using auth helper
-    let userId: Id<'users'> | undefined = args.userId;
-    if (!userId && args.authUserId) {
-      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
-      userId = resolved ?? undefined;
-    }
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
 
     if (!userId) {
       return null;
@@ -1756,16 +1751,16 @@ export const getConversation = query({
 // APP-P0-004 FIX: Server-side auth - resolve userId from authUserId to prevent cross-user access
 export const getConversations = query({
   args: {
-    authUserId: v.string(), // APP-P0-004: Changed from userId: v.id('users')
+    token: v.string(),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, limit = 50 } = args;
+    const { token, limit = 50 } = args;
     const now = Date.now();
     const normalizedLimit = Math.min(Math.max(limit, 1), 100);
 
-    // APP-P0-004 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) {
       return []; // Unauthorized - return empty array
     }
@@ -2158,10 +2153,11 @@ export const getConversations = query({
 // Check if user can send messages
 export const canSendMessage = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    const sessionToken = args.token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) return { canSend: false, remaining: 0, total: 0 };
 
     const user = await ctx.db.get(userId);
@@ -2197,11 +2193,11 @@ export const canSendMessage = query({
 
 export const getUnreadCount = query({
   args: {
-    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const sessionToken = args.token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) {
       return 0;
     }
@@ -2284,10 +2280,11 @@ export const getUnreadCount = query({
  */
 export const getUnreadDmCountsByRoom = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
   },
-  handler: async (ctx, { authUserId }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { token }) => {
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) {
       return {
         byRoomId: {},
@@ -2377,16 +2374,17 @@ export const getUnreadDmCountsByRoom = query({
 export const markDmConversationRead = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(), // MSG-004: Auth verification required
+    token: v.string(), // MSG-004: Auth verification required
   },
-  handler: async (ctx, { conversationId, authUserId }) => {
+  handler: async (ctx, { conversationId, token }) => {
     const now = Date.now();
 
     // MSG-004 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: false, count: 0 };
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: false, count: 0 };
     }
@@ -2588,15 +2586,16 @@ export const backfillConversationParticipants = internalMutation({
 export const setTypingStatus = mutation({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(),
+    token: v.string(),
     isTyping: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId, isTyping } = args;
+    const { conversationId, token, isTyping } = args;
     const now = Date.now();
 
     // Resolve auth ID to user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) return;
 
     // Verify user is part of conversation
@@ -2643,12 +2642,13 @@ export const setTypingStatus = mutation({
 export const getTypingStatus = query({
   args: {
     conversationId: v.id('conversations'),
-    authUserId: v.string(),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId } = args;
+    const { conversationId, token } = args;
     const now = Date.now();
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const sessionToken = token.trim();
+    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) {
       return { isTyping: false };
     }

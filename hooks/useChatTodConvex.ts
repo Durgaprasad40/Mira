@@ -26,6 +26,7 @@ import {
   type TodGameState,
   type TodPromptType,
 } from '@/stores/chatTodStore';
+import { useAuthStore } from '@/stores/authStore';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,7 @@ export function useChatTodConvex(
   conversationId: string,
   currentUserId: string = DEFAULT_DEMO_USER_ID
 ): UseChatTodConvexReturn {
+  const token = useAuthStore((s) => s.token);
   // ─── Zustand (Demo Mode) ───
   const zustandGame = useGameState(conversationId);
   // C-003 FIX: Pass currentUserId to get correct skips for user
@@ -92,12 +94,12 @@ export function useChatTodConvex(
   // Only run queries/mutations in real mode
   const convexGame = useQuery(
     api.chatTod.getChatTod,
-    isDemoMode ? 'skip' : { conversationId }
+    isDemoMode || !token ? 'skip' : { conversationId, token }
   );
 
   const convexIsMandatoryComplete = useQuery(
     api.chatTod.isMandatoryComplete,
-    isDemoMode ? 'skip' : { conversationId }
+    isDemoMode || !token ? 'skip' : { conversationId, token }
   );
 
   // Convex mutations
@@ -167,16 +169,15 @@ export function useChatTodConvex(
         zustandActions.initGame(conversationId, userIds);
         return;
       }
-      // TOD-009 FIX: Use authUserId for server-side verification
+      if (!token) throw new Error('Authentication required');
       await initGameMutation({
         conversationId,
         participant1Id: userIds[0],
         participant2Id: userIds[1],
-        callerId: currentUserId,
-        authUserId: currentUserId,
+        token,
       });
     },
-    [conversationId, currentUserId, zustandActions, initGameMutation]
+    [conversationId, token, zustandActions, initGameMutation]
   );
 
   const spinBottle = useCallback(async () => {
@@ -184,13 +185,12 @@ export function useChatTodConvex(
       zustandActions.spinBottle(conversationId);
       return;
     }
-    // TOD-009 FIX: Use authUserId for server-side verification
+    if (!token) throw new Error('Authentication required');
     await spinBottleMutation({
       conversationId,
-      callerId: currentUserId,
-      authUserId: currentUserId,
+      token,
     });
-  }, [conversationId, currentUserId, zustandActions, spinBottleMutation]);
+  }, [conversationId, token, zustandActions, spinBottleMutation]);
 
   const completeSpinAnimation = useCallback(
     async (winnerId: string) => {
@@ -199,15 +199,14 @@ export function useChatTodConvex(
         zustandActions.completeSpinAnimation(conversationId, winnerId);
         return;
       }
-      // TOD-009 FIX: Use authUserId for server-side verification
+      if (!token) throw new Error('Authentication required');
       await completeSpinMutation({
         conversationId,
-        callerId: currentUserId,
         winnerId,
-        authUserId: currentUserId,
+        token,
       });
     },
-    [conversationId, currentUserId, zustandActions, completeSpinMutation]
+    [conversationId, token, zustandActions, completeSpinMutation]
   );
 
   const chooseTruthOrDare = useCallback(
@@ -216,15 +215,14 @@ export function useChatTodConvex(
         zustandActions.chooseTruthOrDare(conversationId, type);
         return;
       }
-      // TOD-009 FIX: Use authUserId for server-side verification
+      if (!token) throw new Error('Authentication required');
       await chooseMutation({
         conversationId,
-        callerId: currentUserId,
         promptType: type,
-        authUserId: currentUserId,
+        token,
       });
     },
-    [conversationId, currentUserId, zustandActions, chooseMutation]
+    [conversationId, token, zustandActions, chooseMutation]
   );
 
   const setPrompt = useCallback(
@@ -233,15 +231,14 @@ export function useChatTodConvex(
         zustandActions.setPrompt(conversationId, text);
         return;
       }
-      // TOD-009 FIX: Use authUserId for server-side verification
+      if (!token) throw new Error('Authentication required');
       await setPromptMutation({
         conversationId,
-        callerId: currentUserId,
         promptText: text,
-        authUserId: currentUserId,
+        token,
       });
     },
-    [conversationId, currentUserId, zustandActions, setPromptMutation]
+    [conversationId, token, zustandActions, setPromptMutation]
   );
 
   const submitAnswer = useCallback(
@@ -250,18 +247,17 @@ export function useChatTodConvex(
         zustandActions.submitAnswer(conversationId, meta);
         return;
       }
-      // TOD-009 FIX: Use authUserId for server-side verification
+      if (!token) throw new Error('Authentication required');
       await submitAnswerMutation({
         conversationId,
-        callerId: currentUserId,
         answerType: meta.type,
         answerText: meta.text,
         answerMediaUri: meta.mediaUri,
         answerDurationSec: meta.durationSec,
-        authUserId: currentUserId,
+        token,
       });
     },
-    [conversationId, currentUserId, zustandActions, submitAnswerMutation]
+    [conversationId, token, zustandActions, submitAnswerMutation]
   );
 
   const useSkipAction = useCallback(async (): Promise<boolean> => {
@@ -269,30 +265,28 @@ export function useChatTodConvex(
       return zustandActions.useSkip(conversationId, currentUserId);
     }
     try {
-      // TOD-009 FIX: Use authUserId for server-side verification
+      if (!token) throw new Error('Authentication required');
       await useSkipMutation({
         conversationId,
-        callerId: currentUserId,
-        authUserId: currentUserId,
+        token,
       });
       return true;
     } catch {
       return false;
     }
-  }, [conversationId, currentUserId, zustandActions, useSkipMutation]);
+  }, [conversationId, currentUserId, token, zustandActions, useSkipMutation]);
 
   const completeMandatoryRound = useCallback(async () => {
     if (isDemoMode) {
       zustandActions.completeMandatoryRound(conversationId);
       return;
     }
-    // TOD-009 FIX: Use authUserId for server-side verification
+    if (!token) throw new Error('Authentication required');
     await completeMandatoryMutation({
       conversationId,
-      callerId: currentUserId,
-      authUserId: currentUserId,
+      token,
     });
-  }, [conversationId, currentUserId, zustandActions, completeMandatoryMutation]);
+  }, [conversationId, token, zustandActions, completeMandatoryMutation]);
 
   return {
     game,
@@ -318,6 +312,7 @@ export function useIsMandatoryCompleteConvex(conversationId: string): {
   isMandatoryComplete: boolean;
   isLoading: boolean;
 } {
+  const token = useAuthStore((s) => s.token);
   // Zustand (demo)
   const zustandComplete = useChatTodStore(
     (s) => s.games[conversationId]?.isMandatoryComplete ?? false
@@ -326,7 +321,7 @@ export function useIsMandatoryCompleteConvex(conversationId: string): {
   // Convex (real)
   const convexComplete = useQuery(
     api.chatTod.isMandatoryComplete,
-    isDemoMode ? 'skip' : { conversationId }
+    isDemoMode || !token ? 'skip' : { conversationId, token }
   );
 
   if (isDemoMode) {

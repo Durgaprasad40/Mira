@@ -67,8 +67,10 @@ export function ReportModal({
 }: ReportModalProps) {
   // Get userId for backend mutations
   const userId = useAuthStore((s) => s.userId);
+  const storeToken = useAuthStore((s) => s.token);
+  const token = authToken || storeToken;
   // Determine if we have full backend integration or using legacy mode
-  const hasBackendIntegration = !!(targetUserId && (authToken || userId));
+  const hasBackendIntegration = !!(targetUserId && token);
   const [viewState, setViewState] = useState<ViewState>('main');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -132,13 +134,13 @@ export function ReportModal({
             setIsLoading(true);
 
             try {
-              if (!userId) {
+              if (!token) {
                 Alert.alert('Error', 'Please log in to block users.');
                 setIsLoading(false);
                 return;
               }
               await blockMutation({
-                authUserId: userId,
+                token,
                 blockedUserId: targetUserId as any,
               });
 
@@ -240,13 +242,13 @@ export function ReportModal({
     setIsLoading(true);
 
     try {
-      if (!userId) {
+      if (!token) {
         Alert.alert('Error', 'Please log in to report users.');
         setIsLoading(false);
         return;
       }
       await reportMutation({
-        authUserId: userId,
+        token,
         reportedUserId: targetUserId as any,
         reason: reasonId,
       });
@@ -277,13 +279,13 @@ export function ReportModal({
     setIsLoading(true);
 
     try {
-      if (!userId) {
+      if (!token) {
         Alert.alert('Error', 'Please log in to report users.');
         setIsLoading(false);
         return;
       }
       await reportMutation({
-        authUserId: userId,
+        token,
         reportedUserId: targetUserId as any,
         reason: 'other',
         description: 'Scam/fraudulent behavior',
