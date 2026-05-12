@@ -1,5 +1,10 @@
 import { Id, Doc } from "./_generated/dataModel";
 import { QueryCtx, MutationCtx } from "./_generated/server";
+import {
+  DEFAULT_MAX_AGE,
+  DEFAULT_MAX_DISTANCE_KM,
+  DEFAULT_MIN_AGE,
+} from "../lib/discoveryDefaults";
 
 /**
  * Convert Id<"users"> to string for legacy Phase-2 tables.
@@ -219,9 +224,9 @@ export async function ensureUserByAuthId(
     lookingFor: ["male"], // Default placeholder
     relationshipIntent: [],
     activities: [],
-    minAge: 18,
-    maxAge: 50,
-    maxDistance: 50,
+    minAge: DEFAULT_MIN_AGE,
+    maxAge: DEFAULT_MAX_AGE,
+    maxDistance: DEFAULT_MAX_DISTANCE_KM,
     subscriptionTier: "free",
     trialEndsAt: undefined,
     incognitoMode: false,

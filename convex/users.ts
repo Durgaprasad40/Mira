@@ -18,6 +18,9 @@ import {
   CURRENT_PHASE2_SETUP_VERSION,
   PHASE2_SECTION1_PROMPT_IDS,
 } from "./phase2Constants";
+import {
+  normalizeDiscoveryPreferences,
+} from "../lib/discoveryDefaults";
 
 const ALLOWED_RELATIONSHIP_INTENTS = new Set(FRONTEND_RELATIONSHIP_INTENT_IDS);
 const PROFILE_NAME_MAX_LENGTH = 50;
@@ -193,6 +196,7 @@ function projectCurrentUserLifeRhythm(user: Doc<"users">) {
 }
 
 function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]) {
+  const discoveryPrefs = normalizeDiscoveryPreferences(user);
   return {
     _id: user._id,
     name: user.name,
@@ -223,9 +227,9 @@ function projectCurrentUserForPhase1(user: Doc<"users">, photos: Doc<"photos">[]
     relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
     activities: user.activities ?? [],
     freeTonightExpiresAt: user.freeTonightExpiresAt,
-    minAge: user.minAge,
-    maxAge: user.maxAge,
-    maxDistance: user.maxDistance,
+    minAge: discoveryPrefs.minAge,
+    maxAge: discoveryPrefs.maxAge,
+    maxDistance: discoveryPrefs.maxDistance,
     orientation: user.orientation ?? null,
     sortBy: user.sortBy,
     subscriptionTier: user.subscriptionTier,
@@ -862,8 +866,9 @@ export const updatePreferences = mutation({
     if (minAge !== undefined || maxAge !== undefined) {
       const user = await ctx.db.get(userId);
       if (!user) throw new Error("User not found");
-      const effectiveMin = minAge ?? user.minAge;
-      const effectiveMax = maxAge ?? user.maxAge;
+      const existingPrefs = normalizeDiscoveryPreferences(user);
+      const effectiveMin = minAge ?? existingPrefs.minAge;
+      const effectiveMax = maxAge ?? existingPrefs.maxAge;
       if (effectiveMin > effectiveMax) {
         throw new Error("minAge cannot be greater than maxAge");
       }
@@ -2242,6 +2247,15 @@ export const completeOnboarding = mutation({
     }
     applyFreeTonightExpiry(cleanUpdates, freeTonightExpiresAt);
 
+    const discoveryPrefs = normalizeDiscoveryPreferences({
+      minAge: typeof cleanUpdates.minAge === "number" ? cleanUpdates.minAge : user.minAge,
+      maxAge: typeof cleanUpdates.maxAge === "number" ? cleanUpdates.maxAge : user.maxAge,
+      maxDistance: typeof cleanUpdates.maxDistance === "number" ? cleanUpdates.maxDistance : user.maxDistance,
+    });
+    cleanUpdates.minAge = discoveryPrefs.minAge;
+    cleanUpdates.maxAge = discoveryPrefs.maxAge;
+    cleanUpdates.maxDistance = discoveryPrefs.maxDistance;
+
     if (cleanUpdates.profilePrompts) {
       cleanUpdates.profilePrompts = sanitizeProfilePrompts(
         cleanUpdates.profilePrompts as Array<{ question: string; answer: string; section?: string }>
@@ -2822,6 +2836,12 @@ export const upsertOnboardingDraft = mutation({
       mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
         mergedDraft.preferences.relationshipIntent
       );
+    }
+    if (mergedDraft.preferences) {
+      const discoveryPrefs = normalizeDiscoveryPreferences(mergedDraft.preferences);
+      mergedDraft.preferences.minAge = discoveryPrefs.minAge;
+      mergedDraft.preferences.maxAge = discoveryPrefs.maxAge;
+      mergedDraft.preferences.maxDistance = discoveryPrefs.maxDistance;
     }
 
     await ctx.db.patch(userId, {

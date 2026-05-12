@@ -30,6 +30,7 @@ import {
 } from '../lib/discoveryNaming';
 import { EXPLORE_NEARBY_RADIUS_KM } from '../lib/distanceRules';
 import { isFreeTonightActive } from '../lib/freeTonight';
+import { DEFAULT_MIN_AGE, normalizeDiscoveryPreferences } from '../lib/discoveryDefaults';
 import {
   CandidateProfile,
   CurrentUser,
@@ -218,17 +219,17 @@ function isEffectivelyHiddenFromDiscover(user: {
 }
 
 // BUGFIX #21: Safe date parsing with NaN guard
-function calculateAge(dateOfBirth: string): number {
-  if (!dateOfBirth) return 0;
+function calculateAge(dateOfBirth?: string | null): number | null {
+  if (!dateOfBirth) return null;
   const today = new Date();
   const birthDate = new Date(dateOfBirth);
-  if (isNaN(birthDate.getTime())) return 0;
+  if (isNaN(birthDate.getTime())) return null;
   let age = today.getFullYear() - birthDate.getFullYear();
   const m = today.getMonth() - birthDate.getMonth();
   if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
     age--;
   }
-  return age;
+  return Number.isFinite(age) && age >= 0 && age < 120 ? age : null;
 }
 
 function calculateDistance(
@@ -257,6 +258,10 @@ function toRad(deg: number): number {
 function isDistanceAllowed(distance: number | undefined, maxDistanceKm: number): boolean {
   if (distance == null) return true;
   return distance <= maxDistanceKm;
+}
+
+function hasEligibleAdultAge(age: number | null): age is number {
+  return age !== null && age >= DEFAULT_MIN_AGE;
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +442,11 @@ export const getDiscoverProfiles = query({
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return phase1DiscoverEmpty('viewer_unavailable');
+    const currentPrefs = normalizeDiscoveryPreferences(currentUser);
+    const currentUserAge = calculateAge(currentUser.dateOfBirth);
+    if (!hasEligibleAdultAge(currentUserAge)) {
+      return phase1DiscoverEmpty('viewer_unavailable');
+    }
 
     if (isEffectivelyHiddenFromDiscover(currentUser)) return phase1DiscoverEmpty('viewer_unavailable');
 
@@ -650,9 +660,9 @@ export const getDiscoverProfiles = query({
         viewerGender: currentUser.gender,
         viewerOrientation: currentUser.orientation,
         viewerLookingFor: currentUser.lookingFor,
-        viewerMinAge: currentUser.minAge,
-        viewerMaxAge: currentUser.maxAge,
-        viewerMaxDistance: currentUser.maxDistance,
+        viewerMinAge: currentPrefs.minAge,
+        viewerMaxAge: currentPrefs.maxAge,
+        viewerMaxDistance: currentPrefs.maxDistance,
         viewerHasCoords: !!(currentUser.latitude && currentUser.longitude),
         rawPoolSize: allUsers.length,
         rawCandidateIds: allUsers.map((u) => u._id),
@@ -771,29 +781,40 @@ export const getDiscoverProfiles = query({
 
       // Age range
       const userAge = calculateAge(user.dateOfBirth);
-      if (userAge < currentUser.minAge || userAge > currentUser.maxAge) {
+      const candidatePrefs = normalizeDiscoveryPreferences(user);
+      if (!hasEligibleAdultAge(userAge)) {
+        prefFailCount++;
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][compatibility] candidate_age_invalid_or_underage', {
+            viewer: currentUser._id,
+            candidate: user._id,
+            candidateDateOfBirthPresent: typeof user.dateOfBirth === 'string' && user.dateOfBirth.length > 0,
+          });
+        }
+        continue;
+      }
+      if (userAge < currentPrefs.minAge || userAge > currentPrefs.maxAge) {
         prefFailCount++;
         if (DISCOVER_AUDIT_ENABLED) {
           console.log('[DISCOVER_AUDIT][compatibility] candidate_age_out_of_viewer_range', {
             viewer: currentUser._id,
             candidate: user._id,
             candidateAge: userAge,
-            viewerMinAge: currentUser.minAge,
-            viewerMaxAge: currentUser.maxAge,
+            viewerMinAge: currentPrefs.minAge,
+            viewerMaxAge: currentPrefs.maxAge,
           });
         }
         continue;
       }
-      const myAge = calculateAge(currentUser.dateOfBirth);
-      if (myAge < user.minAge || myAge > user.maxAge) {
+      if (currentUserAge < candidatePrefs.minAge || currentUserAge > candidatePrefs.maxAge) {
         prefFailCount++;
         if (DISCOVER_AUDIT_ENABLED) {
           console.log('[DISCOVER_AUDIT][compatibility] viewer_age_out_of_candidate_range', {
             viewer: currentUser._id,
             candidate: user._id,
-            viewerAge: myAge,
-            candidateMinAge: user.minAge,
-            candidateMaxAge: user.maxAge,
+            viewerAge: currentUserAge,
+            candidateMinAge: candidatePrefs.minAge,
+            candidateMaxAge: candidatePrefs.maxAge,
           });
         }
         continue;
@@ -801,19 +822,36 @@ export const getDiscoverProfiles = query({
 
       // Distance
       let distance: number | undefined;
-      if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
+      if (
+        typeof currentUser.latitude === 'number' &&
+        typeof currentUser.longitude === 'number' &&
+        typeof user.latitude === 'number' &&
+        typeof user.longitude === 'number'
+      ) {
         distance = calculateDistance(
           currentUser.latitude, currentUser.longitude,
           user.latitude, user.longitude,
         );
-        if (!isDistanceAllowed(distance, currentUser.maxDistance)) {
+        if (!isDistanceAllowed(distance, currentPrefs.maxDistance)) {
           prefFailCount++;
           if (DISCOVER_AUDIT_ENABLED) {
             console.log('[DISCOVER_AUDIT][compatibility] distance_exceeds_viewer_max', {
               viewer: currentUser._id,
               candidate: user._id,
               distanceKm: distance,
-              viewerMaxDistance: currentUser.maxDistance,
+              viewerMaxDistance: currentPrefs.maxDistance,
+            });
+          }
+          continue;
+        }
+        if (!isDistanceAllowed(distance, candidatePrefs.maxDistance)) {
+          prefFailCount++;
+          if (DISCOVER_AUDIT_ENABLED) {
+            console.log('[DISCOVER_AUDIT][compatibility] distance_exceeds_candidate_max', {
+              viewer: currentUser._id,
+              candidate: user._id,
+              distanceKm: distance,
+              candidateMaxDistance: candidatePrefs.maxDistance,
             });
           }
           continue;
@@ -957,6 +995,9 @@ export const getDiscoverProfiles = query({
         : nonPrimaryPhotos;
 
       const userAge = calculateAge(user.dateOfBirth);
+      if (!hasEligibleAdultAge(userAge)) {
+        continue;
+      }
       const theyLikedMe = usersWhoLikedMe.has(user._id as string);
 
       candidates.push({
@@ -1035,9 +1076,9 @@ export const getDiscoverProfiles = query({
         activities: currentUser.activities,
         relationshipIntent: normalizeRelationshipIntentValues(currentUser.relationshipIntent),
         lookingFor: currentUser.lookingFor,
-        minAge: currentUser.minAge,
-        maxAge: currentUser.maxAge,
-        maxDistance: currentUser.maxDistance,
+        minAge: currentPrefs.minAge,
+        maxAge: currentPrefs.maxAge,
+        maxDistance: currentPrefs.maxDistance,
         smoking: currentUser.smoking,
         drinking: currentUser.drinking,
         religion: currentUser.religion,
@@ -1743,11 +1784,15 @@ async function buildExploreCandidates(
     return { status: 'ready', currentUser, candidates: [] };
   }
 
-  const effectiveMinAge = args.minAge ?? currentUser.minAge;
-  const effectiveMaxAge = args.maxAge ?? currentUser.maxAge;
-  const effectiveMaxDistance = args.maxDistance ?? currentUser.maxDistance;
+  const currentPrefs = normalizeDiscoveryPreferences(currentUser);
+  const effectiveMinAge = args.minAge ?? currentPrefs.minAge;
+  const effectiveMaxAge = args.maxAge ?? currentPrefs.maxAge;
+  const effectiveMaxDistance = args.maxDistance ?? currentPrefs.maxDistance;
   const normalizedRelationshipIntentFilter = normalizeRelationshipIntentValues(args.relationshipIntent);
   const viewerAge = calculateAge(currentUser.dateOfBirth);
+  if (!hasEligibleAdultAge(viewerAge)) {
+    return { status: 'ready', currentUser, candidates: [] };
+  }
 
   const userBuckets = await Promise.all(
     effectiveGender.map((gender) =>
@@ -1810,11 +1855,14 @@ async function buildExploreCandidates(
       }
 
       const userAge = calculateAge(user.dateOfBirth);
+      const candidatePrefs = normalizeDiscoveryPreferences(user);
+      if (!hasEligibleAdultAge(userAge)) continue;
       if (userAge < effectiveMinAge || userAge > effectiveMaxAge) continue;
-      if (viewerAge > 0 && (viewerAge < user.minAge || viewerAge > user.maxAge)) continue;
+      if (viewerAge < candidatePrefs.minAge || viewerAge > candidatePrefs.maxAge) continue;
 
       const rawDistance = getCandidateDistance(currentUser, user);
       if (!isDistanceAllowed(rawDistance, effectiveMaxDistance)) continue;
+      if (!isDistanceAllowed(rawDistance, candidatePrefs.maxDistance)) continue;
 
       if (normalizedRelationshipIntentFilter.length > 0) {
         if (!normalizedRelationshipIntentFilter.some((intent) => normalizedCandidateRelationshipIntent.includes(intent))) continue;

@@ -23,6 +23,12 @@ import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { asUserId } from '@/convex/id';
 import type { Gender, Orientation } from '@/types';
+import {
+  DEFAULT_MAX_AGE,
+  DEFAULT_MAX_DISTANCE_KM,
+  DEFAULT_MAX_DISTANCE_MILES,
+  normalizeDiscoveryPreferences,
+} from '@/lib/discoveryDefaults';
 
 // P2-005 FIX: Use centralized validation constants
 const MIN_AGE = VALIDATION.DISCOVERY_MIN_AGE;
@@ -210,7 +216,7 @@ export default function DiscoveryPreferencesScreen() {
   };
 
   // Convert km to miles for display
-  const initialDistanceMiles = kmToMiles(maxDistance);
+  const initialDistanceMiles = kmToMiles(maxDistance || DEFAULT_MAX_DISTANCE_KM);
 
   // Slider-backed numeric state (no more string text inputs)
   const [localMinAge, setLocalMinAge] = useState<number>(minAge);
@@ -227,9 +233,15 @@ export default function DiscoveryPreferencesScreen() {
     if (!currentUser || hasHydratedFromConvex) return;
 
     // Extract preferences from Convex user document
-    const serverMinAge = currentUser.minAge ?? MIN_AGE;
-    const serverMaxAge = currentUser.maxAge ?? MAX_AGE;
-    const serverMaxDistance = currentUser.maxDistance ?? 80; // Default 80km
+    const {
+      minAge: serverMinAge,
+      maxAge: serverMaxAge,
+      maxDistance: serverMaxDistance,
+    } = normalizeDiscoveryPreferences({
+      minAge: currentUser.minAge,
+      maxAge: currentUser.maxAge,
+      maxDistance: currentUser.maxDistance,
+    });
     const serverLookingFor = currentUser.lookingFor ?? [];
     const serverRelationshipIntent = currentUser.relationshipIntent ?? [];
     const serverOrientation = currentUser.orientation ?? null;
@@ -315,10 +327,10 @@ export default function DiscoveryPreferencesScreen() {
       // The sliders already enforce ranges, but we clamp again to guard
       // against any out-of-band values sneaking in.
       let parsedMinAge = Number.isFinite(localMinAge) ? localMinAge : MIN_AGE;
-      let parsedMaxAge = Number.isFinite(localMaxAge) ? localMaxAge : MAX_AGE;
+      let parsedMaxAge = Number.isFinite(localMaxAge) ? localMaxAge : DEFAULT_MAX_AGE;
       let parsedDistanceMiles = Number.isFinite(localMaxDistanceMiles)
         ? localMaxDistanceMiles
-        : 50;
+        : DEFAULT_MAX_DISTANCE_MILES;
 
       // Enforce age limits (18-70)
       parsedMinAge = Math.max(MIN_AGE, Math.min(MAX_AGE, parsedMinAge));
@@ -326,7 +338,7 @@ export default function DiscoveryPreferencesScreen() {
 
       // Ensure maxAge >= minAge
       if (parsedMaxAge < parsedMinAge) {
-        parsedMaxAge = parsedMinAge;
+        parsedMaxAge = Math.max(parsedMinAge, DEFAULT_MAX_AGE);
       }
 
       // Enforce distance limit (1-150 miles)

@@ -4,6 +4,7 @@ import type { Doc, Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
 import { resolveUserIdByAuthId, isRevealed } from './helpers';
+import { DEFAULT_MIN_AGE, normalizeDiscoveryPreferences } from '../lib/discoveryDefaults';
 
 // Phase 3: Shadow mode imports
 import { shouldRunShadowComparison } from './ranking/rankingConfig';
@@ -117,6 +118,48 @@ function distanceKmBetween(lat1: number, lon1: number, lat2: number, lon2: numbe
   return Math.round(R * c);
 }
 
+function calculateAgeFromDateOfBirth(dateOfBirth?: string | null): number | null {
+  if (!dateOfBirth) return null;
+  const today = new Date();
+  const birthDate = new Date(dateOfBirth);
+  if (isNaN(birthDate.getTime())) return null;
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return Number.isFinite(age) && age >= 0 && age < 120 ? age : null;
+}
+
+function hasEligibleAdultAge(age: number | null): age is number {
+  return age !== null && age >= DEFAULT_MIN_AGE;
+}
+
+function distanceBetweenUsersKm(
+  viewer: Doc<'users'>,
+  candidate: Doc<'users'>,
+): number | undefined {
+  if (
+    typeof viewer.latitude !== 'number' ||
+    typeof viewer.longitude !== 'number' ||
+    typeof candidate.latitude !== 'number' ||
+    typeof candidate.longitude !== 'number'
+  ) {
+    return undefined;
+  }
+  return distanceKmBetween(
+    viewer.latitude,
+    viewer.longitude,
+    candidate.latitude,
+    candidate.longitude,
+  );
+}
+
+function isDistanceAllowed(distanceKm: number | undefined, maxDistanceKm: number): boolean {
+  if (distanceKm == null) return true;
+  return distanceKm <= maxDistanceKm;
+}
+
 function getProfileIntentKeys(profile: { privateIntentKeys?: string[]; privateIntentKey?: string | null | undefined }): string[] {
   return (profile.privateIntentKeys && profile.privateIntentKeys.length > 0)
     ? profile.privateIntentKeys
@@ -196,6 +239,7 @@ async function isWithinDeepConnectImpressionRateLimit(
 // - The requesting user
 // - Incomplete profiles
 // - Blocked users (in BOTH directions - shared across phases)
+// - Users outside reciprocal age/distance hard preferences
 // - Users with pending deletion
 // Ranking behavior:
 // - Users seen within 4-hour suppression window are pushed to back
@@ -239,6 +283,12 @@ export const getProfiles = query({
     if (!viewerUserId) {
       return []; // No valid viewer - return empty
     }
+    const viewerUserDoc = await ctx.db.get(viewerUserId);
+    const viewerAge = calculateAgeFromDateOfBirth(viewerUserDoc?.dateOfBirth);
+    if (!viewerUserDoc || !hasEligibleAdultAge(viewerAge)) {
+      return [];
+    }
+    const viewerPrefs = normalizeDiscoveryPreferences(viewerUserDoc);
 
     // Phase 3: Shadow mode decision (once per request)
     const runShadow = shouldRunShadowComparison();
@@ -342,6 +392,9 @@ export const getProfiles = query({
       .withIndex('by_enabled_updatedAt', (q) => q.eq('isPrivateEnabled', true))
       .order('desc')
       .take(MAX_PHASE2_CANDIDATES);
+    const ownerIds = [...new Set(profiles.map((p) => p.userId as string))];
+    const ownerDocs = await Promise.all(ownerIds.map((id) => ctx.db.get(id as Id<'users'>)));
+    const ownerById = new Map(ownerIds.map((id, i) => [id, ownerDocs[i]]));
 
     // Viewer private profile signals (Phase-2 only) for compatibility-aware ranking.
     // NOTE: This does NOT affect eligibility filtering; it only improves ordering.
@@ -368,6 +421,24 @@ export const getProfiles = query({
       viewerImpressions.map((imp) => imp.viewedUserId as string)
     );
 
+    const passesStage1PreferenceGates = (p: typeof profiles[number]): boolean => {
+      const ownerUser = ownerById.get(p.userId as string);
+      if (!ownerUser || ownerUser.isActive !== true) return false;
+
+      const candidateAge = calculateAgeFromDateOfBirth(ownerUser.dateOfBirth);
+      if (!hasEligibleAdultAge(candidateAge)) return false;
+
+      const candidatePrefs = normalizeDiscoveryPreferences(ownerUser);
+      if (candidateAge < viewerPrefs.minAge || candidateAge > viewerPrefs.maxAge) return false;
+      if (viewerAge < candidatePrefs.minAge || viewerAge > candidatePrefs.maxAge) return false;
+
+      const distanceKm = distanceBetweenUsersKm(viewerUserDoc, ownerUser);
+      if (!isDistanceAllowed(distanceKm, viewerPrefs.maxDistance)) return false;
+      if (!isDistanceAllowed(distanceKm, candidatePrefs.maxDistance)) return false;
+
+      return true;
+    };
+
     // Filter out:
     // - The requesting user
     // - Incomplete profiles
@@ -380,24 +451,12 @@ export const getProfiles = query({
     // - Users who opted out of Deep Connect discovery (hideFromDeepConnect === true; missing = visible)
     // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
     //
-    // P1-2 RECIPROCITY DECISION (intentional non-reciprocal Phase-2 design).
+    // STAGE-1 DISCOVERY PREFERENCE GATES.
     // ─────────────────────────────────────────────────────────────────────
-    // Phase-1 (public Discover) enforces reciprocal age / gender / orientation
-    // / distance / lookingFor preferences in `convex/discover.ts`. Phase-2
-    // (Deep Connect) intentionally does NOT enforce reciprocal demographic
-    // preferences. Phase-2 is an intent + vibes pool: shared private intent
-    // keys, desire tags, hobbies, lifestyle alignment, and text affinity are
-    // the primary matching signals. Re-applying public-side demographic
-    // reciprocity here would defeat the product premise (people opt-in to a
-    // looser, intent-driven private surface) and would also re-introduce
-    // information that Phase-2 deliberately hides from peers (e.g. exact
-    // city). Hard SAFETY / PRIVACY exclusions remain enforced above:
-    // self, !isSetupComplete, blocked (either direction via blockedUserIds),
-    // existing conversation partner, matched, unmatched, swiped, reported,
-    // pending-deletion, hideFromDeepConnect, viewer's intent-key filter, and
-    // 4-hour impression suppression below. Underage / invalid / banned /
-    // inactive / privacy-hidden / unsafe-photo users are excluded upstream
-    // (they never get isSetupComplete=true on userPrivateProfiles).
+    // Deep Connect keeps its Phase-2 intent/vibes ranking, but hard age and
+    // distance eligibility comes from users.* so frontend-only defaults cannot
+    // bypass it. Orientation, gender, and relationship-intent behavior are left
+    // unchanged in this pass.
     const eligible = profiles.filter(
       (p) => {
         const profileIntentKeys = getProfileIntentKeys(
@@ -414,6 +473,7 @@ export const getProfiles = query({
           !reportedUserIds.has(p.userId as string) &&
           !deletedUserIds.has(p.userId as string) &&
           p.hideFromDeepConnect !== true &&
+          passesStage1PreferenceGates(p) &&
           (!requestedIntentKeySet ||
             profileIntentKeys.some((key) => requestedIntentKeySet.has(key)))
         );
@@ -519,6 +579,7 @@ export const getProfiles = query({
         if (deletedUserIds.has(p.userId as string)) continue;
         if (p.hideFromDeepConnect === true) continue;
         if (rankedIds.has(p.userId as string)) continue;
+        if (!passesStage1PreferenceGates(p)) continue;
 
         if (countPhase2FallbackSignals(viewerSignals as any, p as any) < PHASE2_FALLBACK_MIN_SIGNALS) continue;
 
@@ -540,11 +601,6 @@ export const getProfiles = query({
 
     const combined = [...ranked, ...fallbackBlock];
     const limited = combined.slice(0, limit);
-
-    const viewerUserDoc = await ctx.db.get(viewerUserId);
-    const ownerIds = [...new Set(limited.map(({ profile: p }) => p.userId as string))];
-    const ownerDocs = await Promise.all(ownerIds.map((id) => ctx.db.get(id as Id<'users'>)));
-    const ownerById = new Map(ownerIds.map((id, i) => [id, ownerDocs[i]]));
 
     // Phase 3: Shadow mode rank comparison (no production impact)
     // Legacy result is finalized above - this only logs for analysis
@@ -646,26 +702,19 @@ export const getProfiles = query({
       };
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
-      // Privacy: hide age from others in Deep Connect (viewer is never self here — excluded above)
-      const age = profile.hideAge === true ? undefined : p.age;
       const ownerUser = ownerById.get(p.userId as string);
       if (!ownerUser || ownerUser.isActive !== true) {
         return null;
       }
+      const ownerAge = calculateAgeFromDateOfBirth(ownerUser.dateOfBirth);
+      if (!hasEligibleAdultAge(ownerAge)) {
+        return null;
+      }
+      // Privacy: hide age from others in Deep Connect (viewer is never self here — excluded above)
+      const age = profile.hideAge === true ? undefined : ownerAge;
       let distanceKm: number | undefined;
-      if (
-        profile.hideDistance !== true &&
-        viewerUserDoc?.latitude != null &&
-        viewerUserDoc?.longitude != null &&
-        ownerUser?.latitude != null &&
-        ownerUser?.longitude != null
-      ) {
-        distanceKm = distanceKmBetween(
-          viewerUserDoc.latitude,
-          viewerUserDoc.longitude,
-          ownerUser.latitude,
-          ownerUser.longitude
-        );
+      if (profile.hideDistance !== true) {
+        distanceKm = distanceBetweenUsersKm(viewerUserDoc, ownerUser);
       }
       return {
         _id: p._id,

@@ -4,6 +4,11 @@ import { Id } from "./_generated/dataModel";
 import { api } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, validateOwnership, validateSessionToken } from "./helpers";
+import {
+  DEFAULT_MAX_AGE,
+  DEFAULT_MAX_DISTANCE_KM,
+  DEFAULT_MIN_AGE,
+} from "../lib/discoveryDefaults";
 
 // ============================================================================
 // Crypto helpers (Convex-compatible, no Node.js dependencies)
@@ -573,9 +578,9 @@ export const registerWithEmail = mutation({
       lookingFor: gender === "male" ? ["female"] : ["male"],
       relationshipIntent: [],
       activities: [],
-      minAge: 18,
-      maxAge: 50,
-      maxDistance: 50,
+      minAge: DEFAULT_MIN_AGE,
+      maxAge: DEFAULT_MAX_AGE,
+      maxDistance: DEFAULT_MAX_DISTANCE_KM,
       subscriptionTier: "free",
       trialEndsAt,
       incognitoMode: false,
@@ -979,9 +984,9 @@ export const completeSocialAuth = mutation({
       lookingFor: gender === "male" ? ["female"] : ["male"],
       relationshipIntent: [],
       activities: [],
-      minAge: 18,
-      maxAge: 50,
-      maxDistance: 50,
+      minAge: DEFAULT_MIN_AGE,
+      maxAge: DEFAULT_MAX_AGE,
+      maxDistance: DEFAULT_MAX_DISTANCE_KM,
       subscriptionTier: "free",
       trialEndsAt,
       incognitoMode: false,
@@ -1642,9 +1647,9 @@ export const getOrCreateUserByIdentity = mutation({
       lookingFor: [],
       relationshipIntent: [],
       activities: [],
-      minAge: 18,
-      maxAge: 100,
-      maxDistance: 100,
+      minAge: DEFAULT_MIN_AGE,
+      maxAge: DEFAULT_MAX_AGE,
+      maxDistance: DEFAULT_MAX_DISTANCE_KM,
 
       // Subscription (free tier)
       subscriptionTier: "free",
@@ -2338,9 +2343,9 @@ export const verifyPhoneOtp = mutation({
         lookingFor: ["male"],
         relationshipIntent: [],
         activities: [],
-        minAge: 18,
-        maxAge: 50,
-        maxDistance: 50,
+        minAge: DEFAULT_MIN_AGE,
+        maxAge: DEFAULT_MAX_AGE,
+        maxDistance: DEFAULT_MAX_DISTANCE_KM,
         subscriptionTier: "free",
         trialEndsAt: undefined,
         incognitoMode: false,

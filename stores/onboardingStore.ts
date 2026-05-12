@@ -18,6 +18,11 @@ import {
 import { logPhotoRemoved, logPhotosCleared } from "@/lib/photoSafety";
 import { DEBUG_ONBOARDING_HYDRATION } from "@/lib/debugFlags";
 import {
+  DEFAULT_MAX_AGE,
+  DEFAULT_MAX_DISTANCE_KM,
+  DEFAULT_MIN_AGE,
+} from "@/lib/discoveryDefaults";
+import {
   IdentityAnchorValue,
   SocialBatteryValue,
   ValueTriggerValue,
@@ -354,9 +359,9 @@ const initialState = {
   lookingFor: [],
   relationshipIntent: [],
   activities: [],
-  minAge: 18,
-  maxAge: 50,
-  maxDistance: 50,
+  minAge: DEFAULT_MIN_AGE,
+  maxAge: DEFAULT_MAX_AGE,
+  maxDistance: DEFAULT_MAX_DISTANCE_KM,
 };
 
 // NO PERSISTENCE: This is an in-memory store only.

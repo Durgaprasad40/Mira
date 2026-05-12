@@ -10,14 +10,17 @@ import {
   SortOption,
   FilterState,
 } from '@/types';
-
-// Conversion constants
-const KM_PER_MILE = 1.60934;
-const MILE_PER_KM = 1 / KM_PER_MILE;
+import {
+  DEFAULT_MAX_AGE,
+  DEFAULT_MAX_DISTANCE_KM,
+  DEFAULT_MIN_AGE,
+  kmToMilesRounded,
+  milesToKmRounded,
+} from '@/lib/discoveryDefaults';
 
 // Helper functions for miles <-> km conversion
-export const milesToKm = (miles: number): number => Math.round(miles * KM_PER_MILE);
-export const kmToMiles = (km: number): number => Math.round(km * MILE_PER_KM);
+export const milesToKm = milesToKmRounded;
+export const kmToMiles = kmToMilesRounded;
 
 interface FilterStoreState extends FilterState {
   // Hydration tracking
@@ -66,14 +69,11 @@ interface FilterStoreState extends FilterState {
   toggleOrientation: (orientation: Orientation) => void;
 }
 
-// Default 80km (~50 miles)
-const DEFAULT_MAX_DISTANCE_KM = 80;
-
 const initialState: FilterState = {
   gender: [],
   orientation: null, // Optional, single-select
-  minAge: 18,
-  maxAge: 70,
+  minAge: DEFAULT_MIN_AGE,
+  maxAge: DEFAULT_MAX_AGE,
   maxDistance: DEFAULT_MAX_DISTANCE_KM, // Stored in km
   relationshipIntent: [],
   activities: [],

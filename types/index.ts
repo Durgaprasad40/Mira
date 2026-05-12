@@ -279,7 +279,7 @@ export interface UserProfile {
   freeTonightExpiresAt?: number;
   minAge: number;
   maxAge: number;
-  maxDistance: number; // in miles
+  maxDistance: number; // in km
 
   // Subscription
   subscriptionTier: SubscriptionTier;

@@ -38,10 +38,15 @@ import type { Gender, RelationshipIntent } from '@/types';
 // PHASE-1 RESTRUCTURE: ActivityFilter removed - activities removed from onboarding
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useScreenTrace } from '@/lib/devTrace';
+import {
+  DEFAULT_MAX_AGE,
+  DEFAULT_MAX_DISTANCE_KM,
+  DEFAULT_MIN_AGE,
+} from '@/lib/discoveryDefaults';
 
 // PHASE-1 RESTRUCTURE: Age/distance/interests constants removed from onboarding
-// Auto-set maxDistance = 50 when saving preferences
-const DISTANCE_DEFAULT = 50;
+// Auto-set distance to 50 miles (stored as km) when saving preferences
+const DISTANCE_DEFAULT = DEFAULT_MAX_DISTANCE_KM;
 
 const MAX_RELATIONSHIP_INTENTS = 3;
 
@@ -97,6 +102,8 @@ export default function PreferencesScreen() {
     lgbtqPreference,
     toggleRelationshipIntent,
     toggleLgbtqPreference,
+    setMinAge,
+    setMaxAge,
     setMaxDistance,
     setLookingFor,
     setRelationshipIntent,
@@ -226,7 +233,9 @@ export default function PreferencesScreen() {
     // P1 STABILITY: Mark as submitting after validation passes
     setIsSubmitting(true);
 
-    // PHASE-1 RESTRUCTURE: Auto-set maxDistance = 50
+    // PHASE-1 RESTRUCTURE: Auto-set safe discovery defaults
+    setMinAge(DEFAULT_MIN_AGE);
+    setMaxAge(DEFAULT_MAX_AGE);
     setMaxDistance(DISTANCE_DEFAULT);
 
     // SAVE-AS-YOU-GO: Persist to demoProfiles immediately in demo mode
@@ -238,6 +247,8 @@ export default function PreferencesScreen() {
       if (relationshipIntent.length > 0) dataToSave.relationshipIntent = relationshipIntent;
       // LGBTQ Preference is optional - only save if user selected any
       if (lgbtqPreference.length > 0) dataToSave.lgbtqPreference = lgbtqPreference;
+      dataToSave.minAge = DEFAULT_MIN_AGE;
+      dataToSave.maxAge = DEFAULT_MAX_AGE;
       dataToSave.maxDistance = DISTANCE_DEFAULT; // Auto-set
       demoStore.saveDemoProfile(userId, dataToSave);
       console.log(`[PREFERENCES] saved: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, lgbtqPref=${lgbtqPreference.length}, dist=${DISTANCE_DEFAULT}`);
@@ -252,6 +263,8 @@ export default function PreferencesScreen() {
       if (sanitizedIntent.length > 0) preferences.relationshipIntent = sanitizedIntent;
       // LGBTQ Preference is optional - only save if user selected any
       if (lgbtqPreference.length > 0) preferences.lgbtqPreference = lgbtqPreference;
+      preferences.minAge = DEFAULT_MIN_AGE;
+      preferences.maxAge = DEFAULT_MAX_AGE;
       preferences.maxDistance = DISTANCE_DEFAULT; // Auto-set
 
       try {

@@ -4,8 +4,9 @@
  * Single source of truth for distance-based filtering.
  * DO NOT hardcode distance checks anywhere else in the app.
  */
+import { DEFAULT_MAX_DISTANCE_KM as DISCOVERY_DEFAULT_MAX_DISTANCE_KM } from './discoveryDefaults';
 
-export const DEFAULT_MAX_DISTANCE_KM = 50;
+export const DEFAULT_MAX_DISTANCE_KM = DISCOVERY_DEFAULT_MAX_DISTANCE_KM;
 
 /** Phase-1 Vibes / Explore Nearby threshold in km */
 export const EXPLORE_NEARBY_RADIUS_KM = 5;

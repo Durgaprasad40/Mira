@@ -8,6 +8,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory, PhotoSlots9 } from '@/types';
 import { createEmptyPhotoSlots } from '@/types';
 import type { Phase2PromptAnswer, PreferenceStrength, PreferenceStrengthValue, IntentMatchValue } from '@/lib/privateConstants';
+import {
+  DEFAULT_MAX_DISTANCE_KM,
+  normalizeDiscoveryMaxDistanceKm,
+} from '@/lib/discoveryDefaults';
 
 // P0-002 FIX: AsyncStorage key for onboarding wizard progress
 const ONBOARDING_PROGRESS_KEY = 'phase2_onboarding_progress';
@@ -339,7 +343,7 @@ const initialWizardState = {
   kids: null as string | null,
   education: null as string | null,
   religion: null as string | null,
-  maxDistanceKm: 50,
+  maxDistanceKm: DEFAULT_MAX_DISTANCE_KM,
   isSetupComplete: false,
   phase2OnboardingCompleted: false, // Permanent - never reset
   convexProfileId: null as string | null,
@@ -508,8 +512,8 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       }
     }
 
-    // Convert maxDistance from miles to km (Phase-1 stores in miles)
-    const maxDistanceKm = data.maxDistance ? Math.round(data.maxDistance * 1.60934) : 50;
+    // Phase-1 stores discovery distance in km; missing/invalid values fall back to 50 miles.
+    const maxDistanceKm = normalizeDiscoveryMaxDistanceKm(data.maxDistance);
 
     // SLOT-PRESERVING: Use photoSlots if available, otherwise convert from legacy photos array
     let photoSlots: PhotoSlots9;
