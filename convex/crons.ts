@@ -55,8 +55,8 @@ crons.daily(
   internal.verification.cleanupOldVerificationPhotos
 );
 
-// ToD: Cleanup expired Truth/Dare data every 15 minutes
-// Cascade deletes expired prompts, answers, likes, connect requests, and private media
+// ToD: Cleanup very old Truth/Dare data after the retention window.
+// Prompt expiry itself is read-only history, not a deletion trigger.
 crons.interval(
   'cleanup-expired-tod-data',
   { minutes: 15 },

@@ -1832,7 +1832,7 @@ export default function TruthOrDareScreen() {
   }, [deletePopupPromptId, router]);
 
   // Pending optimistic prompt uploads for the current user. These appear
-  // ABOVE the real "More Truths & Dares" list as soon as the composer
+  // ABOVE the real "My Truth or Dare" list as soon as the composer
   // hands them off, and are replaced by their Convex post once the
   // background `TruthDarePromptUploadManager` reports success. We filter
   // strictly by `userId` so other users never see another user's
@@ -1911,13 +1911,13 @@ export default function TruthOrDareScreen() {
     }
 
     // Pending optimistic posts (current user only) sit at the very top of
-    // "More Truths & Dares" so they appear immediately after POST. The
+    // "My Truth or Dare" so they appear immediately after POST. The
     // section header is shown if either a pending or a real prompt exists
     // so the layout doesn't shift when the feed catches up.
     const hasPending = visiblePendingPrompts.length > 0;
     const hasNormal = normalPrompts.length > 0;
     if (hasPending || hasNormal) {
-      items.push({ type: 'section', label: 'More Truths & Dares' });
+      items.push({ type: 'section', label: 'My Truth or Dare' });
       visiblePendingPrompts.forEach((pending) => items.push({ type: 'pending', pending }));
       normalPrompts.forEach((p) => items.push({ type: 'prompt', prompt: p }));
     }
@@ -2019,7 +2019,7 @@ export default function TruthOrDareScreen() {
             style={styles.headerActionButton}
             onPress={openMyTruthDare}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            accessibilityLabel="My Truth and Dare"
+            accessibilityLabel="My Truth or Dare"
           >
             <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
           </TouchableOpacity>
@@ -2065,7 +2065,7 @@ export default function TruthOrDareScreen() {
             style={styles.headerActionButton}
             onPress={openMyTruthDare}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            accessibilityLabel="My Truth and Dare"
+            accessibilityLabel="My Truth or Dare"
           >
             <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
           </TouchableOpacity>
@@ -2117,7 +2117,7 @@ export default function TruthOrDareScreen() {
             style={styles.headerActionButton}
             onPress={openMyTruthDare}
             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            accessibilityLabel="My Truth and Dare"
+            accessibilityLabel="My Truth or Dare"
           >
             <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
           </TouchableOpacity>
@@ -2224,7 +2224,7 @@ export default function TruthOrDareScreen() {
           style={styles.headerActionButton}
           onPress={openMyTruthDare}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          accessibilityLabel="My Truth and Dare"
+          accessibilityLabel="My Truth or Dare"
         >
           <Ionicons name="list-outline" size={20} color={PREMIUM.textPrimary} />
         </TouchableOpacity>
@@ -2437,7 +2437,7 @@ const styles = StyleSheet.create({
   // ─── Normal Card - Premium styling ───
   card: {
     flexDirection: 'row',
-    alignItems: 'stretch',
+    alignItems: 'flex-start',
     marginHorizontal: 12,
     marginVertical: 6,
     backgroundColor: PREMIUM.bgElevated,
@@ -2458,7 +2458,7 @@ const styles = StyleSheet.create({
   // ─── Trending Card - Distinct premium styling with glow ───
   trendingCard: {
     flexDirection: 'row',
-    alignItems: 'stretch',
+    alignItems: 'flex-start',
     marginHorizontal: 12,
     marginVertical: 6,
     backgroundColor: PREMIUM.bgElevated,
@@ -2537,7 +2537,7 @@ const styles = StyleSheet.create({
     color: PREMIUM.textSecondary,
   },
   ownerNamePremium: {
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '700',
     color: PREMIUM.textPrimary,
     letterSpacing: 0.2,
@@ -2572,7 +2572,7 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   ownerAgeInline: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '500',
     color: PREMIUM.textMuted,
   },
@@ -2635,10 +2635,10 @@ const styles = StyleSheet.create({
 
   // ─── Prompt Text - Hero element ───
   promptTextHero: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: PREMIUM.textPrimary,
-    lineHeight: 22,
+    lineHeight: 20,
     marginBottom: 10,
     letterSpacing: 0.2,
   },

@@ -29,6 +29,10 @@ export type MyTruthDarePrompt = {
   expiresAt?: number;
   isExpired?: boolean;
   answerCount?: number;
+  visibleAnswerCount?: number;
+  photoCount?: number;
+  videoCount?: number;
+  totalMediaCount?: number;
   totalReactionCount?: number;
   moderationStatus?: MyPromptStatus;
   hiddenByReportsAt?: number;
@@ -46,6 +50,28 @@ function pluralize(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? '' : 's'}`;
 }
 
+function formatShortDate(timestamp?: number): string {
+  if (!timestamp) return '';
+  return new Date(timestamp).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function formatMediaSummary(prompt: MyTruthDarePrompt): string | null {
+  const photoCount = prompt.photoCount ?? 0;
+  const videoCount = prompt.videoCount ?? 0;
+  const totalMediaCount = prompt.totalMediaCount ?? 0;
+  if (totalMediaCount <= 0) return null;
+
+  const parts: string[] = [];
+  if (photoCount > 0) parts.push(pluralize(photoCount, 'photo'));
+  if (videoCount > 0) parts.push(pluralize(videoCount, 'video'));
+  const otherMediaCount = Math.max(0, totalMediaCount - photoCount - videoCount);
+  if (otherMediaCount > 0) parts.push(pluralize(otherMediaCount, 'media file'));
+  return parts.length > 0 ? parts.join(' • ') : pluralize(totalMediaCount, 'media file');
+}
+
 function getStatus(prompt: MyTruthDarePrompt): {
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
@@ -58,7 +84,12 @@ function getStatus(prompt: MyTruthDarePrompt): {
     return { label: 'Under review', icon: 'shield-outline', color: '#F5A623' };
   }
   if (prompt.isExpired) {
-    return { label: 'Expired', icon: 'time-outline', color: PREMIUM.textMuted };
+    const date = formatShortDate(prompt.expiresAt ?? prompt.createdAt);
+    return {
+      label: date ? `Expired • ${date}` : 'Expired',
+      icon: 'time-outline',
+      color: PREMIUM.textMuted,
+    };
   }
   return { label: 'Active', icon: 'radio-button-on', color: '#61D394' };
 }
@@ -68,6 +99,10 @@ export const MyPromptCard = memo(function MyPromptCard({ prompt, onPress }: Prop
   const status = useMemo(() => getStatus(prompt), [prompt]);
   const answerCount = prompt.answerCount ?? 0;
   const reactionCount = prompt.totalReactionCount ?? 0;
+  const mediaSummary = formatMediaSummary(prompt);
+  const postedLabel = prompt.isExpired
+    ? `Posted ${formatShortDate(prompt.createdAt)}`
+    : getTimeAgo(prompt.createdAt);
 
   return (
     <TouchableOpacity
@@ -111,7 +146,7 @@ export const MyPromptCard = memo(function MyPromptCard({ prompt, onPress }: Prop
       <View style={styles.metaRow}>
         <View style={styles.metaItem}>
           <Ionicons name="time-outline" size={13} color={PREMIUM.textMuted} />
-          <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>{getTimeAgo(prompt.createdAt)}</Text>
+          <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>{postedLabel}</Text>
         </View>
         <View style={styles.metaItem}>
           <Ionicons name="chatbubble-outline" size={13} color={PREMIUM.textMuted} />
@@ -121,10 +156,10 @@ export const MyPromptCard = memo(function MyPromptCard({ prompt, onPress }: Prop
           <Ionicons name="heart-outline" size={13} color={PREMIUM.textMuted} />
           <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>{pluralize(reactionCount, 'reaction')}</Text>
         </View>
-        {prompt.hasMedia ? (
+        {mediaSummary ? (
           <View style={styles.metaItem}>
             <Ionicons name="images-outline" size={13} color={PREMIUM.textMuted} />
-            <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>Media</Text>
+            <Text style={styles.metaText} maxFontSizeMultiplier={1.15}>{mediaSummary}</Text>
           </View>
         ) : null}
       </View>

@@ -172,7 +172,7 @@ export default function MyTruthOrDareScreen() {
         >
           <Ionicons name="chevron-back" size={24} color={PREMIUM.textPrimary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>My Truth & Dare</Text>
+        <Text style={styles.headerTitle}>My Truth or Dare</Text>
         <TouchableOpacity
           style={styles.headerIconButton}
           onPress={createPrompt}

@@ -21,6 +21,7 @@ import {
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+const TOD_HISTORY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 // Rate limiting constants
 const RATE_LIMITS = {
@@ -756,6 +757,29 @@ function getInlineAnswerMediaUrlForViewer(
     return answer.mediaUrl;
   }
   return undefined;
+}
+
+type TodAnswerMediaCounts = {
+  photoCount: number;
+  videoCount: number;
+  totalMediaCount: number;
+};
+
+function hasTodAnswerMedia(answer: { type: string }): boolean {
+  return answer.type === 'photo' || answer.type === 'video' || answer.type === 'voice';
+}
+
+function getTodAnswerMediaCounts(answers: Array<{ type: string }>): TodAnswerMediaCounts {
+  return answers.reduce<TodAnswerMediaCounts>(
+    (counts, answer) => {
+      if (!hasTodAnswerMedia(answer)) return counts;
+      if (answer.type === 'photo') counts.photoCount += 1;
+      if (answer.type === 'video') counts.videoCount += 1;
+      counts.totalMediaCount += 1;
+      return counts;
+    },
+    { photoCount: 0, videoCount: 0, totalMediaCount: 0 },
+  );
 }
 
 async function canViewerAccessAnswerMedia(
@@ -2071,22 +2095,23 @@ export const seedTrendingPrompts = internalMutation({
   },
 });
 
-// Cleanup expired prompts and their answers + media
+// Cleanup very old prompt history after a long retention window.
 // TOD-010 FIX: Converted to internal mutation - only callable by cron/scheduler
 export const cleanupExpiredPrompts = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
+    const cleanupCutoff = now - TOD_HISTORY_RETENTION_MS;
     const BATCH = 200;
     const expiredPrompts = await ctx.db
       .query('todPrompts')
-      .withIndex('by_expires', (q) => q.lte('expiresAt', now))
+      .withIndex('by_expires', (q) => q.lte('expiresAt', cleanupCutoff))
       .take(BATCH);
     let deleted = 0;
 
     for (const prompt of expiredPrompts) {
       const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
-      if (expires > now) continue;
+      if (expires > cleanupCutoff) continue;
 
       // Delete all answers for this prompt
       const answers = await ctx.db
@@ -2136,7 +2161,7 @@ export const cleanupExpiredPrompts = internalMutation({
       deleted++;
     }
 
-    return { deleted };
+    return { deleted, retentionMs: TOD_HISTORY_RETENTION_MS };
   },
 });
 
@@ -2539,8 +2564,8 @@ export const cleanupExpiredPrivateMedia = internalMutation({
 /**
  * cleanupExpiredTodData - Internal mutation for cron job
  *
- * Cascade deletes all expired Truth/Dare data:
- * 1) Find expired todPrompts where expiresAt <= now
+ * Cascade deletes only very old Truth/Dare data:
+ * 1) Find todPrompts where expiresAt is beyond the retention window
  * 2) For each expired prompt:
  *    - Delete all todPrivateMedia (storage first, then record)
  *    - Delete all todAnswerLikes for answers
@@ -2552,10 +2577,11 @@ export const cleanupExpiredTodData = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
+    const cleanupCutoff = now - TOD_HISTORY_RETENTION_MS;
     const BATCH = 200;
     const expiredPrompts = await ctx.db
       .query('todPrompts')
-      .withIndex('by_expires', (q) => q.lte('expiresAt', now))
+      .withIndex('by_expires', (q) => q.lte('expiresAt', cleanupCutoff))
       .take(BATCH);
 
     let deletedPrompts = 0;
@@ -2566,7 +2592,7 @@ export const cleanupExpiredTodData = internalMutation({
 
     for (const prompt of expiredPrompts) {
       const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
-      if (expires > now) continue; // Not expired
+      if (expires > cleanupCutoff) continue;
 
       const promptIdStr = prompt._id as string;
 
@@ -2629,14 +2655,14 @@ export const cleanupExpiredTodData = internalMutation({
       deletedPrompts++;
     }
 
-    // Also cleanup orphaned private media past 24h expiry
+    // Also cleanup orphaned private media only after the same long retention window.
     const allPrivateMedia = await ctx.db
       .query('todPrivateMedia')
       .collect();
 
     for (const pm of allPrivateMedia) {
       const pmExpires = pm.expiresAt ?? pm.createdAt + TWENTY_FOUR_HOURS_MS;
-      if (pmExpires <= now) {
+      if (pmExpires <= cleanupCutoff) {
         await deleteStorageIfPresent(ctx, pm.storageId);
         await ctx.db.delete(pm._id);
         deletedPrivateMedia++;
@@ -2649,6 +2675,7 @@ export const cleanupExpiredTodData = internalMutation({
       deletedLikes,
       deletedConnects,
       deletedPrivateMedia,
+      retentionMs: TOD_HISTORY_RETENTION_MS,
     };
   },
 });
@@ -2658,7 +2685,7 @@ export const cleanupExpiredTodData = internalMutation({
 // ============================================================
 
 /**
- * Owner-only prompt history for "My Truth & Dare".
+ * Owner-only prompt history for "My Truth or Dare".
  *
  * Returns prompt metadata and aggregate counts only. It intentionally does not
  * return answer text, answer author identity, media URLs, report details, or
@@ -2671,6 +2698,10 @@ export const getMyPrompts = query({
   handler: async (ctx, { authUserId }) => {
     const ownerUserId = await requireAuthenticatedTodUserId(ctx, authUserId, 'Unauthorized');
     const now = Date.now();
+    const [blockedUserIds, reportedAnswerIds] = await Promise.all([
+      getBlockedUserIdsForViewer(ctx, ownerUserId),
+      getTodAnswerIdsReportedByViewer(ctx, ownerUserId),
+    ]);
 
     const prompts = await ctx.db
       .query('todPrompts')
@@ -2687,11 +2718,17 @@ export const getMyPrompts = query({
           .query('todAnswers')
           .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
           .collect();
+        const visibleAnswers = answers.filter((answer) => {
+          if (blockedUserIds.has(answer.userId as string)) return false;
+          if (reportedAnswerIds.has(answer._id as unknown as string)) return false;
+          return !isAnswerHiddenForViewer(answer, ownerUserId);
+        });
 
         const expiresAt = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
         const moderationStatus =
           prompt.moderationStatus ??
           moderationStatusForTodReportCount(prompt.uniqueReportCount ?? prompt.reportCount ?? 0);
+        const mediaCounts = getTodAnswerMediaCounts(visibleAnswers);
 
         return {
           _id: prompt._id,
@@ -2700,17 +2737,17 @@ export const getMyPrompts = query({
           createdAt: prompt.createdAt,
           expiresAt,
           isExpired: expiresAt <= now,
-          answerCount: answers.length,
+          answerCount: visibleAnswers.length,
+          visibleAnswerCount: visibleAnswers.length,
+          photoCount: mediaCounts.photoCount,
+          videoCount: mediaCounts.videoCount,
+          totalMediaCount: mediaCounts.totalMediaCount,
           totalReactionCount: prompt.totalReactionCount ?? 0,
           moderationStatus,
           hiddenByReportsAt: prompt.hiddenByReportsAt,
           moderationStatusAt: prompt.moderationStatusAt,
           editedAt: (prompt as any).editedAt,
-          hasMedia: answers.some(
-            (answer) =>
-              answer.type !== 'text' &&
-              (Boolean(answer.mediaStorageId) || Boolean(answer.mediaUrl)),
-          ),
+          hasMedia: mediaCounts.totalMediaCount > 0,
         };
       }),
     );
@@ -3067,56 +3104,9 @@ export const getPromptThread = query({
     if (isPromptHiddenForViewer(prompt, viewerDbId)) return null;
     if (await hasViewerReportedPrompt(ctx, promptIdStr, viewerDbId)) return null;
 
-    // Check if expired
     const now = Date.now();
     const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
-    if (expires <= now) {
-      const promptMediaMeta = await getPromptMediaViewMeta(ctx, prompt, viewerDbId);
-      const isPhotoOrVideo = prompt.mediaKind === 'photo' || prompt.mediaKind === 'video';
-      const sanitizedMediaUrl =
-        isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner ? undefined : prompt.mediaUrl;
-      return {
-        prompt: {
-          _id: prompt._id,
-          type: prompt.type,
-          text: prompt.text,
-          isTrending: prompt.isTrending,
-          answerCount: prompt.answerCount,
-          visibleAnswerCount: 0, // No visible answers when expired
-          createdAt: prompt.createdAt,
-          expiresAt: expires,
-          isPromptOwner: !isSystemTodOwnerId(prompt.ownerUserId) && viewerDbId === prompt.ownerUserId,
-          // Prompt-level reactions (empty for expired)
-          reactionCounts: [],
-          myReaction: null,
-          // Owner profile snapshot
-          isAnonymous: prompt.isAnonymous,
-          photoBlurMode: prompt.photoBlurMode, // FIX: Include blur mode for renderer
-          ownerName: prompt.ownerName,
-          ownerPhotoUrl: prompt.ownerPhotoUrl,
-          ownerAge: prompt.ownerAge,
-          ownerGender: prompt.ownerGender,
-          ownerUserId: prompt.ownerUserId, // FIX: Include for owner checks
-          // Owner-attached prompt media (Phase-2). Media follows prompt
-          // visibility — if the viewer can see this payload, they can see
-          // the media. `mediaStorageId` is intentionally omitted client-side
-          // (already resolved into `mediaUrl` server-side).
-          mediaKind: prompt.mediaKind,
-          mediaUrl: sanitizedMediaUrl,
-          mediaMime: prompt.mediaMime,
-          fileSize: prompt.fileSize,
-          durationSec: prompt.durationSec,
-          isFrontCamera: prompt.isFrontCamera ?? false,
-          hasMedia: !!prompt.mediaStorageId,
-          // Phase 4: prompt-owner media one-time-view metadata.
-          promptMediaViewCount: promptMediaMeta.promptMediaViewCount,
-          viewerHasViewedPromptMedia: promptMediaMeta.viewerHasViewedPromptMedia,
-          isPromptMediaOwner: promptMediaMeta.isPromptMediaOwner,
-        },
-        answers: [],
-        isExpired: true,
-      };
-    }
+    const isExpired = expires <= now;
 
     // Get all answers
     const answers = await ctx.db
@@ -3133,6 +3123,7 @@ export const getPromptThread = query({
     });
 
     visibleAnswers.sort(sortTodAnswersByDisplayRank);
+    const visibleMediaCounts = getTodAnswerMediaCounts(visibleAnswers);
 
     // Get prompt-level reactions
     const promptReactions = await ctx.db
@@ -3261,17 +3252,23 @@ export const getPromptThread = query({
           }
         }
 
+        const answerHasMediaAttachment =
+          hasTodAnswerMedia(answer) && (Boolean(answer.mediaStorageId) || Boolean(answer.mediaUrl));
+        const isExpiredMediaHidden = isExpired && hasTodAnswerMedia(answer);
+
         return {
           _id: answer._id,
           promptId: answer.promptId,
           userId: answer.userId,
           type: answer.type,
           text: answer.text,
-          mediaUrl: getInlineAnswerMediaUrlForViewer(
-            answer,
-            viewerDbId,
-            prompt.ownerUserId as string
-          ),
+          mediaUrl: isExpiredMediaHidden
+            ? undefined
+            : getInlineAnswerMediaUrlForViewer(
+              answer,
+              viewerDbId,
+              prompt.ownerUserId as string
+            ),
           durationSec: answer.durationSec,
           createdAt: answer.createdAt,
           editedAt: answer.editedAt,
@@ -3287,7 +3284,8 @@ export const getPromptThread = query({
           hasViewedMedia,
           hasSentConnect,
           connectStatus,
-          hasMedia: !!answer.mediaStorageId,
+          hasMedia: isExpiredMediaHidden ? true : answerHasMediaAttachment,
+          mediaHidden: isExpiredMediaHidden,
           // Standard T/D answer media is replayable; the composer no longer
           // locks photo/video after a view. Always `false` for normal answers.
           isVisualMediaConsumed: false,
@@ -3323,7 +3321,9 @@ export const getPromptThread = query({
     const promptMediaMeta = await getPromptMediaViewMeta(ctx, prompt, viewerDbId);
     const isPhotoOrVideo = prompt.mediaKind === 'photo' || prompt.mediaKind === 'video';
     const sanitizedMediaUrl =
-      isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner ? undefined : prompt.mediaUrl;
+      isExpired || (isPhotoOrVideo && !promptMediaMeta.isPromptMediaOwner)
+        ? undefined
+        : prompt.mediaUrl;
 
     return {
       prompt: {
@@ -3333,6 +3333,9 @@ export const getPromptThread = query({
         isTrending: prompt.isTrending,
         answerCount: prompt.answerCount,
         visibleAnswerCount: enrichedAnswers.length, // FIX: Count of visible answers for UI
+        photoCount: visibleMediaCounts.photoCount,
+        videoCount: visibleMediaCounts.videoCount,
+        totalMediaCount: visibleMediaCounts.totalMediaCount,
         createdAt: prompt.createdAt,
         expiresAt: expires,
         isPromptOwner: !isSystemTodOwnerId(prompt.ownerUserId) && viewerDbId === prompt.ownerUserId,
@@ -3364,7 +3367,7 @@ export const getPromptThread = query({
         isPromptMediaOwner: promptMediaMeta.isPromptMediaOwner,
       },
       answers: enrichedAnswers,
-      isExpired: false,
+      isExpired,
     };
   },
 });
@@ -4264,6 +4267,10 @@ export const preloadAnswerMediaUrl = query({
     if (!prompt) {
       return null;
     }
+    const promptExpires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (promptExpires <= Date.now()) {
+      return null;
+    }
 
     const canAccess = await canViewerAccessAnswerMedia(ctx, answer, viewerId, prompt);
     if (!canAccess) {
@@ -4347,6 +4354,10 @@ export const claimAnswerMediaView = mutation({
       .first();
 
     if (!prompt) {
+      return { status: 'no_media' as const };
+    }
+    const promptExpires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (promptExpires <= Date.now()) {
       return { status: 'no_media' as const };
     }
 
@@ -4555,6 +4566,10 @@ export const openPromptMedia = mutation({
     if (!prompt) {
       return { status: 'no_media' as const };
     }
+    const promptExpires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (promptExpires <= Date.now()) {
+      return { status: 'no_media' as const };
+    }
     if (!prompt.mediaStorageId || !prompt.mediaKind) {
       return { status: 'no_media' as const };
     }
@@ -4686,6 +4701,10 @@ export const preparePromptMedia = mutation({
     if (!prompt) {
       return { status: 'no_media' as const };
     }
+    const promptExpires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (promptExpires <= Date.now()) {
+      return { status: 'no_media' as const };
+    }
     if (!prompt.mediaStorageId || !prompt.mediaKind) {
       return { status: 'no_media' as const };
     }
@@ -4795,6 +4814,10 @@ export const markPromptMediaViewed = mutation({
     if (!prompt) {
       return { status: 'no_media' as const };
     }
+    const promptExpires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (promptExpires <= Date.now()) {
+      return { status: 'no_media' as const };
+    }
     if (!prompt.mediaStorageId || !prompt.mediaKind) {
       return { status: 'no_media' as const };
     }
@@ -4891,6 +4914,10 @@ export const getVoiceUrl = query({
 
     if (!prompt) {
       return { status: 'not_found' as const };
+    }
+    const promptExpires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
+    if (promptExpires <= Date.now()) {
+      return { status: 'no_media' as const };
     }
 
     const canAccess = await canViewerAccessVoiceAnswer(ctx, answer, viewerUserId, prompt);

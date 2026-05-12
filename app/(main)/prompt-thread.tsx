@@ -124,6 +124,28 @@ function formatTimeLeft(expiresAt: number): string {
   return `${minutes}m left`;
 }
 
+function pluralizeCount(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? '' : 's'}`;
+}
+
+function formatTodMediaSummary(source?: {
+  photoCount?: number;
+  videoCount?: number;
+  totalMediaCount?: number;
+} | null): string | null {
+  const photoCount = source?.photoCount ?? 0;
+  const videoCount = source?.videoCount ?? 0;
+  const totalMediaCount = source?.totalMediaCount ?? 0;
+  if (totalMediaCount <= 0) return null;
+
+  const parts: string[] = [];
+  if (photoCount > 0) parts.push(pluralizeCount(photoCount, 'photo'));
+  if (videoCount > 0) parts.push(pluralizeCount(videoCount, 'video'));
+  const otherMediaCount = Math.max(0, totalMediaCount - photoCount - videoCount);
+  if (otherMediaCount > 0) parts.push(pluralizeCount(otherMediaCount, 'media file'));
+  return parts.length > 0 ? parts.join(' • ') : pluralizeCount(totalMediaCount, 'media file');
+}
+
 // Phase 5: typed accessor for prompt-owner media (Phase-2 backend projection).
 // `getPromptThread` returns these fields, but they sit on a Convex inferred
 // type that varies between the active vs expired branches, so we narrow
@@ -611,6 +633,10 @@ export default function PromptThreadScreen() {
   const visibleAnswerCount = prompt?.visibleAnswerCount ?? answers.length;
   const [serverExpiryLocked, setServerExpiryLocked] = useState(false);
   const isExpired = !!threadData?.isExpired || serverExpiryLocked;
+  const expiredMediaSummary = useMemo(
+    () => formatTodMediaSummary(prompt),
+    [prompt?.photoCount, prompt?.videoCount, prompt?.totalMediaCount],
+  );
 
   // Find user's own answer
   const myAnswer = useMemo(() => {
@@ -682,7 +708,7 @@ export default function PromptThreadScreen() {
     answers: answersForList,
     authUserId: userId,
     viewableAnswerIds,
-    enabled: isThreadFocused && !!userId,
+    enabled: isThreadFocused && !!userId && !isExpired,
     lookaheadCount: 5,
   });
 
@@ -1761,6 +1787,10 @@ export default function PromptThreadScreen() {
   // P0-001 FIX: Backend is the source of truth for view state.
   // Phase-2 visual media is consumed by the backend claim before a URL is returned.
   const handleViewMedia = useCallback(async (answer: typeof answers[0]) => {
+    if (isExpired) {
+      Alert.alert('Read-only', 'This prompt has expired. Media is no longer available.');
+      return;
+    }
     // Only photo / video are openable through this flow. Voice has its own
     // inline player; other types have nothing to open.
     if (answer.type !== 'photo' && answer.type !== 'video') return;
@@ -1884,7 +1914,7 @@ export default function PromptThreadScreen() {
       // P0-001 FIX: Always clear the pending flag
       pendingMediaClaimsRef.current.delete(answerId);
     }
-  }, [userId, claimAnswerMediaView, getPreloadState]);
+  }, [isExpired, userId, claimAnswerMediaView, getPreloadState]);
 
   // Handle closing the media viewer. Backend consumption already happened
   // during claim/open, so close is UI-only.
@@ -1973,6 +2003,10 @@ export default function PromptThreadScreen() {
   // tracking block earlier in the component for the rationale.
   const handleViewPromptMedia = useCallback(async () => {
     if (!prompt || !promptId) return;
+    if (isExpired) {
+      Alert.alert('Read-only', 'This prompt has expired. Media is no longer available.');
+      return;
+    }
     const projection = getPromptMediaProjection(prompt);
     if (projection.mediaKind !== 'photo' && projection.mediaKind !== 'video') return;
     if (!isMountedRef.current) return;
@@ -2109,6 +2143,7 @@ export default function PromptThreadScreen() {
   }, [
     prompt,
     promptId,
+    isExpired,
     userId,
     promptOwnerMediaPreload,
     preparePromptMediaMutation,
@@ -2374,12 +2409,16 @@ export default function PromptThreadScreen() {
         : null;
     const hasPlayableMedia = !!item.mediaUrl;
     const isCreatorOnly = item.visibility === 'owner_only';
+    const isExpiredMediaHidden =
+      item.mediaHidden === true || (isExpired && !!tileMediaType && !!item.hasMedia);
     const canPromptOwnerClaim =
-      isPromptOwner && !isOwnAnswer && item.hasMedia && !hasPlayableMedia &&
+      !isExpiredMediaHidden && isPromptOwner && !isOwnAnswer && item.hasMedia && !hasPlayableMedia &&
       (item.type === 'photo' || item.type === 'video');
     let tileState: 'photo' | 'video' | 'voice' | 'locked' | 'viewed' | null = null;
     if (tileMediaType) {
-      if (item.hasViewedMedia && !isOwnAnswer && (tileMediaType === 'photo' || tileMediaType === 'video')) {
+      if (isExpiredMediaHidden) {
+        tileState = 'locked';
+      } else if (item.hasViewedMedia && !isOwnAnswer && (tileMediaType === 'photo' || tileMediaType === 'video')) {
         tileState = 'viewed';
       } else if (hasPlayableMedia) {
         tileState = tileMediaType;
@@ -2456,6 +2495,9 @@ export default function PromptThreadScreen() {
           : undefined
         : undefined;
     const tileMicrotext = (() => {
+      if (isExpiredMediaHidden) {
+        return 'Expired';
+      }
       if (tileState === 'voice' && isThisVoicePlaying) {
         if (voiceTotalMs > 0) {
           return `${formatVoiceClock(voicePosMs)} / ${formatVoiceClock(voiceTotalMs)}`;
@@ -2471,6 +2513,7 @@ export default function PromptThreadScreen() {
       (tileState === 'voice' && hasPlayableMedia);
     const tileA11yLabel = (() => {
       if (!tileState) return undefined;
+      if (isExpiredMediaHidden) return 'Media hidden after expiry';
       switch (tileState) {
         case 'photo':
           return canPromptOwnerClaim
@@ -3084,7 +3127,7 @@ export default function PromptThreadScreen() {
           const promptMediaUrl = projection.mediaUrl;
           const promptDurationSec = projection.durationSec;
           const showHeaderMediaTile =
-            promptHasMedia && !!promptMediaKind && !isEditingPrompt;
+            promptHasMedia && !!promptMediaKind && !isEditingPrompt && !isExpired;
           const tileIsTappable =
             promptMediaKind === 'photo' || promptMediaKind === 'video';
           const editor = (
@@ -3246,9 +3289,16 @@ export default function PromptThreadScreen() {
       {isExpired && (
         <View style={styles.expiredBanner}>
           <Ionicons name="time-outline" size={16} color="#FF9800" />
-          <Text style={styles.expiredBannerText}>This prompt has expired. No new responses allowed.</Text>
+          <Text style={styles.expiredBannerText}>This prompt has expired. Responses are read-only.</Text>
         </View>
       )}
+
+      {isExpired && expiredMediaSummary ? (
+        <View style={styles.expiredMediaSummary}>
+          <Ionicons name="images-outline" size={15} color={PREMIUM.textMuted} />
+          <Text style={styles.expiredMediaSummaryText}>{expiredMediaSummary} received</Text>
+        </View>
+      ) : null}
 
       {/* Answers list (SCROLLABLE area - flex:1 takes remaining space) */}
       <FlatList
@@ -3316,7 +3366,9 @@ export default function PromptThreadScreen() {
             <View style={styles.commentsHeader}>
               <Text style={styles.commentsHeaderText}>
                 {visibleAnswerCount === 0
-                  ? 'Be the first to respond'
+                  ? isExpired
+                    ? 'No responses'
+                    : 'Be the first to respond'
                   : `${visibleAnswerCount} ${visibleAnswerCount === 1 ? 'Response' : 'Responses'}`}
               </Text>
             </View>
@@ -3326,7 +3378,9 @@ export default function PromptThreadScreen() {
           <View style={styles.emptyComments}>
             <Ionicons name="chatbubble-outline" size={32} color={PREMIUM.textMuted} />
             <Text style={styles.emptyCommentsText}>No responses yet</Text>
-            <Text style={styles.emptyCommentsSubtext}>Tap the + button to share your thoughts</Text>
+            <Text style={styles.emptyCommentsSubtext}>
+              {isExpired ? 'This expired prompt is read-only.' : 'Tap the + button to share your thoughts'}
+            </Text>
           </View>
         }
         // P2-003: Performance props for thread FlatList
@@ -4146,6 +4200,25 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   expiredBannerText: { fontSize: 12, color: '#FF9800' },
+  expiredMediaSummary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginHorizontal: 12,
+    marginTop: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: PREMIUM.borderSubtle,
+  },
+  expiredMediaSummaryText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: PREMIUM.textSecondary,
+  },
 
   listContent: { paddingHorizontal: 12, paddingBottom: 100 },
 
