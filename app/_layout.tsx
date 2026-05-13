@@ -647,7 +647,9 @@ function OnboardingDraftHydrator() {
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
     !isDemoMode && userId && authHydrated && onboardingHydrated
-      ? { userId }
+      ? token
+        ? { token, userId }
+        : 'skip'
       : 'skip'
   );
 

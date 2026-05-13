@@ -118,7 +118,7 @@ export default function MainTabsLayout() {
   // This ensures onboarding doesn't show again after force-quit/restart
   const userOnboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+    !isDemoMode && convexUserId && token ? { token, userId: convexUserId } : 'skip'
   );
 
   // Private tab state - check if Phase-2 onboarding is complete

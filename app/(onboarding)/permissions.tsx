@@ -93,7 +93,10 @@ export default function PermissionsScreen() {
 
     try {
       // LIVE MODE: Call completeOnboarding mutation
-      if (!isDemoMode && userId && token) {
+      if (!isDemoMode) {
+        if (!userId || !token) {
+          throw new Error('Please sign in to complete onboarding.');
+        }
         if (__DEV__) console.log('[ONB] permissions: calling completeOnboarding...');
         await completeOnboardingMutation({
           userId: userId as Id<"users">,

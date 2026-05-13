@@ -21,7 +21,9 @@ import {
 import {
   CURRENT_PHASE2_SETUP_VERSION,
   PHASE2_SECTION1_PROMPT_IDS,
+  sanitizePhase2PromptAnswersForBackend,
 } from "./phase2Constants";
+import { validateOwnedSafePrivatePhotoUrls } from "./phase2PrivatePhotos";
 import {
   normalizeDiscoveryPreferences,
 } from "../lib/discoveryDefaults";
@@ -39,10 +41,8 @@ const PROFILE_PROMPT_ANSWER_MAX_LENGTH = 300;
 const REPORT_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
 const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
-const PHASE2_MIN_PRIVATE_PHOTOS = 2;
 const PHASE2_MIN_PRIVATE_INTENT_KEYS = 1;
 const PHASE2_MAX_PRIVATE_INTENT_KEYS = 3;
-const DEBUG_PHASE2_BACKEND = process.env.DEBUG_PHASE2 === "true";
 const PHASE1_MESSAGES_RELATIONSHIP_SCAN_LIMIT = 1000;
 
 function normalizeOptionalTrimmedString(
@@ -2398,7 +2398,7 @@ function toRad(deg: number): number {
 export const completeOnboarding = mutation({
   args: {
     userId: v.id("users"),
-    token: v.optional(v.string()), // P0 FIX: Session token for auth validation
+    token: v.string(),
     name: v.optional(v.string()),
     dateOfBirth: v.optional(v.string()),
     gender: v.optional(
@@ -2592,16 +2592,12 @@ export const completeOnboarding = mutation({
   handler: async (ctx, args) => {
     const { userId, token, photoStorageIds, pets, insect, freeTonightExpiresAt, ...updates } = args;
 
-    // P0 SECURITY FIX: Validate session token to prevent unauthorized onboarding
-    // This ensures only the authenticated user can complete their own onboarding
-    if (token) {
-      const authenticatedUserId = await validateSessionToken(ctx, token);
-      if (!authenticatedUserId) {
-        throw new Error("Unauthorized: invalid or expired session");
-      }
-      if (authenticatedUserId !== userId) {
-        throw new Error("Unauthorized: cannot complete onboarding for another user");
-      }
+    const authenticatedUserId = await validateSessionToken(ctx, token.trim());
+    if (!authenticatedUserId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (authenticatedUserId !== userId) {
+      throw new Error("Unauthorized: cannot complete onboarding for another user");
     }
 
     // P0 SECURITY FIX: Validate photoStorageIds array length
@@ -3266,27 +3262,19 @@ export const upsertOnboardingDraft = mutation({
 export const getOnboardingStatus = query({
   args: {
     userId: v.optional(v.union(v.id('users'), v.string())),
-    token: v.optional(v.string()),
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    let resolvedUserId: Id<'users'> | null = null;
-    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
-    if (sessionToken.length > 0) {
-      resolvedUserId = await validateSessionToken(ctx, sessionToken);
-    }
-    if (
-      !resolvedUserId &&
-      args.userId !== undefined &&
-      String(args.userId).trim().length > 0
-    ) {
-      resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    }
+    const resolvedUserId = await validateSessionToken(ctx, args.token.trim());
 
     if (!resolvedUserId) {
-      if (DEBUG_PHASE2_BACKEND) {
-        console.log('[ONB_STATUS] User not found');
-      }
       return null;
+    }
+    if (args.userId !== undefined) {
+      const requestedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+      if (!requestedUserId || requestedUserId !== resolvedUserId) {
+        throw new Error('Unauthorized: onboarding status self-read required');
+      }
     }
 
     const user = await ctx.db.get(resolvedUserId);
@@ -3342,21 +3330,6 @@ export const getOnboardingStatus = query({
       privateWelcomeConfirmed: user.privateWelcomeConfirmed || false,
     };
 
-    if (DEBUG_PHASE2_BACKEND) {
-      console.log('[ONB_STATUS]', JSON.stringify({
-        userId: resolvedUserId.substring(0, 8),
-        onboardingCompleted: status.onboardingCompleted,
-        phase2OnboardingCompleted: status.phase2OnboardingCompleted,
-        privateWelcomeConfirmed: status.privateWelcomeConfirmed,
-        basicInfoPresent: status.basicInfoComplete,
-        referencePhotoExists: status.referencePhotoExists,
-        faceStatus: status.faceVerificationStatus,
-        normalPhotoCount: status.normalPhotoCount,
-        effectivePhotoCount,
-        hasMinPhotos: status.hasMinPhotos,
-      }));
-    }
-
     return status;
   },
 });
@@ -3376,15 +3349,15 @@ export const setPhase2OnboardingCompleted = mutation({
 
     const user = await ctx.db.get(resolvedUserId);
     if (!user) {
-      console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user document not found');
       return { success: false, error: 'user_not_found' };
+    }
+    const trustedAge = calculatePhase1EligibleAge(user.dateOfBirth);
+    if (trustedAge === null) {
+      return { success: false, error: 'invalid_age_eligibility' as const };
     }
 
     // Idempotent: skip if already completed
     if (user.phase2OnboardingCompleted) {
-      if (DEBUG_PHASE2_BACKEND) {
-        console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: already completed, skipping');
-      }
       return { success: true, alreadyCompleted: true };
     }
 
@@ -3397,13 +3370,14 @@ export const setPhase2OnboardingCompleted = mutation({
       return { success: false, error: 'private_profile_not_found' as const };
     }
 
-    const privatePhotoCount = Array.isArray(privateProfile.privatePhotoUrls)
-      ? privateProfile.privatePhotoUrls.filter(
-          (url) => typeof url === 'string' && url.trim().length > 0,
-        ).length
-      : 0;
-    if (privatePhotoCount < PHASE2_MIN_PRIVATE_PHOTOS) {
-      return { success: false, error: 'insufficient_private_photos' as const };
+    const privatePhotoValidation = await validateOwnedSafePrivatePhotoUrls(
+      ctx,
+      resolvedUserId,
+      privateProfile.privatePhotoUrls,
+      { requireMinimum: true },
+    );
+    if (!privatePhotoValidation.ok) {
+      return { success: false, error: privatePhotoValidation.error };
     }
 
     const privateIntentCount = Array.isArray(privateProfile.privateIntentKeys)
@@ -3431,9 +3405,14 @@ export const setPhase2OnboardingCompleted = mutation({
     const promptAnswersArray = Array.isArray(privateProfile.promptAnswers)
       ? privateProfile.promptAnswers
       : [];
+    const promptValidation = sanitizePhase2PromptAnswersForBackend(promptAnswersArray);
+    if (!promptValidation.ok) {
+      return { success: false, error: promptValidation.error };
+    }
+    const sanitizedPromptAnswers = promptValidation.value ?? [];
 
     const answeredPromptIds = new Set(
-      promptAnswersArray
+      sanitizedPromptAnswers
         .filter(
           (p) =>
             typeof p?.promptId === 'string' &&
@@ -3462,6 +3441,11 @@ export const setPhase2OnboardingCompleted = mutation({
     await ctx.db.patch(privateProfile._id, {
       phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       isSetupComplete: true,
+      privatePhotoUrls: privatePhotoValidation.urls,
+      promptAnswers: sanitizedPromptAnswers,
+      age: trustedAge,
+      ageConfirmed18Plus: true,
+      ageConfirmedAt: privateProfile.ageConfirmedAt ?? Date.now(),
       updatedAt: Date.now(),
     });
 
@@ -3476,9 +3460,6 @@ export const setPhase2OnboardingCompleted = mutation({
       userId: resolvedUserId,
     });
 
-    if (DEBUG_PHASE2_BACKEND) {
-      console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: success for user', resolvedUserId.substring(0, 8));
-    }
     return { success: true };
   },
 });
@@ -3498,15 +3479,11 @@ export const setPrivateWelcomeConfirmed = mutation({
 
     const user = await ctx.db.get(resolvedUserId);
     if (!user) {
-      console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user document not found');
       return { success: false, error: 'user_not_found' };
     }
 
     // Idempotent: skip if already confirmed
     if (user.privateWelcomeConfirmed) {
-      if (DEBUG_PHASE2_BACKEND) {
-        console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: already confirmed, skipping');
-      }
       return { success: true, alreadyConfirmed: true };
     }
 
@@ -3516,9 +3493,6 @@ export const setPrivateWelcomeConfirmed = mutation({
       privateWelcomeConfirmedAt: Date.now(),
     });
 
-    if (DEBUG_PHASE2_BACKEND) {
-      console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: success for user', resolvedUserId.substring(0, 8));
-    }
     return { success: true };
   },
 });
@@ -3537,24 +3511,20 @@ export const setPrivateWelcomeConfirmed = mutation({
  * - userPrivateProfiles record → DELETED
  * - privateDeletionStates record → DELETED (if exists)
  */
-export const resetPhase2Onboarding = mutation({
+export const resetPhase2Onboarding = internalMutation({
   args: {
     userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
     const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!resolvedUserId) {
-      console.warn('[P2_RESET] resetPhase2Onboarding: user not found');
       return { success: false, error: 'user_not_found' };
     }
 
     const user = await ctx.db.get(resolvedUserId);
     if (!user) {
-      console.warn('[P2_RESET] resetPhase2Onboarding: user document not found');
       return { success: false, error: 'user_not_found' };
     }
-
-    console.log('[P2_RESET] Starting Phase-2 reset for user:', resolvedUserId.substring(0, 8));
 
     // 1. Clear Phase-2 completion flags on user record
     await ctx.db.patch(resolvedUserId, {
@@ -3563,7 +3533,6 @@ export const resetPhase2Onboarding = mutation({
       privateWelcomeConfirmed: false,
       privateWelcomeConfirmedAt: undefined,
     });
-    console.log('[P2_RESET] Cleared phase2OnboardingCompleted flag');
 
     // 2. Delete userPrivateProfiles record (if exists)
     const privateProfile = await ctx.db
@@ -3573,9 +3542,6 @@ export const resetPhase2Onboarding = mutation({
 
     if (privateProfile) {
       await ctx.db.delete(privateProfile._id);
-      console.log('[P2_RESET] Deleted userPrivateProfiles record');
-    } else {
-      console.log('[P2_RESET] No userPrivateProfiles record found');
     }
 
     // 3. Delete privateDeletionStates record (if exists)
@@ -3586,10 +3552,8 @@ export const resetPhase2Onboarding = mutation({
 
     if (deletionState) {
       await ctx.db.delete(deletionState._id);
-      console.log('[P2_RESET] Deleted privateDeletionStates record');
     }
 
-    console.log('[P2_RESET] Phase-2 reset complete for user:', resolvedUserId.substring(0, 8));
     return { success: true };
   },
 });

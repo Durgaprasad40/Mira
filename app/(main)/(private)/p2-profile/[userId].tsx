@@ -177,24 +177,6 @@ function FloatingActionButtons({
   // surface; do NOT change the homepage helper.
   const liftedActionRowBottom = Math.round(actionRowBottom * 1.25);
 
-  // [P2_PROFILE_ACTION_BAR] Debug logging
-  if (__DEV__) {
-    console.log('[P2_PROFILE_ACTION_BAR]', {
-      style: 'deep_connect_mirror',
-      background: 'transparent',
-      pass: { diameter: DC_BUTTON_DIAMETER, icon: DC_ICON_SIZE },
-      standOut: { diameter: DC_BUTTON_DIAMETER_COMPACT, icon: DC_STAR_ICON_SIZE },
-      like: { diameter: DC_BUTTON_DIAMETER, icon: DC_ICON_SIZE },
-      gap: DC_BUTTON_GAP,
-      pressScale: DC_PRESS_SCALE,
-      badge: 'hidden',
-      standOutDisabled,
-      actionRowBottom,
-      liftedActionRowBottom,
-      liftPercent: 25,
-    });
-  }
-
   return (
     <View style={[floatingStyles.cluster, { bottom: liftedActionRowBottom }]} pointerEvents="box-none">
       {/* Pass — white surface with subtle red lit edge */}
@@ -346,16 +328,7 @@ export default function Phase2FullProfileScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const currentUserId = useAuthStore((s) => s.userId);
-
-  // [P2_PROFILE_QUERY] Debug logging - this screen should ONLY be reached from Phase-2
-  if (__DEV__) {
-    console.log('[P2_PROFILE_QUERY] Phase2FullProfileScreen mounted', {
-      profileUserId,
-      route: '/(main)/(private)/p2-profile/[userId]',
-      phase: 'Phase-2 ONLY',
-      isolationFix: 'Renamed from /profile to /p2-profile to avoid URL collision',
-    });
-  }
+  const token = useAuthStore((s) => s.token);
 
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const photoListRef = useRef<FlatList>(null);
@@ -392,13 +365,6 @@ export default function Phase2FullProfileScreen() {
 
     const sendStandOut = async () => {
       try {
-        if (__DEV__) {
-          console.log('[P2_FULL_PROFILE_STANDOUT] Sending stand out', {
-            profileId: profileUserId?.slice?.(-8),
-            hasMessage: !!standOutResult.message,
-          });
-        }
-
         const result = await swipeMutation({
           authUserId: currentUserId,
           toUserId: profileUserId as any,
@@ -420,7 +386,9 @@ export default function Phase2FullProfileScreen() {
           router.back();
         }
       } catch (error: any) {
-        console.warn('[P2_FULL_PROFILE_STANDOUT] Error:', error?.message);
+        if (__DEV__) {
+          console.warn('[P2_FULL_PROFILE_STANDOUT] Error');
+        }
         Toast.show("Couldn't send Stand Out. Please try again.");
       }
     };
@@ -431,8 +399,8 @@ export default function Phase2FullProfileScreen() {
   // Phase-2 profile query
   const profile = useQuery(
     api.privateDiscover.getProfileByUserId,
-    !isDemoMode && profileUserId && currentUserId
-      ? { userId: profileUserId as any, viewerAuthUserId: currentUserId }
+    !isDemoMode && profileUserId && currentUserId && token
+      ? { token, userId: profileUserId as any, viewerAuthUserId: currentUserId }
       : 'skip'
   );
 
@@ -456,10 +424,9 @@ export default function Phase2FullProfileScreen() {
       else seen.add(id);
     }
     if (dups.length > 0) {
-      console.warn(
-        `[P2_PROMPT_DUP] expanded(${profileUserId?.slice?.(-6)}): duplicate promptIds in promptAnswers:`,
-        dups,
-      );
+      if (__DEV__) {
+        console.warn('[P2_PROMPT_DUP] duplicate promptIds in promptAnswers');
+      }
     }
   }, [profile, profileUserId]);
 
@@ -535,29 +502,6 @@ export default function Phase2FullProfileScreen() {
   // EARLY RETURNS (safe now - all hooks declared above)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // [P2_PROFILE_MAPPED_DATA] Debug logging for full profile data from query
-  if (__DEV__ && profile) {
-    console.log('[P2_PROFILE_MAPPED_DATA]', {
-      userId: profile.userId?.slice?.(-8),
-      displayName: profile.name,
-      // Bio
-      hasBio: !!profile.bio,
-      bioLength: profile.bio?.length ?? 0,
-      // INTERESTS - KEY DATA PATH
-      hobbiesFromQuery: profile.hobbies,
-      hobbiesCount: profile.hobbies?.length ?? 0,
-      activitiesFromQuery: profile.activities,
-      activitiesCount: profile.activities?.length ?? 0,
-      interestsWillRender: (profile.hobbies?.length ?? 0) > 0 || (profile.activities?.length ?? 0) > 0,
-      // Other sections
-      intentKeysCount: profile.intentKeys?.length ?? 0,
-      promptAnswersCount: profile.promptAnswers?.length ?? 0,
-      hasLifestyle: !!(profile.height || profile.smoking || profile.drinking),
-      hasEducation: !!(profile as any).education,
-      hasReligion: !!(profile as any).religion,
-    });
-  }
-
   // Loading state
   if (profile === undefined) {
     return (
@@ -615,10 +559,6 @@ export default function Phase2FullProfileScreen() {
   const handleLike = async () => {
     if (!currentUserId || !profileUserId) return;
 
-    if (__DEV__) {
-      console.log('[P2_FULL_PROFILE_ACTION] action=like userId=' + profileUserId?.slice?.(-8));
-    }
-
     try {
       const result = await swipeMutation({
         authUserId: currentUserId,
@@ -637,7 +577,9 @@ export default function Phase2FullProfileScreen() {
         router.back();
       }
     } catch (error: any) {
-      console.warn('[P2_FULL_PROFILE] Like error:', error?.message);
+      if (__DEV__) {
+        console.warn('[P2_FULL_PROFILE] Like error');
+      }
       Toast.show("Couldn't like. Please try again.");
     }
   };
@@ -645,10 +587,6 @@ export default function Phase2FullProfileScreen() {
   // Handle pass action
   const handlePass = async () => {
     if (!currentUserId || !profileUserId) return;
-
-    if (__DEV__) {
-      console.log('[P2_FULL_PROFILE_ACTION] action=pass userId=' + profileUserId?.slice?.(-8));
-    }
 
     try {
       await swipeMutation({
@@ -658,7 +596,9 @@ export default function Phase2FullProfileScreen() {
       });
       router.back();
     } catch (error: any) {
-      console.warn('[P2_FULL_PROFILE] Pass error:', error?.message);
+      if (__DEV__) {
+        console.warn('[P2_FULL_PROFILE] Pass error');
+      }
     }
   };
 
@@ -671,10 +611,6 @@ export default function Phase2FullProfileScreen() {
     if (hasReachedStandOutLimit()) {
       Toast.show('No Stand Outs remaining today');
       return;
-    }
-
-    if (__DEV__) {
-      console.log('[P2_FULL_PROFILE_ACTION] action=super_like userId=' + profileUserId?.slice?.(-8));
     }
 
     // P0-002 FIX: Use backend display name only (returned as `name` here).
@@ -1079,23 +1015,6 @@ export default function Phase2FullProfileScreen() {
 
           {/* ─── INTERESTS ─────────────────────────────────────────────── */}
           {(() => {
-            // [P2_PROFILE_INTERESTS_RENDER] Debug logging
-            if (__DEV__) {
-              const willRender = interestKeys.length > 0;
-              console.log('[P2_PROFILE_INTERESTS_RENDER]', {
-                hasHobbies: !!profile.hobbies,
-                hobbiesCount: profile.hobbies?.length ?? 0,
-                hasActivities: !!profile.activities,
-                activitiesCount: profile.activities?.length ?? 0,
-                usingSource:
-                  Array.isArray(profile.hobbies) && profile.hobbies.length > 0
-                    ? 'hobbies'
-                    : 'activities',
-                willRender,
-                interestsToShow: willRender ? interestKeys.slice(0, 6) : [],
-              });
-            }
-
             if (interestKeys.length === 0) return null;
 
             return (
@@ -1160,17 +1079,6 @@ export default function Phase2FullProfileScreen() {
           const liftedActionRowBottom = Math.round(actionRowBottom * 1.25);
           const EXTRA_BREATHING_ROOM = 20;
           const bottomPadding = liftedActionRowBottom + actionRowClearance + EXTRA_BREATHING_ROOM;
-
-          if (__DEV__) {
-            console.log('[P2_PROFILE_BOTTOM_PADDING]', {
-              actionRowBottom,
-              liftedActionRowBottom,
-              actionRowClearance,
-              insetsBottom: insets.bottom,
-              extraRoom: EXTRA_BREATHING_ROOM,
-              totalPadding: bottomPadding,
-            });
-          }
 
           return <View style={{ height: bottomPadding }} />;
         })()}

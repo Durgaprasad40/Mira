@@ -3,8 +3,12 @@ import { query, mutation } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
-import { resolveUserIdByAuthId, isRevealed } from './helpers';
+import { resolveUserIdByAuthId, isRevealed, validateSessionToken } from './helpers';
 import { DEFAULT_MIN_AGE, normalizeDiscoveryPreferences } from '../lib/discoveryDefaults';
+import {
+  filterOwnedSafePrivatePhotoUrls,
+  PHASE2_MIN_PRIVATE_PHOTOS,
+} from './phase2PrivatePhotos';
 
 // Phase 3: Shadow mode imports
 import { shouldRunShadowComparison } from './ranking/rankingConfig';
@@ -16,6 +20,7 @@ const MAX_BLOCK_ROWS = 5000;
 const MAX_CONVERSATION_ROWS = 500;
 const MAX_PRIVATE_RELATIONSHIP_ROWS = 5000;
 const MAX_PENDING_DELETION_ROWS = 5000;
+const MAX_VIEWER_IMPRESSION_ROWS = 5000;
 const IMPRESSION_RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
 const MAX_IMPRESSIONS_PER_WINDOW = 300;
 
@@ -116,6 +121,50 @@ function distanceKmBetween(lat1: number, lon1: number, lat2: number, lon2: numbe
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return Math.round(R * c);
+}
+
+async function requireTokenBoundViewer(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  token: string,
+  hints: {
+    userId?: Id<'users'>;
+    authUserId?: string;
+    viewerId?: Id<'users'>;
+    viewerAuthUserId?: string;
+  } = {},
+): Promise<Id<'users'>> {
+  const viewerUserId = await validateSessionToken(ctx, token.trim());
+  if (!viewerUserId) {
+    throw new Error('UNAUTHORIZED');
+  }
+
+  const assertedIds: Id<'users'>[] = [];
+  if (hints.userId) assertedIds.push(hints.userId);
+  if (hints.viewerId) assertedIds.push(hints.viewerId);
+
+  for (const authHint of [hints.authUserId, hints.viewerAuthUserId]) {
+    const trimmed = authHint?.trim();
+    if (!trimmed) continue;
+    const resolvedHint = await resolveUserIdByAuthId(ctx, trimmed);
+    if (!resolvedHint) {
+      throw new Error('UNAUTHORIZED');
+    }
+    assertedIds.push(resolvedHint);
+  }
+
+  for (const assertedId of assertedIds) {
+    if (assertedId !== viewerUserId) {
+      throw new Error('UNAUTHORIZED');
+    }
+  }
+
+  return viewerUserId;
+}
+
+function isPrivateDiscoverVisibleUser(
+  user: Doc<'users'> | null | undefined,
+): user is Doc<'users'> {
+  return !!user && user.isActive === true && user.isBanned !== true && !user.deletedAt;
 }
 
 function calculateAgeFromDateOfBirth(dateOfBirth?: string | null): number | null {
@@ -250,7 +299,8 @@ async function isWithinDeepConnectImpressionRateLimit(
 // Returns profiles sorted by ranking score (descending)
 export const getProfiles = query({
   args: {
-    // DL-013: userId is optional; prefer server-side auth resolution
+    token: v.string(),
+    // Legacy viewer hints are compatibility assertions only.
     userId: v.optional(v.id('users')),
     authUserId: v.optional(v.string()),
     intentKeys: v.optional(v.array(v.string())),
@@ -265,30 +315,13 @@ export const getProfiles = query({
     const requestedIntentKeySet =
       requestedIntentKeys.length > 0 ? new Set(requestedIntentKeys) : null;
 
-    // DL-013: Resolve viewer from server-side auth, then legacy args.userId, then authUserId fallback
-    let viewerUserId = undefined;
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
-      if (resolvedId) {
-        viewerUserId = resolvedId;
-      }
-    }
-    if (!viewerUserId && args.userId) {
-      viewerUserId = args.userId;
-    }
-    if (!viewerUserId && args.authUserId?.trim()) {
-      const resolvedId = await resolveUserIdByAuthId(ctx, args.authUserId.trim());
-      if (resolvedId) {
-        viewerUserId = resolvedId;
-      }
-    }
-    if (!viewerUserId) {
-      return []; // No valid viewer - return empty
-    }
+    const viewerUserId = await requireTokenBoundViewer(ctx, args.token, {
+      userId: args.userId,
+      authUserId: args.authUserId,
+    });
     const viewerUserDoc = await ctx.db.get(viewerUserId);
     const viewerAge = calculateAgeFromDateOfBirth(viewerUserDoc?.dateOfBirth);
-    if (!viewerUserDoc || !hasEligibleAdultAge(viewerAge)) {
+    if (!isPrivateDiscoverVisibleUser(viewerUserDoc) || !hasEligibleAdultAge(viewerAge)) {
       return [];
     }
     const viewerPrefs = normalizeDiscoveryPreferences(viewerUserDoc);
@@ -419,14 +452,14 @@ export const getProfiles = query({
       .withIndex('by_viewer_lastSeenAt', (q) =>
         q.eq('viewerId', viewerUserId).gt('lastSeenAt', suppressionCutoff)
       )
-      .collect();
+      .take(MAX_VIEWER_IMPRESSION_ROWS);
     const recentlySeen = new Set(
       viewerImpressions.map((imp) => imp.viewedUserId as string)
     );
 
     const passesStage1PreferenceGates = (p: typeof profiles[number]): boolean => {
       const ownerUser = ownerById.get(p.userId as string);
-      if (!ownerUser || ownerUser.isActive !== true) return false;
+      if (!isPrivateDiscoverVisibleUser(ownerUser)) return false;
 
       const candidateAge = calculateAgeFromDateOfBirth(ownerUser.dateOfBirth);
       if (!hasEligibleAdultAge(candidateAge)) return false;
@@ -694,7 +727,7 @@ export const getProfiles = query({
 
     // Return only blurred data — never expose original photos
     // Cast to access optional schema fields that may not be in generated types yet
-    return limited.map(({ profile: p }) => {
+    const serialized = await Promise.all(limited.map(async ({ profile: p }) => {
       const profile = p as typeof p & {
         hobbies?: string[];
         isVerified?: boolean;
@@ -706,11 +739,15 @@ export const getProfiles = query({
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
       const ownerUser = ownerById.get(p.userId as string);
-      if (!ownerUser || ownerUser.isActive !== true) {
+      if (!isPrivateDiscoverVisibleUser(ownerUser)) {
         return null;
       }
       const ownerAge = calculateAgeFromDateOfBirth(ownerUser.dateOfBirth);
       if (!hasEligibleAdultAge(ownerAge)) {
+        return null;
+      }
+      const safePhotoUrls = await filterOwnedSafePrivatePhotoUrls(ctx, p.userId, p.privatePhotoUrls);
+      if (safePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) {
         return null;
       }
       // Privacy: hide age from others in Deep Connect (viewer is never self here — excluded above)
@@ -728,8 +765,8 @@ export const getProfiles = query({
         gender: p.gender,
         photoBlurEnabled: (profile as any).photoBlurEnabled ?? undefined,
         photoBlurSlots: p.photoBlurSlots ?? undefined,
-        blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-        blurredPhotoUrls: p.privatePhotoUrls,
+        blurredPhotoUrl: safePhotoUrls[0] ?? null,
+        blurredPhotoUrls: safePhotoUrls,
         intentKeys,
         privateIntentKeys: intentKeys,
         desireTagKeys: p.privateDesireTagKeys,
@@ -750,7 +787,9 @@ export const getProfiles = query({
         verificationStatus: ownerUser.verificationStatus ?? profile.verificationStatus ?? (profile.isVerified ? 'verified' : 'unverified'),
         ...(distanceKm !== undefined ? { distanceKm } : {}),
       };
-    }).filter(Boolean);
+    }));
+
+    return serialized.filter(Boolean);
   },
 });
 
@@ -759,34 +798,22 @@ export const getProfiles = query({
 // viewer resolves from server auth first, then optional viewerId / viewerAuthUserId fallback
 export const getProfileCard = query({
   args: {
+    token: v.string(),
     profileId: v.id('userPrivateProfiles'),
     viewerId: v.optional(v.id('users')),
     viewerAuthUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    let viewerUserId = undefined;
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
-      if (resolvedId) {
-        viewerUserId = resolvedId;
-      }
-    }
-    if (!viewerUserId && args.viewerId) {
-      viewerUserId = args.viewerId;
-    }
-    if (!viewerUserId && args.viewerAuthUserId?.trim()) {
-      const resolvedId = await resolveUserIdByAuthId(ctx, args.viewerAuthUserId.trim());
-      if (resolvedId) {
-        viewerUserId = resolvedId;
-      }
-    }
-    if (!viewerUserId) return null;
+    const viewerUserId = await requireTokenBoundViewer(ctx, args.token, {
+      viewerId: args.viewerId,
+      viewerAuthUserId: args.viewerAuthUserId,
+    });
 
     const p = await ctx.db.get(args.profileId);
     if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
     const owner = await ctx.db.get(p.userId);
-    if (!owner || owner.isActive !== true) return null;
+    if (!isPrivateDiscoverVisibleUser(owner)) return null;
+    if (await isPrivateDataDeleted(ctx, p.userId)) return null;
 
     // Check if viewer blocked the profile owner
     const blockedByViewer = await ctx.db
@@ -805,6 +832,14 @@ export const getProfileCard = query({
       )
       .first();
     if (blockedByOwner) return null;
+
+    const reportedByViewer = await ctx.db
+      .query('reports')
+      .withIndex('by_reporter_reported_created', (q) =>
+        q.eq('reporterId', viewerUserId).eq('reportedUserId', p.userId)
+      )
+      .first();
+    if (reportedByViewer) return null;
 
     // Cast to access optional schema fields that may not be in generated types yet
     const profile = p as typeof p & {
@@ -840,6 +875,8 @@ export const getProfileCard = query({
 
     // P1-009: reveal check for this exact pair (viewerUserId is guaranteed defined above)
     const revealed = await isRevealed(ctx, viewerUserId, p.userId);
+    const safePhotoUrls = await filterOwnedSafePrivatePhotoUrls(ctx, p.userId, p.privatePhotoUrls);
+    if (safePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) return null;
 
     return {
       _id: p._id,
@@ -849,8 +886,8 @@ export const getProfileCard = query({
       gender: p.gender,
       photoBlurEnabled: (profile as any).photoBlurEnabled ?? undefined,
       photoBlurSlots: p.photoBlurSlots ?? undefined,
-      blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-      blurredPhotoUrls: p.privatePhotoUrls,
+      blurredPhotoUrl: safePhotoUrls[0] ?? null,
+      blurredPhotoUrls: safePhotoUrls,
       intentKeys,
       desireTagKeys: p.privateDesireTagKeys,
       privateBio: p.privateBio,
@@ -873,29 +910,16 @@ export const getProfileCard = query({
 // viewer resolves from server auth first, then optional viewerId / viewerAuthUserId fallback
 export const getProfileByUserId = query({
   args: {
+    token: v.string(),
     userId: v.id('users'),
     viewerId: v.optional(v.id('users')),
     viewerAuthUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    let viewerUserId = undefined;
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
-      if (resolvedId) {
-        viewerUserId = resolvedId;
-      }
-    }
-    if (!viewerUserId && args.viewerId) {
-      viewerUserId = args.viewerId;
-    }
-    if (!viewerUserId && args.viewerAuthUserId?.trim()) {
-      const resolvedId = await resolveUserIdByAuthId(ctx, args.viewerAuthUserId.trim());
-      if (resolvedId) {
-        viewerUserId = resolvedId;
-      }
-    }
-    if (!viewerUserId) return null;
+    const viewerUserId = await requireTokenBoundViewer(ctx, args.token, {
+      viewerId: args.viewerId,
+      viewerAuthUserId: args.viewerAuthUserId,
+    });
 
     // Find the private profile for this user
     const p = await ctx.db
@@ -905,6 +929,8 @@ export const getProfileByUserId = query({
 
     if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
     const owner = await ctx.db.get(args.userId);
+    if (!isPrivateDiscoverVisibleUser(owner)) return null;
+    if (await isPrivateDataDeleted(ctx, args.userId)) return null;
 
     // Check if viewer blocked the profile owner
     const blockedByViewer = await ctx.db
@@ -968,6 +994,8 @@ export const getProfileByUserId = query({
 
     // P1-009: reveal check for this exact pair (viewerUserId is guaranteed defined above)
     const revealed = await isRevealed(ctx, viewerUserId, args.userId);
+    const safePhotoUrls = await filterOwnedSafePrivatePhotoUrls(ctx, p.userId, p.privatePhotoUrls);
+    if (safePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) return null;
 
     return {
       _id: p._id,
@@ -977,11 +1005,11 @@ export const getProfileByUserId = query({
       age: hideAgeFromViewer ? undefined : p.age,
       gender: p.gender,
       bio: p.privateBio,
-      photos: p.privatePhotoUrls.map((url, i) => ({ _id: `photo_${i}`, url })),
+      photos: safePhotoUrls.map((url, i) => ({ _id: `photo_${i}`, url })),
       photoBlurEnabled: (profile as any).photoBlurEnabled ?? undefined,
       photoBlurSlots: p.photoBlurSlots ?? undefined,
-      blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-      blurredPhotoUrls: p.privatePhotoUrls,
+      blurredPhotoUrl: safePhotoUrls[0] ?? null,
+      blurredPhotoUrls: safePhotoUrls,
       // Phase-2 intents (array)
       intentKeys,
       // Legacy single key for backward compat
@@ -1020,25 +1048,19 @@ export const getProfileByUserId = query({
  * Updates both global metrics (totalImpressions, lastShownAt) and
  * per-viewer impressions (for suppression window).
  *
- * Safe: silently returns if unauthenticated or on any error.
+ * Safe: token-bound to the real viewer; rejects spoofed viewer hints.
  * Fire-and-forget: client should not await or block on this.
  */
 export const recordDeepConnectImpressions = mutation({
   args: {
+    token: v.string(),
     viewedUserIds: v.array(v.id('users')),
     authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Resolve viewer from server-side auth first, then authUserId fallback.
-    let viewerId = undefined;
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      viewerId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-    if (!viewerId && args.authUserId?.trim()) {
-      viewerId = await resolveUserIdByAuthId(ctx, args.authUserId.trim());
-    }
-    if (!viewerId) return;
+    const viewerId = await requireTokenBoundViewer(ctx, args.token, {
+      authUserId: args.authUserId,
+    });
 
     const viewedUserIds = [...new Set(args.viewedUserIds)]
       .filter((viewedUserId) => viewedUserId !== viewerId);

@@ -176,10 +176,9 @@ export default function ReviewScreen() {
   }, []);
 
   // BUG FIX: Always query backend status as authoritative source + fallback
-  // FIX: Backend expects { userId }, not { token }
   const onboardingStatusLive = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && !isDemoAuthMode && userId ? { userId } : 'skip'
+    !isDemoMode && !isDemoAuthMode && userId && token ? { token, userId } : 'skip'
   );
 
   // Demo auth mode: Use demo onboarding status query
@@ -397,6 +396,7 @@ export default function ReviewScreen() {
       // IDENTITY SIMPLIFICATION: Single name field
       const onboardingData: any = {
         userId: userId as Id<"users">,
+        token,
         name: (name || '').trim(),
         dateOfBirth,
         gender: payloadGender,

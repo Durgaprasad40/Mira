@@ -9,6 +9,11 @@ import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategor
 import { createEmptyPhotoSlots } from '@/types';
 import type { Phase2PromptAnswer, PreferenceStrength, PreferenceStrengthValue, IntentMatchValue } from '@/lib/privateConstants';
 import {
+  PRIVATE_BOUNDARIES,
+  PRIVATE_DESIRE_TAGS,
+  PRIVATE_INTENT_CATEGORIES,
+} from '@/lib/privateConstants';
+import {
   DEFAULT_MAX_DISTANCE_KM,
   normalizeDiscoveryMaxDistanceKm,
 } from '@/lib/discoveryDefaults';
@@ -25,10 +30,30 @@ function parseDOBString(dobString: string): Date {
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
-// Version constant - bump this to force re-setup
-export const CURRENT_PHASE2_SETUP_VERSION = 1;
+// Keep mirrored with convex/phase2Constants.ts. The frontend cannot safely
+// import Convex source directly, so update both constants together.
+export const CURRENT_PHASE2_SETUP_VERSION = 2;
 
 const PHOTO_BLUR_SLOT_COUNT = 9;
+const PRIVATE_INTENT_KEY_SET = new Set<string>(PRIVATE_INTENT_CATEGORIES.map((item) => item.key));
+const PRIVATE_DESIRE_TAG_SET = new Set<string>(PRIVATE_DESIRE_TAGS.map((item) => item.key));
+const PRIVATE_BOUNDARY_KEY_SET = new Set<string>(PRIVATE_BOUNDARIES.map((item) => item.key));
+
+function normalizePrivateIntentKeys(
+  keys: string[] | undefined,
+  fallback: PrivateIntentKey[],
+): PrivateIntentKey[] {
+  if (keys === undefined) return fallback;
+  return keys.filter((key): key is PrivateIntentKey => PRIVATE_INTENT_KEY_SET.has(key));
+}
+
+function normalizePrivateDesireTags(keys: string[] | undefined): PrivateDesireTag[] {
+  return (keys ?? []).filter((key): key is PrivateDesireTag => PRIVATE_DESIRE_TAG_SET.has(key));
+}
+
+function normalizePrivateBoundaries(keys: string[] | undefined): PrivateBoundary[] {
+  return (keys ?? []).filter((key): key is PrivateBoundary => PRIVATE_BOUNDARY_KEY_SET.has(key));
+}
 
 /** Pad/truncate to 9 booleans; missing indices = false (not blurred). */
 export function normalizePhotoBlurSlots(slots: boolean[] | undefined | null): boolean[] {
@@ -473,18 +498,12 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       return { photoBlurSlots: next };
     }),
   importPhase1Data: (data) => {
-    const startTime = __DEV__ ? Date.now() : 0;
-    if (__DEV__) console.log('[P2 IMPORT] start');
-
     // GUARD: Check if we have any photos to process
     const hasPhotoSlots = data.photoSlots && data.photoSlots.some((s) => s !== null);
     const hasLegacyPhotos = data.photos && data.photos.length > 0;
 
     // If no photos at all, do minimal import (just basic profile info)
     if (!hasPhotoSlots && !hasLegacyPhotos) {
-      if (__DEV__) {
-        console.log('[P2 IMPORT] skip heavy work: no photos');
-      }
       // Minimal state update - no photo processing
       // Phase-2-only identity: do NOT import Phase-1 handle/name into Private Mode nickname.
       // Nickname is chosen in Phase-2 onboarding and stored on userPrivateProfiles.displayName.
@@ -494,9 +513,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         phase1PhotoSlots: createEmptyPhotoSlots(),
         _hasHydrated: true,
       });
-      if (__DEV__) {
-        console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms, minimal)`);
-      }
       return;
     }
 
@@ -530,18 +546,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       });
     }
 
-    // DEBUG: Log what we're storing
-    if (__DEV__) {
-      const nonNullIndices = photoSlots
-        .map((uri, idx) => (uri ? idx : -1))
-        .filter((idx) => idx >= 0);
-      console.log('[privateProfileStore] importPhase1Data:', {
-        photoSlotsProvided: !!data.photoSlots,
-        nonNullSlots: nonNullIndices,
-        firstUri: photoSlots.find(Boolean)?.slice(-40) || 'none',
-      });
-    }
-
     set({
       // Store Phase-1 photo slots (9 slots, preserving positions)
       phase1PhotoSlots: photoSlots,
@@ -567,28 +571,14 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       _hasHydrated: true,
     });
 
-    if (__DEV__) {
-      console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms)`);
-    }
   },
   completeSetup: () => {
-    if (__DEV__) {
-      console.log('[P2_STEP5] completeSetup() called - setting phase2OnboardingCompleted=true');
-    }
     set({
       isSetupComplete: true,
       phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
       phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       _hasHydrated: true,
     });
-    if (__DEV__) {
-      // Verify the store actually updated
-      const newState = usePrivateProfileStore.getState();
-      console.log('[P2_STEP5] completeSetup() done - verifying store', {
-        phase2OnboardingCompleted: newState.phase2OnboardingCompleted,
-        isSetupComplete: newState.isSetupComplete,
-      });
-    }
     // P0-002 FIX: Clear saved onboarding progress when setup completes
     usePrivateProfileStore.getState().clearOnboardingProgress();
   },
@@ -661,12 +651,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   clearOnboardingProgress: async () => {
     try {
       await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
-      if (__DEV__) {
-        console.log('[P2 ONBOARDING] Progress cleared');
-      }
     } catch (error) {
       if (__DEV__) {
-        console.error('[P2 ONBOARDING] Failed to clear progress:', error);
+        console.error('[P2 ONBOARDING] Failed to clear progress');
       }
     }
   },
@@ -679,10 +666,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     // would reset the flag and bounce users back to onboarding
     const currentState = usePrivateProfileStore.getState();
     const preserveOnboardingComplete = currentState.phase2OnboardingCompleted === true;
-
-    if (__DEV__ && preserveOnboardingComplete) {
-      console.log('[P2_HYDRATE] preserving phase2OnboardingCompleted=true (permanent flag)');
-    }
 
     if (!convexProfile) {
       // Full reset when Convex has no private profile (not a post-hydration overwrite of saved intents)
@@ -737,25 +720,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       return;
     }
 
-    // TEMP: remove after QA — raw input from getByAuthUserId / hydrate caller
-    if (__DEV__) {
-      console.log('[P2_PREF_HYDRATE_INPUT]', {
-        privateIntentKeys: convexProfile.privateIntentKeys,
-      });
-    }
-
-    if (__DEV__) {
-      console.log('[P2_PREF_HYDRATE]', {
-        profileId: convexProfile._id,
-        privateIntentKeys: convexProfile.privateIntentKeys,
-        displayName: convexProfile.displayName,
-        isSetupComplete: convexProfile.isSetupComplete,
-        convexPhotoCount: convexProfile.privatePhotoUrls?.length || 0,
-        height: convexProfile.height,
-        weight: convexProfile.weight,
-      });
-    }
-
     const notificationCategories: Record<string, boolean> = {
       deepConnect: convexProfile.notificationCategories?.deepConnect ?? true,
       privateMessages: convexProfile.notificationCategories?.privateMessages ?? true,
@@ -773,13 +737,11 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       city: convexProfile.city || '',
       privateBio: convexProfile.privateBio || '',
 
-      // Categories (cast to expected types - Convex stores as string[])
+      // Categories
       // Do not replace with [] when field is missing — preserve local state until backend sends a value
-      intentKeys: (convexProfile.privateIntentKeys !== undefined
-        ? convexProfile.privateIntentKeys
-        : state.intentKeys) as any,
-      desireTags: (convexProfile.privateDesireTagKeys || []) as any,
-      boundaries: (convexProfile.privateBoundaries || []) as any,
+      intentKeys: normalizePrivateIntentKeys(convexProfile.privateIntentKeys, state.intentKeys),
+      desireTags: normalizePrivateDesireTags(convexProfile.privateDesireTagKeys),
+      boundaries: normalizePrivateBoundaries(convexProfile.privateBoundaries),
 
       // HYDRATION FIX: Always set photos from Convex after restart
       // This is the source of truth - don't preserve stale local state
@@ -838,26 +800,6 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       _hasHydrated: true,
     }));
 
-    if (__DEV__) {
-      const mergedIntents =
-        convexProfile.privateIntentKeys !== undefined
-          ? convexProfile.privateIntentKeys
-          : currentState.intentKeys;
-      // TEMP: remove after QA — must match backend / [P2_PREF_HYDRATE_INPUT]
-      console.log('[P2_PREF_STORE]', { intentKeys: mergedIntents });
-    }
-
-    if (__DEV__) {
-      console.log('[privateProfileStore] hydrateFromConvex complete:', {
-        photoCount: convexProfile.privatePhotoUrls?.length || 0,
-        promptAnswerCount: convexProfile.promptAnswers?.length || 0,
-        hasPreferenceStrength: !!convexProfile.preferenceStrength,
-        // P0-1/P0-2: Log settings hydration
-        hideFromDeepConnect: convexProfile.hideFromDeepConnect,
-        safeMode: convexProfile.safeMode,
-        notificationsEnabled: convexProfile.notificationsEnabled,
-      });
-    }
   },
 }));
 

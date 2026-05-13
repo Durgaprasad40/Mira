@@ -125,11 +125,10 @@ export default function PrivateProfileScreen() {
       hasHealedRef.current = true;
 
       healProfile({ token, authUserId: userId })
-        .then(() => {
-          console.log('[P2_PROFILE] Age healing triggered');
-        })
         .catch((err) => {
-          console.warn('[P2_PROFILE] Age healing failed', err);
+          if (__DEV__) {
+            console.warn('[P2_PROFILE] Age healing failed');
+          }
         });
     }
   }, [backendProfile?.age, isDemoMode, token, userId, healProfile]);

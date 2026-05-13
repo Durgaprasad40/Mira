@@ -1,5 +1,5 @@
 // Private Mode Intent Categories — admin-defined, no user creation
-// Face 2 ONLY — these categories do NOT appear in Face 1
+// Phase 2 only — these categories do NOT appear in Phase 1
 export const PRIVATE_INTENT_CATEGORIES = [
   { key: 'fling', label: 'Fling', icon: 'flash', color: '#FF5722' },
   { key: 'short_term', label: 'Short-term', icon: 'time', color: '#FF9800' },

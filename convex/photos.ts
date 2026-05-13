@@ -68,6 +68,7 @@ async function validateSessionToken(
   if (!user) return null;
   if (!user.isActive) return null;
   if (user.deletedAt) return null;
+  if (user.isBanned) return null;
 
   // Check mass session revocation
   if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
@@ -126,8 +127,29 @@ export const generateUploadUrl = mutation({
  * Used by Phase-2 private profile to get permanent URLs after upload.
  */
 export const getStorageUrl = mutation({
-  args: { storageId: v.id('_storage') },
+  args: {
+    token: v.string(),
+    storageId: v.id('_storage'),
+  },
   handler: async (ctx, args) => {
+    const userId = await validateSessionToken(ctx, args.token.trim());
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const [ownedPhoto, pendingUpload] = await Promise.all([
+      ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .filter((q) => q.eq(q.field('storageId'), args.storageId))
+        .first(),
+      ctx.db
+        .query('pendingUploads')
+        .withIndex('by_storage', (q) => q.eq('storageId', args.storageId))
+        .first(),
+    ]);
+    if (!ownedPhoto && pendingUpload?.userId !== userId) {
+      throw new Error('Unauthorized: storage not owned by caller');
+    }
     const url = await ctx.storage.getUrl(args.storageId);
     return url;
   },
@@ -1284,12 +1306,16 @@ export const getPhotoGateStatus = query({
  */
 export const trackPendingUpload = mutation({
   args: {
+    token: v.string(),
     userId: v.string(), // authId string
     storageId: v.id('_storage'),
   },
   handler: async (ctx, args) => {
-    // Resolve authId -> Convex userId
-    const resolvedUserId = await ensureUserByAuthId(ctx, args.userId);
+    const resolvedUserId = await validateSessionToken(ctx, args.token.trim());
+    const claimedUserId = await resolveUserIdByAuthId(ctx, args.userId);
+    if (!resolvedUserId || !claimedUserId || resolvedUserId !== claimedUserId) {
+      throw new Error('Unauthorized: upload ownership mismatch');
+    }
 
     // Check if pending record already exists for this storageId
     const existing = await ctx.db
@@ -1324,12 +1350,16 @@ export const trackPendingUpload = mutation({
  */
 export const cleanupPendingUpload = mutation({
   args: {
+    token: v.string(),
     userId: v.string(), // authId string
     storageId: v.id('_storage'),
   },
   handler: async (ctx, args) => {
-    // Resolve authId -> Convex userId
-    const resolvedUserId = await ensureUserByAuthId(ctx, args.userId);
+    const resolvedUserId = await validateSessionToken(ctx, args.token.trim());
+    const claimedUserId = await resolveUserIdByAuthId(ctx, args.userId);
+    if (!resolvedUserId || !claimedUserId || resolvedUserId !== claimedUserId) {
+      throw new Error('Unauthorized: upload ownership mismatch');
+    }
 
     // Find the pending record
     const pending = await ctx.db
@@ -1442,7 +1472,7 @@ export const cleanupStalePendingUploads = mutation({
  * Used for testing/development to clean up extra photos
  * ⚠️ DO NOT USE IN PRODUCTION - this deletes ALL photos
  */
-export const deleteAllPhotosForUser = mutation({
+export const deleteAllPhotosForUser = internalMutation({
   args: {
     userId: v.union(v.id('users'), v.string()),
   },

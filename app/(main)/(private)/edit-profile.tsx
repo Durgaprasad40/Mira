@@ -205,9 +205,9 @@ async function copyToPermamentStorage(sourceUri: string, index: number): Promise
     sourceFile.copy(destFile);
 
     return destFile.uri;
-  } catch (error) {
+  } catch {
     if (__DEV__) {
-      console.error('[EditProfile] Copy failed:', error);
+      console.error('[EditProfile] Copy failed');
     }
     return null;
   }
@@ -862,9 +862,9 @@ export default function EditProfileScreen() {
 
         onSuccess?.();
         return true;
-      } catch (error) {
+      } catch {
         if (__DEV__) {
-          console.error('[EditProfile] Save failed:', error);
+          console.error('[EditProfile] Save failed');
         }
         onFailure?.();
         Alert.alert('Error', failureMessage);
@@ -897,6 +897,7 @@ export default function EditProfileScreen() {
           }
 
           await updatePhotoBlurSlots({
+            token,
             authUserId: userId,
             ...updates,
           });
@@ -904,16 +905,16 @@ export default function EditProfileScreen() {
 
         onSuccess?.();
         return true;
-      } catch (error) {
+      } catch {
         if (__DEV__) {
-          console.error('[EditProfile] Photo blur save failed:', error);
+          console.error('[EditProfile] Photo blur save failed');
         }
         onFailure?.();
         Alert.alert('Error', failureMessage);
         return false;
       }
     },
-    [isDemoMode, updatePhotoBlurSlots, userId]
+    [isDemoMode, token, updatePhotoBlurSlots, userId]
   );
 
   // Valid photos
@@ -963,13 +964,13 @@ export default function EditProfileScreen() {
         try {
           const storageId = await uploadPhotoToConvex(asset.uri, () => generateUploadUrl({ token }));
           uploadedStorageId = storageId;
-          await trackPendingUpload({ userId, storageId });
-          const permanentUrl = await getStorageUrl({ storageId });
+          await trackPendingUpload({ token, userId, storageId });
+          const permanentUrl = await getStorageUrl({ token, storageId });
           if (!permanentUrl) throw new Error('Failed to get URL');
           backendUrl = permanentUrl;
-        } catch (error) {
+        } catch {
           if (__DEV__) {
-            console.error('[EditProfile] Photo upload failed:', error);
+            console.error('[EditProfile] Photo upload failed');
           }
           throw new Error('Failed to upload photo.');
         }
@@ -1002,9 +1003,9 @@ export default function EditProfileScreen() {
         );
 
         if (!saved) {
-          if (uploadedStorageId && userId) {
+          if (uploadedStorageId && userId && token) {
             try {
-              await cleanupPendingUpload({ userId, storageId: uploadedStorageId });
+              await cleanupPendingUpload({ token, userId, storageId: uploadedStorageId });
             } catch {
               // Best-effort cleanup only.
             }
@@ -1012,7 +1013,7 @@ export default function EditProfileScreen() {
           return;
         }
       }
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Failed to add photo.');
     } finally {
       if (mountedRef.current) setAddingSlotIndex(null);
@@ -1055,9 +1056,9 @@ export default function EditProfileScreen() {
             try {
               const file = new ExpoFile(removedUrl);
               if (file.exists) file.delete();
-            } catch (error) {
+            } catch {
               if (__DEV__) {
-                console.error('[EditProfile] Local photo cleanup failed:', error);
+                console.error('[EditProfile] Local photo cleanup failed');
               }
             }
           }
@@ -1093,22 +1094,17 @@ export default function EditProfileScreen() {
         privatePhotoUrls: newPhotos,
         photoBlurSlots: nextBlurSlots,
       },
-      {
-        onSuccess: () => {
-          setPendingPhotoUrls(newPhotos);
-          setSelectedPhotos([], newPhotos);
-          setPhotoBlurSlots(nextBlurSlots);
-          if (__DEV__) {
-            console.log('[P2_EditProfile] ✅ Main photo persisted');
-          }
-        },
-        failureMessage: 'Failed to set main photo. Please try again.',
-      }
-    );
+        {
+          onSuccess: () => {
+            setPendingPhotoUrls(newPhotos);
+            setSelectedPhotos([], newPhotos);
+            setPhotoBlurSlots(nextBlurSlots);
+          },
+          failureMessage: 'Failed to set main photo. Please try again.',
+        }
+      );
 
-    if (!saved && __DEV__) {
-      console.error('[P2_EditProfile] ❌ Failed to persist main photo');
-    }
+    if (!saved) return;
   };
 
   // Toggle photo blur
@@ -1223,9 +1219,9 @@ export default function EditProfileScreen() {
         }
 
         router.back();
-      } catch (error) {
+      } catch {
         if (__DEV__) {
-          console.error('[EditProfile] Save failed:', error);
+          console.error('[EditProfile] Save failed');
         }
         Alert.alert('Error', 'Failed to save changes. Please try again.');
       } finally {

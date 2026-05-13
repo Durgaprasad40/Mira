@@ -33,7 +33,6 @@ class Phase2ErrorBoundary extends Component<{ children: ReactNode }, { error: Er
 
   componentDidCatch(error: Error) {
     if (isSessionInvalidationError(error?.message || '')) {
-      if (__DEV__) console.log('[Phase2ErrorBoundary] Session invalidation detected, logging out:', error?.message);
       (async () => {
         await useAuthStore.getState().logout();
         globalRouter.replace('/(auth)/welcome');
@@ -71,7 +70,7 @@ function Phase2OnboardingNavigator() {
   // FIX: Use users.getOnboardingStatus with userId for Phase-2 routing state
   const onboardingState = useQuery(
     api.users.getOnboardingStatus,
-    userId ? { userId } : 'skip'
+    userId && token ? { token, userId } : 'skip'
   );
 
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
@@ -97,13 +96,6 @@ function Phase2OnboardingNavigator() {
 
     if (hydrationKeyRef.current === hydrationKey) {
       return;
-    }
-
-    if (__DEV__) {
-      console.log('[P2_ONB_LAYOUT] hydrating from backend (this should NOT happen after finalize)', {
-        userId: currentUser._id?.substring(0, 8),
-        hasPrivateProfile: !!currentPrivateProfile,
-      });
     }
 
     importPhase1Data(buildPhase1ImportData(currentUser));

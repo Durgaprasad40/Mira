@@ -6,6 +6,8 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
 
+// Legacy compatibility route. New Phase-2 profile navigation should use
+// `/(main)/(private)/p2-profile/[userId]`; this shim only preserves old links.
 export default function LegacyPrivateProfileRedirectScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();

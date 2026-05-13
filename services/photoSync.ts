@@ -248,7 +248,7 @@ export async function uploadPhotoToBackend(
 
     // H-1: Track pending upload (best-effort, non-fatal)
     try {
-      await convex.mutation(api.photos.trackPendingUpload, { userId, storageId });
+      await convex.mutation(api.photos.trackPendingUpload, { token, userId, storageId });
     } catch (e) {
       console.warn('[PHOTO_SYNC] H-1: trackPendingUpload failed (non-fatal):', e);
     }
@@ -303,7 +303,7 @@ export async function uploadPhotoToBackend(
       // H-1: Cleanup orphaned storage (best-effort) for BOTH add and replace failures
       // Both flows upload new storage first, so failure leaves orphaned storage object
       try {
-        await convex.mutation(api.photos.cleanupPendingUpload, { userId, storageId });
+        await convex.mutation(api.photos.cleanupPendingUpload, { token, userId, storageId });
       } catch (e) {
         // M12 FIX: Log with full detail for diagnosis, not just a warning
         console.error('[PHOTO_SYNC] M12: ORPHANED STORAGE - cleanup failed');

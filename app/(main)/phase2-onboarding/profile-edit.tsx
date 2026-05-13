@@ -28,6 +28,7 @@ import {
 } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
+import type { PrivateIntentKey } from '@/types';
 
 const C = INCOGNITO_COLORS;
 
@@ -62,9 +63,9 @@ export default function Phase2LookingForScreen() {
     return !!userId && intentsValid && bioValid && bioLength <= PHASE2_DESIRE_MAX_LENGTH;
   }, [userId, intentsValid, bioValid, bioLength]);
 
-  const toggleIntent = useCallback((key: string) => {
-    if (intentKeys.includes(key as any)) {
-      setIntentKeys(intentKeys.filter((existingKey) => existingKey !== key) as any);
+  const toggleIntent = useCallback((key: PrivateIntentKey) => {
+    if (intentKeys.includes(key)) {
+      setIntentKeys(intentKeys.filter((existingKey) => existingKey !== key));
       return;
     }
 
@@ -73,7 +74,7 @@ export default function Phase2LookingForScreen() {
       return;
     }
 
-    setIntentKeys([...intentKeys, key] as any);
+    setIntentKeys([...intentKeys, key]);
   }, [intentKeys, setIntentKeys]);
 
   const handleContinue = async () => {
@@ -169,7 +170,7 @@ export default function Phase2LookingForScreen() {
             {/* Intent Chips - Fluid Wrap */}
             <View style={styles.intentGrid}>
               {PRIVATE_INTENT_CATEGORIES.map((category) => {
-                const selected = intentKeys.includes(category.key as any);
+                const selected = intentKeys.includes(category.key);
                 const disabled = !selected && intentKeys.length >= PHASE2_MAX_INTENTS;
 
                 return (

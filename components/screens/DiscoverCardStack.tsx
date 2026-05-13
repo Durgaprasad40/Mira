@@ -1275,8 +1275,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const privateDiscoverArgs = useMemo(
     () =>
-      convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery && !phase2QueryPaused
+      convexUserId && token && !skipInternalQuery && isPhase2 && isAuthReadyForQuery && !phase2QueryPaused
         ? {
+            token: token as string,
             // P2-5: Pull a deeper Phase-2 slice per request. Backend safely
             // caps via MAX_PHASE2_RESULT_LIMIT, queue front-buffer stays at 3,
             // and we don't prefetch additional images here.
@@ -1286,7 +1287,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, userId, intentFilters, skipInternalQuery, isPhase2, isAuthReadyForQuery, phase2QueryPaused],
+    [convexUserId, userId, token, intentFilters, skipInternalQuery, isPhase2, isAuthReadyForQuery, phase2QueryPaused],
   );
 
   const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
@@ -2616,7 +2617,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Phase-2 only: Record impressions when the top card becomes visible.
   const recordedTopImpressionRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!isPhase2 || isDemoMode || !userId || !current) return;
+    if (!isPhase2 || isDemoMode || !userId || !token || !current) return;
 
     const currentViewedUserId = (current.userId ?? current.id) as Id<'users'> | undefined;
     if (!currentViewedUserId) return;
@@ -2626,6 +2627,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     recordedTopImpressionRef.current = signature;
 
     recordImpressionsMutation({
+      token,
       viewedUserIds: [currentViewedUserId],
       authUserId: userId,
     }).catch((error) => {
@@ -2633,7 +2635,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         console.warn('[DEEPCONNECT_IMPRESSION_FAIL]', error?.message ?? error);
       }
     });
-  }, [isPhase2, isDemoMode, userId, current?.userId, current?.id, recordImpressionsMutation]);
+  }, [isPhase2, isDemoMode, userId, token, current?.userId, current?.id, recordImpressionsMutation]);
 
   // Stable refs for panResponder callbacks — prevents panResponder recreation
   // when current/handleSwipe/animateSwipe change between renders.

@@ -105,6 +105,42 @@ export default function Phase2SelectPhotosScreen() {
 
   const isLoading = currentUser === undefined;
 
+  const cleanupSessionUploadsForUrls = useCallback(async (urls: string[]) => {
+    if (!userId || !token || urls.length === 0) return;
+
+    const storageIds = urls
+      .map((url) => sessionUploads[url])
+      .filter((storageId): storageId is Id<'_storage'> => Boolean(storageId));
+    if (storageIds.length === 0) return;
+
+    const cleanedUrls = new Set<string>();
+    await Promise.all(storageIds.map(async (storageId) => {
+      try {
+        await cleanupPendingUpload({ token, userId, storageId });
+        for (const [url, currentStorageId] of Object.entries(sessionUploads)) {
+          if (currentStorageId === storageId) {
+            cleanedUrls.add(url);
+          }
+        }
+      } catch {
+        // Best-effort cleanup only; do not block the user's retry path.
+      }
+    }));
+
+    if (cleanedUrls.size === 0) return;
+    setSessionUploads((current) => {
+      const next = { ...current };
+      for (const url of cleanedUrls) {
+        delete next[url];
+      }
+      return next;
+    });
+    setSelectedPhotos(
+      [],
+      selectedPhotoUrls.filter((url) => !cleanedUrls.has(url)),
+    );
+  }, [cleanupPendingUpload, selectedPhotoUrls, sessionUploads, setSelectedPhotos, token, userId]);
+
   // Toggle selection of a Phase-1 photo
   const handleTogglePhoto = useCallback((photoUrl: string) => {
     if (isSaving || isUploading) return;
@@ -141,6 +177,7 @@ export default function Phase2SelectPhotosScreen() {
       return;
     }
 
+    let uploadedStorageId: Id<'_storage'> | null = null;
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: 'images',
@@ -157,8 +194,9 @@ export default function Phase2SelectPhotosScreen() {
         throw new Error('Session expired. Please sign in again.');
       }
       const storageId = await uploadPhotoToConvex(result.assets[0].uri, () => generateUploadUrl({ token }));
-      await trackPendingUpload({ userId, storageId });
-      const permanentUrl = await getStorageUrl({ storageId });
+      uploadedStorageId = storageId;
+      await trackPendingUpload({ token, userId, storageId });
+      const permanentUrl = await getStorageUrl({ token, storageId });
 
       if (!permanentUrl || !isPersistedPhotoUrl(permanentUrl)) {
         throw new Error('Upload completed without a permanent URL');
@@ -172,7 +210,17 @@ export default function Phase2SelectPhotosScreen() {
           [permanentUrl]: storageId,
         }));
       }
-    } catch (error) {
+    } catch {
+      if (uploadedStorageId) {
+        await cleanupSessionUploadsForUrls(
+          Object.keys(sessionUploads).filter((url) => sessionUploads[url] === uploadedStorageId),
+        );
+        try {
+          await cleanupPendingUpload({ token, userId, storageId: uploadedStorageId });
+        } catch {
+          // Best-effort cleanup only.
+        }
+      }
       Alert.alert('Upload failed', 'We could not add that photo. Please try again.');
     } finally {
       setIsUploading(false);
@@ -188,9 +236,9 @@ export default function Phase2SelectPhotosScreen() {
 
     // Cleanup storage if this was a session upload
     const uploadedStorageId = sessionUploads[url];
-    if (uploadedStorageId && userId) {
+    if (uploadedStorageId && userId && token) {
       try {
-        await cleanupPendingUpload({ userId, storageId: uploadedStorageId });
+        await cleanupPendingUpload({ token, userId, storageId: uploadedStorageId });
         setSessionUploads((current) => {
           const next = { ...current };
           delete next[url];
@@ -200,24 +248,17 @@ export default function Phase2SelectPhotosScreen() {
         // Best-effort cleanup
       }
     }
-  }, [cleanupPendingUpload, isSaving, isUploading, selectedPhotoUrls, sessionUploads, setSelectedPhotos, userId]);
+  }, [cleanupPendingUpload, isSaving, isUploading, selectedPhotoUrls, sessionUploads, setSelectedPhotos, token, userId]);
 
   // Continue to next step - save ONLY selected photos
   const handleContinue = async () => {
     if (!userId || !canContinue) return;
 
     setIsSaving(true);
+    let persistedUrls: string[] = [];
+    let cleanupFailedSaveUploads = false;
     try {
-      const persistedUrls = selectedPhotoUrls.filter(isPersistedPhotoUrl);
-
-      // DEBUG: Log save payload (remove after verification)
-      if (__DEV__) {
-        console.log('[P2_PHOTOS] Saving photos:', {
-          authUserId: userId,
-          photoCount: persistedUrls.length,
-          urls: persistedUrls.map((u) => u.slice(-40)),
-        });
-      }
+      persistedUrls = selectedPhotoUrls.filter(isPersistedPhotoUrl);
 
       const result = await saveOnboardingPhotos({
         token,
@@ -232,14 +273,9 @@ export default function Phase2SelectPhotosScreen() {
         religion,
       });
 
-      // DEBUG: Log result (remove after verification)
-      if (__DEV__) {
-        console.log('[P2_PHOTOS] Save result:', result);
-      }
-
       if (!result?.success) {
         const errorMsg = (result as any)?.error || 'unknown';
-        console.warn('[P2_PHOTOS] Save failed:', errorMsg);
+        cleanupFailedSaveUploads = true;
         throw new Error(`Photo save did not succeed: ${errorMsg}`);
       }
 
@@ -248,8 +284,10 @@ export default function Phase2SelectPhotosScreen() {
       } else {
         router.push(PHASE2_ONBOARDING_ROUTE_MAP['profile-edit'] as any);
       }
-    } catch (error) {
-      console.error('[P2_PHOTOS] Save error:', error);
+    } catch {
+      if (cleanupFailedSaveUploads) {
+        await cleanupSessionUploadsForUrls(persistedUrls);
+      }
       Alert.alert(
         'Unable to continue',
         'Your Private Mode photos could not be saved. Please try again.'

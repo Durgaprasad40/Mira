@@ -50,9 +50,6 @@ const PHASE2_TAB_ROOTS = new Set([
   'rooms',
 ]);
 
-// PERF: Track mount time for latency measurement
-let _privateLayoutMountTime = 0;
-
 export default function PrivateLayout() {
   const router = useRouter();
   const pathname = usePathname();
@@ -73,22 +70,6 @@ export default function PrivateLayout() {
   // Stable segment check for effects that need it
   const segmentStrings = useMemo(() => segments as string[], [segments]);
 
-  // PERF: Log mount time
-  useEffect(() => {
-    _privateLayoutMountTime = Date.now();
-    if (__DEV__) {
-      console.log('[PERF] PrivateLayout mounted', { t: _privateLayoutMountTime });
-      console.log('[DEEPCONNECT_SHELL_MOUNT]');
-      // P0 ISOLATION DEBUG: Log when PrivateLayout mounts - should NEVER happen from Phase-1 Discover
-      console.log('[P2_LAYOUT_MOUNT] PrivateLayout mounted', {
-        pathname,
-        segments: segmentStrings,
-        phaseMode,
-        warning: 'If you see this after P1_PROFILE_ROUTE, there is a routing isolation bug!',
-      });
-    }
-  }, []);
-
   // Get the parent (main) stack navigator — beforeRemove fires here
   // when this screen is about to be popped from the (main) stack.
   const navigation = useNavigation();
@@ -102,8 +83,6 @@ export default function PrivateLayout() {
   // CRASH FIX: Proper mount lifecycle tracking
   const didRedirectRef = useRef(false);
   const mountedRef = useRef(false);
-  /** DEV: first renders only — verify pathname no longer sticks on "/" */
-  const p2PathTraceRenderRef = useRef(0);
   const firstFilterMirrorDoneRef = useRef(false);
 
   // CRASH FIX: Track mount lifecycle
@@ -173,8 +152,8 @@ export default function PrivateLayout() {
       // FIX: Use replace() instead of back() to exit in ONE action
       // back() caused double-swipe because of stacked route entries
       router.replace(PHASE1_DISCOVER_ROUTE);
-    } catch (error) {
-      if (__DEV__) console.error('[PrivateLayout] exitToHome navigation failed:', error);
+    } catch {
+      if (__DEV__) console.error('[PrivateLayout] exitToHome navigation failed');
       // On error, reset immediately so user can retry
       isExitingRef.current = false;
       return;
@@ -209,9 +188,6 @@ export default function PrivateLayout() {
       const actionType = e.data?.action?.type;
       if (actionType !== 'POP' && actionType !== 'GO_BACK') {
         // This is a PUSH, REPLACE, or NAVIGATE action - allow it
-        if (__DEV__) {
-          console.log('[PrivateLayout] Allowing navigation action:', actionType);
-        }
         return;
       }
 
@@ -227,7 +203,6 @@ export default function PrivateLayout() {
   useEffect(() => {
     // If we're exiting and we've successfully left Private (now in phase1 or shared), reset the guard
     if (isExitingRef.current && !isInPhase2) {
-      if (__DEV__) console.log('[PrivateLayout] Successfully exited - resetting guard');
       isExitingRef.current = false;
       // Clear the failsafe timeout since we exited successfully
       if (exitResetTimeoutRef.current) {
@@ -317,7 +292,7 @@ export default function PrivateLayout() {
   // Query Phase-1 onboarding status from backend
   const phase1OnboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && userId && token ? { token, userId } : 'skip'
   );
 
   // BLOCKED: T/D queries have wrong args and screen is blocked
@@ -362,20 +337,11 @@ export default function PrivateLayout() {
     if (isSame) {
       if (isInitialMirror) {
         firstFilterMirrorDoneRef.current = true;
-        if (__DEV__) {
-          console.log('[P2_PREF_FILTER_SYNC_INITIAL]', { privateIntentKeys: cleaned });
-        }
       }
       return;
     }
     useFilterStore.getState().setPrivateIntentKeys(cleaned);
     firstFilterMirrorDoneRef.current = true;
-    if (__DEV__) {
-      console.log(
-        isInitialMirror ? '[P2_PREF_FILTER_SYNC_INITIAL]' : '[P2_PREF_FILTER_SYNC]',
-        { privateIntentKeys: cleaned }
-      );
-    }
   }, [isInPhase2, isDemoMode, convexPrivateProfile]);
 
   // B1.1 FIX: Compute onboarding state BEFORE any returns (was after early returns before)
@@ -397,16 +363,9 @@ export default function PrivateLayout() {
   // This reduces log spam and render overhead on shared routes like incognito-chat
   // ══════════════════════════════════════════════════════════════════════════════
   useRouteTrace(isInPhase2 ? "P2_PRIVATE" : "SKIP", useCallback(() => ({
-    userId: userId?.substring(0, 8) ?? null,
     phaseMode,
-    phase2OnboardingCompleted_local: !!phase2OnboardingCompleted,
-    phase2OnboardingCompleted_backend: phase1OnboardingStatus?.phase2OnboardingCompleted ?? null,
-    privateWelcomeConfirmed_backend: phase1OnboardingStatus?.privateWelcomeConfirmed ?? null,
-    faceStatus: phase1OnboardingStatus?.faceVerificationStatus ?? null,
-    normalPhotoCount: phase1OnboardingStatus?.normalPhotoCount ?? null,
-    onboardingComplete,
     isDemoMode,
-  }), [userId, phaseMode, phase2OnboardingCompleted, phase1OnboardingStatus, onboardingComplete]));
+  }), [phaseMode, isDemoMode]));
 
   // PHASE-1 GUARD: Redirect to Phase-1 onboarding if incomplete
   // This check happens BEFORE Phase-2 onboarding check
@@ -430,15 +389,6 @@ export default function PrivateLayout() {
         phase1OnboardingStatus.faceVerificationStatus === 'pending'
       ) &&
       phase1OnboardingStatus.normalPhotoCount >= MIN_PHOTOS_REQUIRED;
-
-    if (__DEV__) {
-      console.log('[PRIVATE_GUARD]', {
-        onboardingCompleted: phase1OnboardingStatus.onboardingCompleted,
-        faceStatus: phase1OnboardingStatus.faceVerificationStatus,
-        normalPhotoCount: phase1OnboardingStatus.normalPhotoCount,
-        action: isPhase1Complete ? 'allow_private' : 'redirect_to_onboarding',
-      });
-    }
 
     if (!isPhase1Complete) {
       didRedirectRef.current = true;
@@ -464,20 +414,7 @@ export default function PrivateLayout() {
     // (local store is in-memory only, so phase2OnboardingCompleted resets to false on app restart)
     if (!isDemoMode && !phase1OnboardingStatus) return;
 
-    if (__DEV__) {
-      console.log('[P2_GATE] private layout check', {
-        onboardingComplete,
-        phase2OnboardingCompleted_local: phase2OnboardingCompleted,
-        phase2OnboardingCompleted_backend: phase1OnboardingStatus?.phase2OnboardingCompleted,
-        isDemoMode,
-        willRedirect: !onboardingComplete,
-      });
-    }
-
     if (!onboardingComplete) {
-      if (__DEV__) {
-        console.log('[P2_GATE] redirect reason: onboardingComplete is false, bouncing to onboarding');
-      }
       didRedirectRef.current = true;
       requestAnimationFrame(() => {
         if (!mountedRef.current) return; // Guard against unmount during frame delay
@@ -485,23 +422,6 @@ export default function PrivateLayout() {
       });
     }
   }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus, isInPhase2, phase2OnboardingCompleted]);
-
-  if (!hasHydrated) {
-    if (__DEV__) console.log('[DEEPCONNECT_GATE_PENDING] hydration');
-  }
-
-  if (!onboardingComplete) {
-    if (__DEV__) console.log('[DEEPCONNECT_GATE_PENDING] onboarding incomplete');
-  }
-
-  p2PathTraceRenderRef.current += 1;
-  if (__DEV__ && p2PathTraceRenderRef.current <= 5) {
-    console.log('[P2_LAYOUT_PATH_TRACE]', {
-      pathname,
-      segments: segmentStrings,
-      renderCount: p2PathTraceRenderRef.current,
-    });
-  }
 
   return (
     <AppErrorBoundary name="Phase2Private">

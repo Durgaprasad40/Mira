@@ -238,8 +238,8 @@ export default function Index() {
           }
           statusPromise = getDemoOnboardingStatus(token);
         } else {
-          // FIX: Backend expects { userId }, not { token }
           statusPromise = convex.query(api.users.getOnboardingStatus, {
+            token,
             userId,
           });
         }

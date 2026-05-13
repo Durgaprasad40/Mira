@@ -125,10 +125,9 @@ export default function PhotoUploadScreen() {
 
   // BUG FIX: Query onboarding status to check if reference photo already exists
   // C4 FIX: Include queryEnabled in skip condition to allow forced re-subscription
-  // FIX: Backend expects { userId }, not { token }
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId && queryEnabled ? { userId } : 'skip'
+    !isDemoMode && userId && token && queryEnabled ? { token, userId } : 'skip'
   );
 
   // Local state for immediate preview update

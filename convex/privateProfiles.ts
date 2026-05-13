@@ -1,15 +1,15 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { internalMutation, internalQuery, mutation, query } from './_generated/server';
 import { isPrivateDataDeleted } from './privateDeletion';
-import { resolveUserIdByAuthId, validateOwnership } from './helpers';
+import { resolveUserIdByAuthId, validateOwnership, validateSessionToken } from './helpers';
 import {
   CURRENT_PHASE2_SETUP_VERSION,
   PHASE2_BOUNDARY_KEYS,
   PHASE2_DESIRE_TAG_KEYS,
   PHASE2_INTENT_KEYS,
+  sanitizePhase2PromptAnswersForBackend,
 } from './phase2Constants';
-
-const DEBUG_PHASE2_BACKEND = process.env.DEBUG_PHASE2 === "true";
+import { validateOwnedSafePrivatePhotoUrls } from './phase2PrivatePhotos';
 
 const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
 const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
@@ -84,9 +84,6 @@ function validatePhase2DisplayName(
 
   return { ok: true, trimmed };
 }
-const PHASE2_PROMPT_ANSWER_MIN_LENGTH = 5;
-const PHASE2_PROMPT_ANSWER_MAX_LENGTH = 250;
-const PHASE2_MAX_PROMPTS = 10;
 const PHASE2_HEIGHT_MIN = 120;
 const PHASE2_HEIGHT_MAX = 230;
 const PHASE2_WEIGHT_MIN = 30;
@@ -180,59 +177,6 @@ function sanitizePrivateBio(
   }
 
   return { ok: true, value: trimmed };
-}
-
-function sanitizePromptAnswers(
-  promptAnswers:
-    | Array<{ promptId: string; question: string; answer: string }>
-    | undefined,
-):
-  | { ok: true; value?: Array<{ promptId: string; question: string; answer: string }> }
-  | { ok: false; error: string } {
-  if (promptAnswers === undefined) {
-    return { ok: true };
-  }
-
-  if (promptAnswers.length > PHASE2_MAX_PROMPTS) {
-    return {
-      ok: false,
-      error: `promptAnswers must contain ${PHASE2_MAX_PROMPTS} or fewer items`,
-    };
-  }
-
-  const trimmed = promptAnswers.map((prompt) => ({
-    ...prompt,
-    question: prompt.question.trim(),
-    answer: prompt.answer.trim(),
-  }));
-
-  // Defensive dedupe by promptId — keep the LAST entry for each promptId so
-  // bulk writes that accidentally re-include a stale row don't end up rendering
-  // the same prompt twice. Empty promptIds are kept as-is.
-  const seenIds = new Set<string>();
-  const sanitized: typeof trimmed = [];
-  for (let i = trimmed.length - 1; i >= 0; i--) {
-    const prompt = trimmed[i];
-    if (prompt.promptId) {
-      if (seenIds.has(prompt.promptId)) continue;
-      seenIds.add(prompt.promptId);
-    }
-    sanitized.unshift(prompt);
-  }
-
-  for (const prompt of sanitized) {
-    if (
-      prompt.answer.length < PHASE2_PROMPT_ANSWER_MIN_LENGTH ||
-      prompt.answer.length > PHASE2_PROMPT_ANSWER_MAX_LENGTH
-    ) {
-      return {
-        ok: false,
-        error: `promptAnswers answers must be ${PHASE2_PROMPT_ANSWER_MIN_LENGTH}-${PHASE2_PROMPT_ANSWER_MAX_LENGTH} characters`,
-      };
-    }
-  }
-
-  return { ok: true, value: sanitized };
 }
 
 function validateEnumKeys(
@@ -429,7 +373,7 @@ function validateLifestyleFields(args: {
   return { ok: true };
 }
 
-export const debugAgeSourcesByAuthUserId = query({
+export const debugAgeSourcesByAuthUserId = internalQuery({
   args: { authUserId: v.string() },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -453,7 +397,7 @@ export const debugAgeSourcesByAuthUserId = query({
   },
 });
 
-export const backfillPrivateProfileAgeByAuthUserId = mutation({
+export const backfillPrivateProfileAgeByAuthUserId = internalMutation({
   args: { authUserId: v.string() },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -489,8 +433,16 @@ export const backfillPrivateProfileAgeByAuthUserId = mutation({
 
 // Get private profile by user ID
 export const getByUserId = query({
-  args: { userId: v.id('users') },
+  args: {
+    token: v.string(),
+    userId: v.id('users'),
+  },
   handler: async (ctx, args) => {
+    const viewerId = await validateSessionToken(ctx, args.token.trim());
+    if (!viewerId || viewerId !== args.userId) {
+      throw new Error('Unauthorized: private profile self-read required');
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
     if (isDeleted) {
@@ -546,6 +498,15 @@ export const upsert = mutation({
     if (isDeleted) {
       throw new Error('Cannot update profile while deletion is pending');
     }
+    const photoValidation = await validateOwnedSafePrivatePhotoUrls(
+      ctx,
+      args.userId,
+      args.privatePhotoUrls,
+      { requireMinimum: true },
+    );
+    if (!photoValidation.ok) {
+      throw new Error(photoValidation.error);
+    }
 
     const existing = await ctx.db
       .query('userPrivateProfiles')
@@ -561,10 +522,14 @@ export const upsert = mutation({
       args.privateDesireTagKeys,
     ) ?? [];
     const { privateIntentKey: _legacyPrivateIntentKey, ...profileArgs } = args;
+    const safeProfileArgs = {
+      ...profileArgs,
+      privatePhotoUrls: photoValidation.urls,
+    };
 
     if (existing) {
       await ctx.db.patch(existing._id, {
-        ...profileArgs,
+        ...safeProfileArgs,
         privateIntentKeys,
         privateDesireTagKeys,
         updatedAt: now,
@@ -573,7 +538,7 @@ export const upsert = mutation({
     }
 
     const profileId = await ctx.db.insert('userPrivateProfiles', {
-      ...profileArgs,
+      ...safeProfileArgs,
       privateIntentKeys,
       privateDesireTagKeys,
       createdAt: now,
@@ -643,6 +608,18 @@ export const updateFields = mutation({
         cleanUpdates[key] = value;
       }
     }
+    if (args.privatePhotoUrls !== undefined) {
+      const photoValidation = await validateOwnedSafePrivatePhotoUrls(
+        ctx,
+        args.userId,
+        args.privatePhotoUrls,
+        { requireMinimum: true },
+      );
+      if (!photoValidation.ok) {
+        throw new Error(photoValidation.error);
+      }
+      cleanUpdates.privatePhotoUrls = photoValidation.urls;
+    }
     if (privateIntentKeys !== undefined) {
       cleanUpdates.privateIntentKeys = privateIntentKeys;
     }
@@ -680,10 +657,19 @@ export const updateBlurredPhotos = mutation({
     if (!existing) {
       throw new Error('Private profile not found');
     }
+    const photoValidation = await validateOwnedSafePrivatePhotoUrls(
+      ctx,
+      args.userId,
+      args.privatePhotoUrls,
+      { requireMinimum: true },
+    );
+    if (!photoValidation.ok) {
+      throw new Error(photoValidation.error);
+    }
 
     await ctx.db.patch(existing._id, {
       privatePhotosBlurred: args.privatePhotosBlurred,
-      privatePhotoUrls: args.privatePhotoUrls,
+      privatePhotoUrls: photoValidation.urls,
       updatedAt: Date.now(),
     });
 
@@ -790,7 +776,7 @@ export const updateFieldsByAuthId = mutation({
       return { success: false, error: bioValidation.error };
     }
 
-    const promptValidation = sanitizePromptAnswers(args.promptAnswers);
+    const promptValidation = sanitizePhase2PromptAnswersForBackend(args.promptAnswers);
     if (!promptValidation.ok) {
       return { success: false, error: promptValidation.error };
     }
@@ -847,7 +833,6 @@ export const updateFieldsByAuthId = mutation({
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
-      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: deletion pending');
       return { success: false, error: 'deletion_pending' };
     }
 
@@ -857,7 +842,6 @@ export const updateFieldsByAuthId = mutation({
       .first();
 
     if (!existing) {
-      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: profile not found');
       return { success: false, error: 'profile_not_found' };
     }
 
@@ -874,6 +858,18 @@ export const updateFieldsByAuthId = mutation({
     for (const [key, value] of Object.entries(updates)) {
       if (value === undefined || value === null) continue;
       cleanUpdates[key] = value;
+    }
+    if (args.privatePhotoUrls !== undefined) {
+      const photoValidation = await validateOwnedSafePrivatePhotoUrls(
+        ctx,
+        userId,
+        args.privatePhotoUrls,
+        { requireMinimum: true },
+      );
+      if (!photoValidation.ok) {
+        return { success: false, error: photoValidation.error };
+      }
+      cleanUpdates.privatePhotoUrls = photoValidation.urls;
     }
     if (privateIntentKeys !== undefined) {
       cleanUpdates.privateIntentKeys = privateIntentKeys;
@@ -900,15 +896,10 @@ export const updateFieldsByAuthId = mutation({
       const fixedAge = ageFromUser(user);
       if (fixedAge > 0) {
         cleanUpdates.age = fixedAge;
-        console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: healed age', {
-          previousAge: existing.age,
-          fixedAge,
-        });
       }
     }
 
     await ctx.db.patch(existing._id, cleanUpdates);
-    console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: success');
     return { success: true };
   },
 });
@@ -1046,7 +1037,40 @@ export const updateDisplayNameByAuthId = mutation({
       .first();
 
     if (!existing) {
-      return { success: false, error: 'profile_not_found' as const };
+      const now = Date.now();
+      const user = await ctx.db.get(userId);
+      const derivedAge = ageFromUser(user);
+      const adultAgeConfirmed = derivedAge >= 18;
+
+      const profileId = await ctx.db.insert('userPrivateProfiles', {
+        userId,
+        displayName: trimmed,
+        displayNameEditCount: 0,
+        lastDisplayNameEditedAt: now,
+        phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
+        age: derivedAge,
+        gender: user?.gender || '',
+        privateBio: '',
+        privateIntentKeys: [],
+        privatePhotoUrls: [],
+        city: user?.city || '',
+        isPrivateEnabled: true,
+        ageConfirmed18Plus: adultAgeConfirmed,
+        ...(adultAgeConfirmed ? { ageConfirmedAt: now } : {}),
+        privatePhotosBlurred: [],
+        privatePhotoBlurLevel: 0,
+        privateDesireTagKeys: [],
+        privateBoundaries: [],
+        revealPolicy: 'mutual_only',
+        isSetupComplete: false,
+        hobbies: user?.activities || [],
+        isVerified: user?.isVerified || false,
+        promptAnswers: [],
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      return { success: true as const, profileId, displayNameEditCount: 0 };
     }
 
     const currentCount = (existing as any).displayNameEditCount ?? 0;
@@ -1194,7 +1218,7 @@ export const syncFromMainProfile = mutation({
  * - If age is 0/invalid and user has DOB, patches age
  * - Returns counts for reporting
  */
-export const backfillPrivateProfileAges = mutation({
+export const backfillPrivateProfileAges = internalMutation({
   args: {},
   handler: async (ctx) => {
     const profiles = await ctx.db.query('userPrivateProfiles').collect();
@@ -1252,7 +1276,6 @@ export const saveOnboardingPhotos = mutation({
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
-      console.warn('[PRIVATE_PROFILE] saveOnboardingPhotos: deletion pending');
       return { success: false, error: 'deletion_pending' };
     }
 
@@ -1262,11 +1285,20 @@ export const saveOnboardingPhotos = mutation({
       .first();
 
     const now = Date.now();
+    const photoValidation = await validateOwnedSafePrivatePhotoUrls(
+      ctx,
+      userId,
+      args.privatePhotoUrls,
+      { requireMinimum: true },
+    );
+    if (!photoValidation.ok) {
+      return { success: false, error: photoValidation.error };
+    }
 
     if (existing) {
       // Build patch object starting with photos
       const patch: Record<string, unknown> = {
-        privatePhotoUrls: args.privatePhotoUrls,
+        privatePhotoUrls: photoValidation.urls,
         phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
         updatedAt: now,
       };
@@ -1282,15 +1314,10 @@ export const saveOnboardingPhotos = mutation({
         const fixedAge = ageFromUser(user);
         if (fixedAge > 0) {
           patch.age = fixedAge;
-          console.log('[PRIVATE_PROFILE] saveOnboardingPhotos: healed age', {
-            previousAge: existing.age,
-            fixedAge,
-          });
         }
       }
 
       await ctx.db.patch(existing._id, patch);
-      console.log('[PRIVATE_PROFILE] saveOnboardingPhotos: updated existing profile');
       return { success: true, profileId: existing._id };
     }
 
@@ -1319,7 +1346,7 @@ export const saveOnboardingPhotos = mutation({
       gender: user?.gender || '',
       privateBio: '',
       privateIntentKeys: [],
-      privatePhotoUrls: args.privatePhotoUrls,
+      privatePhotoUrls: photoValidation.urls,
       city: user?.city || '',
       isPrivateEnabled: true,
       ageConfirmed18Plus: true,
@@ -1344,7 +1371,6 @@ export const saveOnboardingPhotos = mutation({
       createdAt: now,
       updatedAt: now,
     });
-    console.log('[PRIVATE_PROFILE] saveOnboardingPhotos: created skeleton profile');
     return { success: true, profileId };
   },
 });
@@ -1369,20 +1395,12 @@ export const getByAuthUserId = query({
     // Verify the user exists (ownership check via ID resolution)
     const user = await ctx.db.get(userId);
     if (!user) {
-      if (DEBUG_PHASE2_BACKEND) {
-        console.log('[P2_PROFILE_QUERY] getByAuthUserId: user record not found', {
-          userId: (userId as string)?.substring(0, 8),
-        });
-      }
       return null;
     }
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
-      if (DEBUG_PHASE2_BACKEND) {
-        console.log('[P2_PROFILE_QUERY] getByAuthUserId: deletion pending');
-      }
       return null;
     }
 
@@ -1392,11 +1410,6 @@ export const getByAuthUserId = query({
       .first();
 
     if (!profile) {
-      if (DEBUG_PHASE2_BACKEND) {
-        console.log('[P2_PROFILE_QUERY] getByAuthUserId: no profile found', {
-          userId: userId?.substring(0, 8),
-        });
-      }
       return null;
     }
 
@@ -1461,11 +1474,6 @@ export const getAndHealByAuthUserId = mutation({
         await ctx.db.patch(profile._id, {
           age: fixedAge,
           updatedAt: Date.now(),
-        });
-        console.log('[PRIVATE_PROFILE] getAndHealByAuthUserId: healed age', {
-          userId: userId.substring(0, 8),
-          previousAge: profile.age,
-          fixedAge,
         });
         // Return corrected value
         returnProfile = { ...profile, age: fixedAge };
@@ -1541,7 +1549,7 @@ export const upsertByAuthId = mutation({
       return { success: false, error: 'invalid_bio_required' as const };
     }
 
-    const promptValidation = sanitizePromptAnswers(args.promptAnswers);
+    const promptValidation = sanitizePhase2PromptAnswersForBackend(args.promptAnswers);
     if (!promptValidation.ok) {
       return { success: false, error: promptValidation.error };
     }
@@ -1590,15 +1598,22 @@ export const upsertByAuthId = mutation({
 
     const user = await ctx.db.get(userId);
     if (!user) {
-      console.warn('[PRIVATE_PROFILE] upsertByAuthId: user record not found');
       return { success: false, error: 'user_not_found' };
     }
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
-      console.warn('[PRIVATE_PROFILE] upsertByAuthId: cannot update while deletion pending');
       return { success: false, error: 'deletion_pending' };
+    }
+    const photoValidation = await validateOwnedSafePrivatePhotoUrls(
+      ctx,
+      userId,
+      args.privatePhotoUrls,
+      { requireMinimum: true },
+    );
+    if (!photoValidation.ok) {
+      return { success: false, error: photoValidation.error };
     }
 
     const existing = await ctx.db
@@ -1617,7 +1632,7 @@ export const upsertByAuthId = mutation({
       gender: user?.gender || args.gender,
       privateBio: bioValidation.value,
       privateIntentKeys,
-      privatePhotoUrls: args.privatePhotoUrls,
+      privatePhotoUrls: photoValidation.urls,
       city: args.city || '',
       isPrivateEnabled: args.isPrivateEnabled ?? true,
       ageConfirmed18Plus: args.ageConfirmed18Plus ?? true,
@@ -1627,14 +1642,10 @@ export const upsertByAuthId = mutation({
       privateDesireTagKeys,
       privateBoundaries: args.privateBoundaries ?? [],
       revealPolicy: args.revealPolicy ?? 'mutual_only',
-      // DEEPCONNECT-ELIGIBILITY-FIX: Preserve an already-complete profile's
-      // discovery eligibility when the client omits `isSetupComplete` on edit.
-      // Previously this fell back to `false`, silently knocking a completed
-      // profile out of Deep Connect every time the client called the upsert
-      // path without re-asserting the flag (e.g. minor edits, partial syncs).
-      // Order: explicit arg overrides; otherwise keep whatever was on the
-      // existing row; only on first-create with no flag, default to false.
-      isSetupComplete: args.isSetupComplete ?? existing?.isSetupComplete ?? false,
+      // Completion is canonical-only: clients may keep sending legacy
+      // isSetupComplete, but this mutation can only preserve a previously
+      // completed row. New completion must go through users.setPhase2OnboardingCompleted.
+      isSetupComplete: existing?.isSetupComplete === true,
       hobbies: args.hobbies ?? [],
       isVerified: args.isVerified ?? false,
       // Phase-2 Onboarding Step 3: Prompt answers
@@ -1675,7 +1686,6 @@ export const upsertByAuthId = mutation({
         ...rest,
         updatedAt: now,
       });
-      console.log('[PRIVATE_PROFILE] upsertByAuthId: updated existing profile');
       return { success: true, profileId: existing._id };
     }
 
@@ -1687,7 +1697,6 @@ export const upsertByAuthId = mutation({
       createdAt: now,
       updatedAt: now,
     });
-    console.log('[PRIVATE_PROFILE] upsertByAuthId: created new profile');
     return { success: true, profileId };
   },
 });
@@ -1702,6 +1711,7 @@ export const upsertByAuthId = mutation({
  */
 export const updatePhotoBlurSlots = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     photoBlurSlots: v.optional(v.array(v.boolean())),
     photoBlurEnabled: v.optional(v.boolean()),
@@ -1711,11 +1721,7 @@ export const updatePhotoBlurSlots = mutation({
       throw new Error('photoBlurSlots or photoBlurEnabled required');
     }
 
-    // Resolve auth ID to user ID
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
     // Find existing profile
     const existing = await ctx.db

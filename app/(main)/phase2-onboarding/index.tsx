@@ -169,29 +169,27 @@ export default function Phase2OnboardingConsentScreen() {
     setIsSubmitting(true);
     setNicknameRemoteError(null);
     try {
-      if (currentPrivateProfile) {
-        const existingDisplayName =
-          typeof currentPrivateProfile.displayName === 'string'
-            ? currentPrivateProfile.displayName.trim()
-            : '';
+      const existingDisplayName =
+        typeof currentPrivateProfile?.displayName === 'string'
+          ? currentPrivateProfile.displayName.trim()
+          : '';
 
-        if (nextNickname !== existingDisplayName) {
-          const updateResult = await updateDisplayName({
-            token,
-            authUserId: userId,
-            displayName: nextNickname,
-          });
+      if (!currentPrivateProfile || nextNickname !== existingDisplayName) {
+        const updateResult = await updateDisplayName({
+          token,
+          authUserId: userId,
+          displayName: nextNickname,
+        });
 
-          if (!updateResult?.success) {
-            if (updateResult?.error === 'Nickname change limit reached') {
-              Alert.alert('Nickname locked', 'You have already used your Private Mode nickname change.');
-              return;
-            }
-
-            setNicknameRemoteError('That nickname is not allowed. Please try another.');
-            setNicknameTouched(true);
+        if (!updateResult?.success) {
+          if (updateResult?.error === 'Nickname change limit reached') {
+            Alert.alert('Nickname locked', 'You have already used your Private Mode nickname change.');
             return;
           }
+
+          setNicknameRemoteError('That nickname is not allowed. Please try another.');
+          setNicknameTouched(true);
+          return;
         }
       }
 

@@ -70,7 +70,7 @@ export default function Phase2ReviewScreen() {
   // FIX: Use getOnboardingStatus with userId instead of getPhase2OnboardingState with token
   const onboardingState = useQuery(
     api.users.getOnboardingStatus,
-    userId ? { userId } : 'skip'
+    userId && token ? { token, userId } : 'skip'
   );
 
   // FIX: Use setPhase2OnboardingCompleted with userId instead of finalizeOnboardingProfile with token
@@ -106,7 +106,7 @@ export default function Phase2ReviewScreen() {
   );
 
   const selectedIntents = useMemo(
-    () => PRIVATE_INTENT_CATEGORIES.filter((intent) => intentKeys.includes(intent.key as any)),
+    () => PRIVATE_INTENT_CATEGORIES.filter((intent) => intentKeys.includes(intent.key)),
     [intentKeys]
   );
   const validPromptAnswers = useMemo(
@@ -176,23 +176,7 @@ export default function Phase2ReviewScreen() {
   }, [bioLength, hasSection1Complete, intentKeys.length, validPhotoUrls.length]);
 
   const handleComplete = async () => {
-    if (__DEV__) {
-      console.log('[P2_STEP5] continue pressed', {
-        userId: userId?.substring(0, 8),
-        canComplete,
-        isFinalizingRef: isFinalizingRef.current,
-      });
-    }
-
     if (!userId || !token || !canComplete || isFinalizingRef.current) {
-      if (__DEV__) {
-        console.log('[P2_STEP5] early exit', {
-          noUserId: !userId,
-          cannotComplete: !canComplete,
-          alreadyFinalizing: isFinalizingRef.current,
-          missingItems,
-        });
-      }
       return;
     }
 
@@ -200,21 +184,16 @@ export default function Phase2ReviewScreen() {
     setIsSubmitting(true);
 
     try {
-      if (__DEV__) console.log('[P2_STEP5] finalize start');
       const profileResult = await finalizeOnboardingProfile({ token, authUserId: userId });
-      if (__DEV__) console.log('[P2_STEP5] finalize result', profileResult);
 
       if (!profileResult?.success) {
         throw new Error('Profile save did not succeed');
       }
 
-      if (__DEV__) console.log('[P2_STEP5] calling completeSetup()');
       completeSetup();
 
-      if (__DEV__) console.log('[P2_STEP5] routing to deep-connect');
       router.replace('/(main)/(private)/(tabs)/deep-connect' as any);
-    } catch (error) {
-      if (__DEV__) console.error('[P2_STEP5] finalize error', error);
+    } catch {
       Alert.alert(
         'Unable to finish setup',
         'Your Private Mode profile was not created. Please try again.'
@@ -248,16 +227,6 @@ export default function Phase2ReviewScreen() {
   }
 
   if (!currentUser || !currentPrivateProfile) {
-    if (__DEV__) {
-      console.log('[P2_REVIEW_GATE] blocked because data missing', {
-        userId: userId?.substring(0, 8),
-        hasCurrentUser: !!currentUser,
-        currentUserUndefined: currentUser === undefined,
-        hasCurrentPrivateProfile: !!currentPrivateProfile,
-        currentPrivateProfileUndefined: currentPrivateProfile === undefined,
-        reason: !currentUser ? 'currentUser is falsy' : 'currentPrivateProfile is falsy',
-      });
-    }
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.centerState}>
