@@ -30,6 +30,7 @@ const COLORS = {
 
 type TodConnectRequestsSheetProps = {
   visible: boolean;
+  token: string | null | undefined;
   authUserId: string | null | undefined;
   focusRequestId?: string | null;
   onClose: () => void;
@@ -43,6 +44,7 @@ function getPendingLabel(count: number): string {
 
 export function TodConnectRequestsSheet({
   visible,
+  token,
   authUserId,
   focusRequestId,
   onClose,
@@ -50,7 +52,7 @@ export function TodConnectRequestsSheet({
   const router = useRouter();
   const requests = useQuery(
     api.truthDare.getPendingTodConnectRequestInbox,
-    visible && authUserId ? { authUserId } : 'skip'
+    visible && token && authUserId ? { token, authUserId } : 'skip'
   );
 
   const orderedRequests = useMemo(() => {
@@ -65,7 +67,7 @@ export function TodConnectRequestsSheet({
 
   const openChat = (conversationId: string) => {
     onClose();
-    router.push(`/(main)/incognito-chat?id=${encodeURIComponent(conversationId)}` as any);
+    router.push(`/(main)/(private)/(tabs)/chats/${encodeURIComponent(conversationId)}` as any);
   };
 
   const openPrompt = (request: TodConnectInboxRequest) => {
@@ -81,7 +83,7 @@ export function TodConnectRequestsSheet({
     });
   };
 
-  const isLoading = requests === undefined;
+  const isLoading = Boolean(visible && token && authUserId && requests === undefined);
 
   return (
     <Modal

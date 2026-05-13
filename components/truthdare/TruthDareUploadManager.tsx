@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef } from 'react';
-import * as FileSystem from 'expo-file-system';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -48,16 +47,6 @@ function getTodUploadOptions(
     maxBytes: TOD_MEDIA_LIMITS[kind].maxBytes,
     limitMessage: formatTodMediaLimit(kind),
   };
-}
-
-async function getLocalFileSizeBytes(localUri?: string): Promise<number | undefined> {
-  if (!localUri) return undefined;
-  try {
-    const info = await FileSystem.getInfoAsync(localUri);
-    return typeof (info as any).size === 'number' ? (info as any).size : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function extractCleanTodUploadErrorMessage(error: unknown): string {
@@ -154,12 +143,24 @@ export function TruthDareUploadManager() {
     const trackedStorageIds: string[] = [];
     let mediaStorageId = item.storageId;
     let authorPhotoStorageId = item.authorPhotoStorageId;
-    let uploadedMediaSizeBytes: number | undefined;
     let lastProgressAt = 0;
+
+    const ensureCurrentUser = () => {
+      const authState = useAuthStore.getState();
+      if (authState.userId !== item.userId) {
+        throw new Error('Upload cancelled after user switch');
+      }
+      if (!authState.token) {
+        throw new Error('Upload requires an active session');
+      }
+      return authState.token;
+    };
 
     const trackStorageId = async (storageId: string | undefined) => {
       if (!storageId) return;
+      const token = ensureCurrentUser();
       await trackPendingTodUploads({
+        token,
         storageIds: [storageId as Id<'_storage'>],
         authUserId: item.userId,
       });
@@ -169,20 +170,14 @@ export function TruthDareUploadManager() {
     const cleanupTrackedUploads = async () => {
       if (trackedStorageIds.length === 0) return;
       try {
+        const token = ensureCurrentUser();
         await cleanupPendingTodUploads({
+          token,
           storageIds: trackedStorageIds as Id<'_storage'>[],
           authUserId: item.userId,
         });
-      } catch (cleanupError) {
-        if (__DEV__) {
-          console.warn('[T/D UPLOAD QUEUE] cleanup failed', cleanupError);
-        }
-      }
-    };
-
-    const ensureCurrentUser = () => {
-      if (useAuthStore.getState().userId !== item.userId) {
-        throw new Error('Upload cancelled after user switch');
+      } catch {
+        // Best-effort cleanup only; the queue surfaces the upload failure.
       }
     };
 
@@ -194,20 +189,9 @@ export function TruthDareUploadManager() {
         ensureCurrentUser();
         const mediaType = uploadKindFor(item.attachment.kind);
         const limitKind = limitKindFor(item.attachment.kind);
-        const sizeBytes = await getLocalFileSizeBytes(item.attachment.localUri);
-        uploadedMediaSizeBytes = sizeBytes;
-        if (__DEV__) {
-          console.log('[TOD_UPLOAD_DEBUG] media_kind', {
-            kind: item.attachment.kind,
-            sizeBytes,
-            durationMs: item.attachment.durationMs,
-            durationSecSent: item.durationSec ?? item.attachment.durationSec,
-            mime: item.mediaMime ?? item.attachment.mime,
-          });
-        }
         mediaStorageId = await uploadMediaToConvexWithProgress(
           item.attachment.localUri,
-          () => generateUploadUrl({ authUserId: item.userId }),
+          () => generateUploadUrl({ token: ensureCurrentUser(), authUserId: item.userId }),
           mediaType,
           (progress) => {
             const now = Date.now();
@@ -228,7 +212,7 @@ export function TruthDareUploadManager() {
         ensureCurrentUser();
         authorPhotoStorageId = await uploadMediaToConvexWithProgress(
           item.authorPhotoLocalUri,
-          () => generateUploadUrl({ authUserId: item.userId }),
+          () => generateUploadUrl({ token: ensureCurrentUser(), authUserId: item.userId }),
           'photo',
           undefined,
           getTodUploadOptions('photo', item.authorPhotoLocalUri, 'image/jpeg')
@@ -243,16 +227,8 @@ export function TruthDareUploadManager() {
 
       ensureCurrentUser();
       const durationSecSent = item.durationSec ?? item.attachment?.durationSec;
-      if (__DEV__ && item.attachment) {
-        console.log('[TOD_UPLOAD_DEBUG] createOrEditAnswer', {
-          kind: item.attachment.kind,
-          sizeBytes: uploadedMediaSizeBytes,
-          durationMs: item.attachment.durationMs,
-          durationSecSent,
-          mime: item.mediaMime,
-        });
-      }
       const result = await createOrEditAnswer({
+        token: ensureCurrentUser(),
         promptId: item.promptId,
         userId: item.userId,
         text: item.text?.trim() || undefined,
@@ -275,14 +251,14 @@ export function TruthDareUploadManager() {
 
       if (trackedStorageIds.length > 0) {
         try {
+          const token = ensureCurrentUser();
           await releasePendingTodUploads({
+            token,
             storageIds: trackedStorageIds as Id<'_storage'>[],
             authUserId: item.userId,
           });
-        } catch (releaseError) {
-          if (__DEV__) {
-            console.warn('[T/D UPLOAD QUEUE] release failed', releaseError);
-          }
+        } catch {
+          // Release is best effort; retry cleanup handles stale pending rows.
         }
       }
 

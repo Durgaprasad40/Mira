@@ -36,6 +36,7 @@ type CacheEntry = TodMediaPreloadState & {
 
 type UseTodMediaPreloadArgs = {
   answers: TodMediaPreloadAnswer[];
+  token?: string | null;
   authUserId?: string | null;
   viewableAnswerIds?: Set<string>;
   enabled?: boolean;
@@ -104,6 +105,7 @@ async function warmUrl(kind: TodMediaKind, url: string): Promise<void> {
 
 export function useTodMediaPreload({
   answers,
+  token,
   authUserId,
   viewableAnswerIds,
   enabled = true,
@@ -181,9 +183,6 @@ export function useTodMediaPreload({
       const key = getCacheKey(answer);
       const current = preloadCache.get(key);
       if (current?.status === 'ready' || current?.status === 'loading') {
-        if (__DEV__ && current.status === 'ready') {
-          console.log('[TOD_MEDIA_PRELOAD] cache_hit', { answerId, kind: current.kind });
-        }
         return;
       }
       if (inFlightRef.current.has(key)) return;
@@ -205,16 +204,9 @@ export function useTodMediaPreload({
           inFlightRef.current.delete(key);
           timeoutRefs.current.delete(key);
           touchCacheEntry(key, { status: 'error', kind: answerKind, error: 'timeout' }, answerId);
-          if (__DEV__) {
-            console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answerKind, reason: 'timeout' });
-          }
           notify();
         }, PRELOAD_TIMEOUT_MS),
       );
-
-      if (__DEV__) {
-        console.log('[TOD_MEDIA_PRELOAD] queued', { answerId, kind: answerKind });
-      }
 
       try {
         let preloadResult:
@@ -236,7 +228,11 @@ export function useTodMediaPreload({
             isFrontCamera: answer.isFrontCamera,
           };
         } else {
+          if (!token) {
+            throw new Error('UNAUTHORIZED');
+          }
           preloadResult = await convex.query(api.truthDare.preloadAnswerMediaUrl, {
+            token,
             answerId,
             authUserId,
           });
@@ -255,9 +251,6 @@ export function useTodMediaPreload({
         if (!preloadResult?.url || !isMediaKind(preloadResult.kind)) {
           clearPreloadTimeout(key);
           touchCacheEntry(key, { status: 'error', kind: answerKind, error: 'unavailable' }, answerId);
-          if (__DEV__) {
-            console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answerKind, reason: 'unavailable' });
-          }
           notify();
           return;
         }
@@ -278,9 +271,6 @@ export function useTodMediaPreload({
           answerId,
         );
 
-        if (__DEV__) {
-          console.log('[TOD_MEDIA_PRELOAD] success', { answerId, kind: preloadResult.kind });
-        }
         notify();
       } catch (error) {
         // Same rationale as the success branch above: always commit a
@@ -289,9 +279,6 @@ export function useTodMediaPreload({
         clearPreloadTimeout(key);
         const message = error instanceof Error ? error.message : 'preload_failed';
         touchCacheEntry(key, { status: 'error', kind: answerKind, error: message }, answerId);
-        if (__DEV__) {
-          console.log('[TOD_MEDIA_PRELOAD] failed', { answerId, kind: answerKind, reason: message });
-        }
         notify();
       } finally {
         inFlightRef.current.delete(key);
@@ -316,7 +303,7 @@ export function useTodMediaPreload({
       cancelled = true;
       targetAnswers.forEach((answer) => clearPreloadTimeout(getCacheKey(answer)));
     };
-  }, [authUserId, clearPreloadTimeout, convex, enabled, notify, targetAnswers]);
+  }, [authUserId, token, clearPreloadTimeout, convex, enabled, notify, targetAnswers]);
 
   const getPreloadState = useCallback((answer: TodMediaPreloadAnswer): TodMediaPreloadState => {
     return getCachedState(answer);

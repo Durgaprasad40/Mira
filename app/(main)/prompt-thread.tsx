@@ -40,6 +40,9 @@ const C = INCOGNITO_COLORS;
 const PHASE2_TOD_HOME_ROUTE = '/(main)/(private)/(tabs)/truth-or-dare';
 const PHASE2_TOD_MINE_ROUTE = '/(main)/(private)/my-truth-or-dare';
 
+// Route name is legacy. This thread screen is part of the active Phase-2
+// Truth or Dare flow and is retained at this path for deep-link compatibility.
+
 // Premium color palette for elevated UI
 const PREMIUM = {
   bgDeep: '#0D0D1A',
@@ -282,17 +285,9 @@ function isRetryableTodError(error: unknown): boolean {
   );
 }
 
-const debugTodLog = (...args: unknown[]) => {
-  if (__DEV__) {
-    console.log(...args);
-  }
-};
+const debugTodLog = (..._args: unknown[]) => {};
 
-const debugTodWarn = (...args: unknown[]) => {
-  if (__DEV__) {
-    console.warn(...args);
-  }
-};
+const debugTodWarn = (..._args: unknown[]) => {};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Card-body tile geometry
@@ -541,18 +536,16 @@ export default function PromptThreadScreen() {
 
 
   // Fetch thread data from Convex
-  // FIX: Backend expects { promptId, viewerUserId }, not { token }
   const threadData = useQuery(
     api.truthDare.getPromptThread,
-    promptId ? { promptId, viewerUserId: userId || undefined } : 'skip'
+    promptId && token ? { token, promptId, viewerUserId: userId || undefined } : 'skip'
   );
 
   // RECEIVER VISIBILITY: Fetch pending connect requests for this user
   // This allows non-prompt-owners (answer authors) to see incoming connect requests
-  // FIX: Backend expects { authUserId }, not { token }
   const pendingRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { token, authUserId: userId } : 'skip'
   );
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
@@ -627,7 +620,7 @@ export default function PromptThreadScreen() {
   // T&D Connect
   const sendConnectRequest = useMutation(api.truthDare.sendTodConnectRequest);
 
-  const isLoading = threadData === undefined;
+  const isLoading = Boolean(promptId && token && threadData === undefined);
   const prompt = threadData?.prompt;
   const answers = threadData?.answers ?? [];
   const visibleAnswerCount = prompt?.visibleAnswerCount ?? answers.length;
@@ -706,9 +699,10 @@ export default function PromptThreadScreen() {
 
   const { getPreloadState, revision: preloadRevision } = useTodMediaPreload({
     answers: answersForList,
+    token,
     authUserId: userId,
     viewableAnswerIds,
-    enabled: isThreadFocused && !!userId && !isExpired,
+    enabled: isThreadFocused && !!userId && !!token && !isExpired,
     lookaheadCount: 5,
   });
 
@@ -956,8 +950,8 @@ export default function PromptThreadScreen() {
           sound.pauseAsync().catch(() => {});
           playingVoiceSoundRef.current = null;
         }
-      } catch (err) {
-        console.error('[T/D voice tile] playback failed:', err);
+      } catch {
+        console.error('[T/D voice tile] playback failed');
         // If we created a sound just now and it's somehow broken,
         // remove it from the cache so the next tap re-creates it.
         const stale = audioCacheRef.current.get(audioUrl);
@@ -1211,7 +1205,7 @@ export default function PromptThreadScreen() {
 
   // Handle emoji reaction
   const handleReact = useCallback(async (answerId: string, emoji: string) => {
-    if (!userId) {
+    if (!userId || !token) {
       debugTodLog('[T/D REACTION] skip - no userId');
       return;
     }
@@ -1238,8 +1232,8 @@ export default function PromptThreadScreen() {
     });
 
     try {
-      if (!userId) return;
-      const result = await setReaction({ answerId, userId, emoji });
+      if (!userId || !token) return;
+      const result = await setReaction({ token, answerId, userId, emoji });
       // Handle server returning ok: false (no throw, graceful fail)
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
         debugTodWarn('[T/D REACTION] failed', { reason: (result as any).reason });
@@ -1255,11 +1249,11 @@ export default function PromptThreadScreen() {
     } finally {
       pendingReactionsRef.current.delete(answerId);
     }
-  }, [userId, setReaction]);
+  }, [token, userId, setReaction]);
 
   // Handle prompt emoji reaction
   const handlePromptReact = useCallback(async (emoji: string) => {
-    if (!userId || !promptId) {
+    if (!userId || !token || !promptId) {
       debugTodLog('[T/D PROMPT REACTION] skip - no userId or promptId');
       return;
     }
@@ -1273,7 +1267,7 @@ export default function PromptThreadScreen() {
     });
 
     try {
-      const result = await setPromptReaction({ promptId, userId, emoji });
+      const result = await setPromptReaction({ token, promptId, userId, emoji });
       if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
         debugTodWarn('[T/D PROMPT REACTION] failed', { reason: (result as any).reason });
       } else {
@@ -1285,7 +1279,7 @@ export default function PromptThreadScreen() {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
     }
-  }, [userId, promptId, setPromptReaction]);
+  }, [token, userId, promptId, setPromptReaction]);
 
   // Open report modal
   const handleReport = useCallback((answerId: string, authorId: string) => {
@@ -1307,9 +1301,10 @@ export default function PromptThreadScreen() {
 
     setIsSubmittingReport(true);
     try {
-      if (isReportingPrompt && promptId && userId) {
+      if (isReportingPrompt && promptId && userId && token) {
         // P0-002: Report the prompt
         const result = await reportPromptMutation({
+          token,
           promptId,
           reporterId: userId,
           reasonCode: selectedReportReason,
@@ -1324,9 +1319,10 @@ export default function PromptThreadScreen() {
         } else {
           Alert.alert('Reported', 'Thank you for your report. We will review it.');
         }
-      } else if (reportingAnswerId && userId) {
+      } else if (reportingAnswerId && userId && token) {
         // Report the answer
         const result = await reportAnswer({
+          token,
           answerId: reportingAnswerId,
           reporterId: userId,
           reasonCode: selectedReportReason,
@@ -1355,7 +1351,7 @@ export default function PromptThreadScreen() {
     } finally {
       setIsSubmittingReport(false);
     }
-  }, [userId, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, handleBackToSource]);
+  }, [token, userId, promptId, reportingAnswerId, isReportingPrompt, selectedReportReason, reportReasonText, reportAnswer, reportPromptMutation, handleBackToSource]);
 
   // Close report modal
   const closeReportModal = useCallback(() => {
@@ -1391,23 +1387,22 @@ export default function PromptThreadScreen() {
   }, []);
 
   // Handle delete own prompt
-  // FIX: Use authUserId instead of token for backend mutation
   const handleDeletePrompt = useCallback(async () => {
-    if (!userId || !promptId || !isPromptOwner) return;
+    if (!userId || !token || !promptId || !isPromptOwner) return;
     if (isDeletingPrompt) return; // Prevent double-tap
 
     setIsDeletingPrompt(true);
     try {
-      await deletePrompt({ promptId, authUserId: userId });
+      await deletePrompt({ token, promptId, authUserId: userId });
       setShowPromptActionPopup(false);
       handleBackToSource(); // Navigate back after successful delete
     } catch (error: any) {
-      console.error('[T/D] Delete prompt failed:', error);
+      console.error('[T/D] Delete prompt failed');
       Alert.alert('Error', error?.message || 'Failed to delete prompt. Please try again.');
     } finally {
       setIsDeletingPrompt(false);
     }
-  }, [userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, handleBackToSource]);
+  }, [token, userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, handleBackToSource]);
 
   // Handle edit - open the inline text editor. Edits are intentionally
   // text-only — type/identity/media are locked after posting because prompt
@@ -1429,7 +1424,7 @@ export default function PromptThreadScreen() {
 
   // Handle inline edit - save
   const handleSaveEditPrompt = useCallback(async () => {
-    if (!userId || !promptId || !editPromptText.trim()) return;
+    if (!userId || !token || !promptId || !editPromptText.trim()) return;
     if (isSavingPromptEdit) return;
 
     const trimmedText = editPromptText.trim();
@@ -1444,21 +1439,21 @@ export default function PromptThreadScreen() {
 
     setIsSavingPromptEdit(true);
     try {
-      await editPrompt({ promptId, authUserId: userId, newText: trimmedText });
+      await editPrompt({ token, promptId, authUserId: userId, newText: trimmedText });
       setIsEditingPrompt(false);
       setEditPromptText('');
       // Query will auto-refresh with new text
     } catch (error: any) {
-      console.error('[T/D] Edit prompt failed:', error);
+      console.error('[T/D] Edit prompt failed');
       Alert.alert('Error', error?.message || 'Failed to save changes. Please try again.');
     } finally {
       setIsSavingPromptEdit(false);
     }
-  }, [userId, promptId, editPromptText, isSavingPromptEdit, editPrompt]);
+  }, [token, userId, promptId, editPromptText, isSavingPromptEdit, editPrompt]);
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
-    if (!userId) return;
+    if (!userId || !token) return;
 
     Alert.alert(
       'Delete Comment',
@@ -1470,7 +1465,7 @@ export default function PromptThreadScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await deleteAnswer({ answerId, userId });
+              await deleteAnswer({ token, answerId, userId });
             } catch (error) {
               Alert.alert('Error', 'Failed to delete comment. Please try again.');
             }
@@ -1478,7 +1473,7 @@ export default function PromptThreadScreen() {
         },
       ]
     );
-  }, [userId, deleteAnswer]);
+  }, [token, userId, deleteAnswer]);
 
   // Open 3-dot menu
   const handleOpenMenu = useCallback((
@@ -1545,7 +1540,7 @@ export default function PromptThreadScreen() {
 
   // RECEIVER: Handle accept T&D connect request
   const handleAcceptConnect = useCallback(async (requestId: string) => {
-    if (!userId) return;
+    if (!userId || !token) return;
     if (pendingConnectResponsesRef.current.has(`connect:${requestId}`)) return;
 
     pendingConnectResponsesRef.current.add(`connect:${requestId}`);
@@ -1554,6 +1549,7 @@ export default function PromptThreadScreen() {
     }
     try {
       const result = await respondToConnect({
+        token,
         requestId: requestId as any,
         action: 'connect',
         authUserId: userId,
@@ -1624,11 +1620,11 @@ export default function PromptThreadScreen() {
         setRespondingTo(null);
       }
     }
-  }, [userId, respondToConnect, router]);
+  }, [token, userId, respondToConnect, router]);
 
   // RECEIVER: Handle reject T&D connect request
   const handleRejectConnect = useCallback(async (requestId: string) => {
-    if (!userId) return;
+    if (!userId || !token) return;
     if (pendingConnectResponsesRef.current.has(`remove:${requestId}`)) return;
 
     pendingConnectResponsesRef.current.add(`remove:${requestId}`);
@@ -1637,6 +1633,7 @@ export default function PromptThreadScreen() {
     }
     try {
       const result = await respondToConnect({
+        token,
         requestId: requestId as any,
         action: 'remove',
         authUserId: userId,
@@ -1668,12 +1665,12 @@ export default function PromptThreadScreen() {
         setRespondingTo(null);
       }
     }
-  }, [userId, respondToConnect]);
+  }, [token, userId, respondToConnect]);
 
   // Handle send T&D connect request (prompt owner → answer author)
   // P0-10 FIX: Global in-flight guard + backend remains authoritative for dedup.
   const handleSendConnect = useCallback(async (answerId: string) => {
-    if (!userId || !promptId) return;
+    if (!userId || !token || !promptId) return;
     if (connectSendInFlightRef.current) return;
     const targetAnswer = answers.find((answer) => String(answer._id) === String(answerId));
     const promptScopedConnectKey = targetAnswer?.userId
@@ -1686,6 +1683,7 @@ export default function PromptThreadScreen() {
     }
     try {
       const result = await sendConnectRequest({
+        token,
         promptId,
         answerId,
         authUserId: userId,
@@ -1781,7 +1779,7 @@ export default function PromptThreadScreen() {
         setConnectSending(null);
       }
     }
-  }, [answers, userId, promptId, sendConnectRequest, router]);
+  }, [answers, token, userId, promptId, sendConnectRequest, router]);
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.
@@ -1837,7 +1835,7 @@ export default function PromptThreadScreen() {
     // The backend will return the appropriate status.
 
     // Guard: ensure user is authenticated before claiming
-    if (!userId) {
+    if (!userId || !token) {
       Alert.alert('Sign In Required', 'Please sign in to view media.');
       return;
     }
@@ -1848,6 +1846,7 @@ export default function PromptThreadScreen() {
       const mediaLabel = answer.type === 'video' ? 'video' : 'photo';
       // Backend records the one-time view before returning a playable URL.
       const result = await claimAnswerMediaView({
+        token,
         answerId,
         viewerId: userId,
       });
@@ -1899,7 +1898,7 @@ export default function PromptThreadScreen() {
         });
       }
     } catch (error: any) {
-      console.error('[T/D] Claim media view failed:', error);
+      console.error('[T/D] Claim media view failed');
       if (error.message?.includes('Rate limit')) {
         Alert.alert('Please Wait', 'Too many requests. Try again in a moment.');
       } else if (isRetryableTodError(error)) {
@@ -1914,7 +1913,7 @@ export default function PromptThreadScreen() {
       // P0-001 FIX: Always clear the pending flag
       pendingMediaClaimsRef.current.delete(answerId);
     }
-  }, [isExpired, userId, claimAnswerMediaView, getPreloadState]);
+  }, [isExpired, token, userId, claimAnswerMediaView, getPreloadState]);
 
   // Handle closing the media viewer. Backend consumption already happened
   // during claim/open, so close is UI-only.
@@ -1934,20 +1933,21 @@ export default function PromptThreadScreen() {
   // Owner / voice / non-prompt-owner-viewer branches never invoke it.
   const fireMarkPromptMediaViewed = useCallback(() => {
     if (promptOwnerMediaConsumedRef.current) return;
-    if (!promptId || !userId) return;
+    if (!promptId || !userId || !token) return;
     if (!prompt) return;
     const projection = getPromptMediaProjection(prompt);
     if (projection.isPromptMediaOwner) return;
     if (projection.mediaKind !== 'photo' && projection.mediaKind !== 'video') return;
     promptOwnerMediaConsumedRef.current = true;
     markPromptMediaViewedMutation({
+      token,
       promptId,
       viewerUserId: userId,
     }).catch(() => {
       // Best-effort. Failure leaves the ledger row missing; the user
       // could re-view next session — acceptable lenient failure mode.
     });
-  }, [markPromptMediaViewedMutation, prompt, promptId, userId]);
+  }, [markPromptMediaViewedMutation, prompt, promptId, token, userId]);
 
   const handleCloseMediaViewer = useCallback(async () => {
     // Phase 4 part-2: photo consumption fires on close after the image
@@ -2061,16 +2061,16 @@ export default function PromptThreadScreen() {
         // Owner branch: projection already carries the URL; no view consumption.
         resolvedUrl = projection.mediaUrl ?? undefined;
       } else {
-        // Non-owner first-view: round-trip `preparePromptMedia` to resolve
-        // a fresh URL WITHOUT burning the one-time view. The ledger row is
-        // inserted later, by `markPromptMediaViewed`, only after real
-        // consumption (photo: rendered + closed; video: didJustFinish).
-        if (!userId) {
+        // Non-owner first-view: round-trip `preparePromptMedia` to claim the
+        // one-time view before returning a fresh URL. `markPromptMediaViewed`
+        // is still called after real consumption and is idempotent.
+        if (!userId || !token) {
           if (isMountedRef.current)
             setPromptOwnerMediaPreload({ status: 'failed' });
           return;
         }
         const result = await preparePromptMediaMutation({
+          token,
           promptId,
           viewerUserId: userId,
         });
@@ -2144,6 +2144,7 @@ export default function PromptThreadScreen() {
     prompt,
     promptId,
     isExpired,
+    token,
     userId,
     promptOwnerMediaPreload,
     preparePromptMediaMutation,
@@ -2175,7 +2176,7 @@ export default function PromptThreadScreen() {
     identityMode: IdentityMode;
     mediaVisibility?: 'private' | 'public';
   }) => {
-    if (!promptId || !userId) return;
+    if (!promptId || !userId || !token) return;
 
     try {
       if (isExpired) {
@@ -2270,16 +2271,6 @@ export default function PromptThreadScreen() {
         authorGender: isAnon ? undefined : authorProfile.gender,
       });
 
-      if (__DEV__ && queuedAttachment) {
-        console.log('[TOD_UPLOAD_DEBUG] media_kind', {
-          kind: queuedAttachment.kind,
-          sizeBytes: undefined,
-          durationMs: queuedAttachment.durationMs,
-          durationSecSent: queuedAttachment.durationSec,
-          mime: queuedAttachment.mime,
-        });
-      }
-
       debugTodLog('[T/D QUEUE] enqueue_success', {
         clientId,
         wasEditing,
@@ -2304,6 +2295,7 @@ export default function PromptThreadScreen() {
     isExpired,
     myAnswer,
     promptId,
+    token,
     userId,
   ]);
 

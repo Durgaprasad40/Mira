@@ -34,6 +34,9 @@ const MAX_SKIPS = 3;
 const getSafeIdTail = (value?: string | null): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value.slice(-6) : undefined;
 
+const debugBottleSpinLog = (..._args: unknown[]) => {};
+const debugBottleSpinWarn = (..._args: unknown[]) => {};
+
 // PHASE-2 PREMIUM (T/D): dark-glass / midnight-plum palette consumed only when
 // the parent passes theme="phase2". Phase-1 callers (ChatScreenInner.tsx) leave
 // the prop unset so all overlays evaluate to null and the original COLORS-based
@@ -343,7 +346,7 @@ export function BottleSpinGame({
     // If session is active but gameStartedAt is not set, show waiting state for invitee
     if (!hasGameStarted && amIInvitee) {
       if (__DEV__) {
-        console.log('[TD_LIFECYCLE] Invitee waiting for game to start:', {
+        debugBottleSpinLog('[TD_LIFECYCLE] Invitee waiting for game to start:', {
           hasGameStarted,
           gameStartedAt,
           amIInvitee,
@@ -355,7 +358,7 @@ export function BottleSpinGame({
     // TD-LIFECYCLE: If inviter and game not started, show idle (they can start)
     if (!hasGameStarted && amIInviter) {
       if (__DEV__) {
-        console.log('[TD_LIFECYCLE] Inviter can start game:', {
+        debugBottleSpinLog('[TD_LIFECYCLE] Inviter can start game:', {
           hasGameStarted,
           gameStartedAt,
           amIInviter,
@@ -402,9 +405,8 @@ export function BottleSpinGame({
     // Priority 6: Idle phase - check spin turn ownership
     // SPIN-TURN-FIX: Show waiting state if not my spin turn
     if (backendTurnPhase === 'idle' || backendTurnPhase === undefined) {
-      // ROLE-FIX: Log uiMode decision for debugging
       if (__DEV__) {
-        console.log('[BOTTLE_SPIN_UIMODE_DECISION] Idle phase check:', {
+        debugBottleSpinLog('[BOTTLE_SPIN_UIMODE_DECISION] Idle phase check:', {
           isMySpinTurn,
           myRole,
           currentSpinTurnRole,
@@ -433,7 +435,7 @@ export function BottleSpinGame({
 
   useEffect(() => {
     if (visible && __DEV__) {
-      console.log('[BOTTLE_SPIN_DEBUG] State trace:', {
+      debugBottleSpinLog('[BOTTLE_SPIN_DEBUG] State trace:', {
         // Session info (primitives only)
         gameSessionState,
         isSessionActive,
@@ -474,7 +476,7 @@ export function BottleSpinGame({
     const prev = prevUiModeRef.current;
     prevUiModeRef.current = uiMode;
     if (__DEV__) {
-      console.log('[TD_LIVE] phase_map', {
+      debugBottleSpinLog('[TD_LIVE] phase_map', {
         from: prev ?? 'init',
         to: uiMode,
         backendTurnPhase,
@@ -483,18 +485,18 @@ export function BottleSpinGame({
         myRole,
       });
       if (uiMode === 'spinning_local') {
-        console.log('[TD_LIVE] show_spinning', { asSpinner: isSpinningLocally });
+        debugBottleSpinLog('[TD_LIVE] show_spinning', { asSpinner: isSpinningLocally });
       } else if (uiMode === 'observer_spinning_text') {
-        console.log('[TD_LIVE] show_observer_spinning_text', {
+        debugBottleSpinLog('[TD_LIVE] show_observer_spinning_text', {
           hasOtherName: otherUserName.length > 0,
         });
       } else if (uiMode === 'choosing_for_me') {
-        console.log('[TD_LIVE] show_choose_buttons', {
+        debugBottleSpinLog('[TD_LIVE] show_choose_buttons', {
           backendTurnRole,
           myRole,
         });
       } else if (uiMode === 'choosing_for_other') {
-        console.log('[TD_LIVE] show_waiting_for_choice', {
+        debugBottleSpinLog('[TD_LIVE] show_waiting_for_choice', {
           hasOtherName: otherUserName.length > 0,
           backendTurnRole,
           myRole,
@@ -503,7 +505,7 @@ export function BottleSpinGame({
         // spinning_local → choosing_for_other automatically; log that the
         // blocking spinner UI has been auto-closed/replaced with waiting UI.
         if (prev === 'spinning_local') {
-          console.log('[TD_LIVE] auto_close_spinner_modal', {
+          debugBottleSpinLog('[TD_LIVE] auto_close_spinner_modal', {
             reason: 'spin_landed_on_other',
           });
         }
@@ -538,7 +540,7 @@ export function BottleSpinGame({
     // TD_SPIN: dedup — never restart an animation for the same backend event.
     if (observerSpinFiredForActionRef.current === backendLastActionAt) {
       if (__DEV__) {
-        console.log('[TD_SPIN] skip_duplicate', {
+        debugBottleSpinLog('[TD_SPIN] skip_duplicate', {
           backendLastActionAt,
           reason: 'already_animated_for_this_action',
         });
@@ -555,7 +557,7 @@ export function BottleSpinGame({
     spinAnim.setValue(finalAngle);
 
     if (__DEV__) {
-      console.log('[TD_SPIN] observer_no_animation', {
+      debugBottleSpinLog('[TD_SPIN] observer_no_animation', {
         finalAngle,
         lastActionAt: backendLastActionAt,
       });
@@ -587,7 +589,7 @@ export function BottleSpinGame({
 
     spinCompleteCloseFiredForActionRef.current = backendLastActionAt;
     if (__DEV__) {
-      console.log('[TD_LIVE] auto_close_after_spin_complete', {
+      debugBottleSpinLog('[TD_LIVE] auto_close_after_spin_complete', {
         lastActionAt: backendLastActionAt,
         turnRole: backendTurnRole,
       });
@@ -631,8 +633,8 @@ export function BottleSpinGame({
           ? `${otherUserName} chose TRUTH 🔥`
           : `${otherUserName} chose DARE 😈`;
     if (__DEV__) {
-      console.log('[TD_FLOW] result_toast_show', { result, byChooser: false });
-      console.log('[TD_LIVE] complete_toast', {
+      debugBottleSpinLog('[TD_FLOW] result_toast_show', { result, byChooser: false });
+      debugBottleSpinLog('[TD_LIVE] complete_toast', {
         result,
         byChooser: false,
         lastActionAt: backendLastActionAt,
@@ -671,7 +673,7 @@ export function BottleSpinGame({
   useEffect(() => {
     return () => {
       if (autoAdvanceTimerRef.current) {
-        if (__DEV__) console.log('[TD_LIVE] auto_advance_cleanup_on_unmount');
+        if (__DEV__) debugBottleSpinLog('[TD_LIVE] auto_advance_cleanup_on_unmount');
         clearTimeout(autoAdvanceTimerRef.current);
         autoAdvanceTimerRef.current = null;
       }
@@ -697,7 +699,7 @@ export function BottleSpinGame({
     try {
       await incrementSkipMutation({ token, windowKey, delta: 1 });
     } catch (error) {
-      if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to increment skip count:', error);
+      if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Failed to increment skip count:', error);
     }
   }, [token, windowKey, incrementSkipMutation]);
 
@@ -708,7 +710,7 @@ export function BottleSpinGame({
     if (__DEV__) {
       // TD_END_TRACE: resetGame only mutates turnPhase to 'idle'. It does NOT
       // end the session or set cooldown — logged here for triage visibility.
-      console.log('[TD_END_TRACE] reset_game_called', {
+      debugBottleSpinLog('[TD_END_TRACE] reset_game_called', {
         autoAdvance,
         hasPendingAutoAdvance: !!autoAdvanceTimerRef.current,
       });
@@ -750,7 +752,7 @@ export function BottleSpinGame({
   // modal for the chooser.
   const handleCancel = useCallback(() => {
     if (__DEV__) {
-      console.log('[TD_PAUSE] user_paused', {
+      debugBottleSpinLog('[TD_PAUSE] user_paused', {
         reason: 'cancel_button_or_backdrop',
         backendTurnPhase,
         backendTurnRole,
@@ -784,7 +786,7 @@ export function BottleSpinGame({
       // mutation path (via the "ended the game" system message). Any other
       // [TD_END_TRACE] end_game_called log without a preceding
       // [TD_END_TRACE] end_game_confirm_pressed is a bug.
-      console.log('[TD_END_TRACE] end_game_confirm_pressed');
+      debugBottleSpinLog('[TD_END_TRACE] end_game_confirm_pressed');
     }
     setShowEndConfirmation(false);
     if (onSendResultMessage) {
@@ -807,7 +809,7 @@ export function BottleSpinGame({
   const spinBottle = useCallback(async () => {
     // VERIFICATION LOG: Spin attempt
     if (__DEV__) {
-      console.log('[BOTTLE_SPIN] Spin attempt:', {
+      debugBottleSpinLog('[BOTTLE_SPIN] Spin attempt:', {
         isSpinningLocally,
         isAnimationLocked,
         isSessionActive,
@@ -822,13 +824,13 @@ export function BottleSpinGame({
 
     // Guard: Only spin if session is active
     if (!isSessionActive) {
-      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - no active session');
+      if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Cannot spin - no active session');
       return;
     }
 
     // Guard: Must have a role
     if (!myRole) {
-      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - role not determined', {
+      if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Cannot spin - role not determined', {
         userRef: getSafeIdTail(userId),
         inviterRef: getSafeIdTail(inviterId),
         inviteeRef: getSafeIdTail(inviteeId),
@@ -837,7 +839,7 @@ export function BottleSpinGame({
     }
 
     if (!userId || !token || !conversationId) {
-      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot spin - missing userId, token, or conversationId');
+      if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Cannot spin - missing userId, token, or conversationId');
       return;
     }
 
@@ -864,7 +866,7 @@ export function BottleSpinGame({
       }
       selectedRole = result.selectedTargetRole;
     } catch (error) {
-      if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to get spin result from backend:', error);
+      if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Failed to get spin result from backend:', error);
       setIsSpinningLocally(false);
       return;
     }
@@ -881,14 +883,14 @@ export function BottleSpinGame({
     const animDuration = 3000 + Math.random() * 1000;
 
     if (__DEV__) {
-      console.log('[TD_SPIN] start_spin', {
+      debugBottleSpinLog('[TD_SPIN] start_spin', {
         side: 'chooser',
         fromAngle: 0,
         fullRotations,
         selectedRole,
         myRole,
       });
-      console.log('[TD_SPIN] target_angle', {
+      debugBottleSpinLog('[TD_SPIN] target_angle', {
         side: 'chooser',
         finalAngle,
         totalRotation,
@@ -910,7 +912,7 @@ export function BottleSpinGame({
       currentRotation.current = totalRotation % 360;
       setIsSpinningLocally(false);
       if (__DEV__) {
-        console.log('[TD_SPIN] animation_complete', {
+        debugBottleSpinLog('[TD_SPIN] animation_complete', {
           side: 'chooser',
           landedAt: currentRotation.current,
           selectedRole,
@@ -926,7 +928,7 @@ export function BottleSpinGame({
           turnPhase: 'choosing',
         });
       } catch (error) {
-        if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to set choosing state:', error);
+        if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Failed to set choosing state:', error);
       }
 
       // Haptic feedback
@@ -948,12 +950,12 @@ export function BottleSpinGame({
   const handleChoice = useCallback(async (choice: 'truth' | 'dare' | 'skip') => {
     // Guard: Only allow choice if it's my turn
     if (uiMode !== 'choosing_for_me') {
-      if (__DEV__) console.warn('[BOTTLE_SPIN] Cannot choose - not my turn', { uiMode });
+      if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Cannot choose - not my turn', { uiMode });
       return;
     }
 
     if (__DEV__) {
-      console.log('[TD_FLOW] choice_selected', { choice, autoAdvance });
+      debugBottleSpinLog('[TD_FLOW] choice_selected', { choice, autoAdvance });
     }
 
     setChosenOption(choice);
@@ -969,7 +971,7 @@ export function BottleSpinGame({
           lastSpinResult: choice,
         });
       } catch (error) {
-        if (__DEV__) console.warn('[BOTTLE_SPIN] Failed to set complete state:', error);
+        if (__DEV__) debugBottleSpinWarn('[BOTTLE_SPIN] Failed to set complete state:', error);
       }
     }
 
@@ -1014,8 +1016,8 @@ export function BottleSpinGame({
             ? 'You chose TRUTH 🔥'
             : 'You chose DARE 😈';
       if (__DEV__) {
-        console.log('[TD_FLOW] result_toast_show', { choice, byChooser: true });
-        console.log('[TD_LIVE] complete_toast', { choice, byChooser: true });
+        debugBottleSpinLog('[TD_FLOW] result_toast_show', { choice, byChooser: true });
+        debugBottleSpinLog('[TD_LIVE] complete_toast', { choice, byChooser: true });
       }
       setToastInfo({ text, key: Date.now() });
 
@@ -1045,7 +1047,7 @@ export function BottleSpinGame({
             turnPhase: 'idle' as const,
           };
           if (__DEV__) {
-            console.log('[TD_FLOW] auto_advance_payload', {
+            debugBottleSpinLog('[TD_FLOW] auto_advance_payload', {
               mutation: 'setBottleSpinTurn',
               payload: {
                 hasToken: !!payload.token,
@@ -1053,8 +1055,8 @@ export function BottleSpinGame({
                 turnPhase: payload.turnPhase,
               },
             });
-            console.log('[TD_FLOW] auto_advance_to_idle');
-            console.log('[TD_LIVE] auto_advance_once', {
+            debugBottleSpinLog('[TD_FLOW] auto_advance_to_idle');
+            debugBottleSpinLog('[TD_LIVE] auto_advance_once', {
               byChooser: true,
               localActionAt: choiceLocalActionAt,
             });
@@ -1062,7 +1064,7 @@ export function BottleSpinGame({
           try {
             await setTurnMutation(payload);
           } catch (err) {
-            if (__DEV__) console.warn('[TD_FLOW] auto_advance_to_idle failed', err);
+            if (__DEV__) debugBottleSpinWarn('[TD_FLOW] auto_advance_to_idle failed', err);
           }
         }
       }, 2000);

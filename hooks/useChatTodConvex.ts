@@ -1,6 +1,10 @@
 /**
  * useChatTodConvex - Dual-mode hook for Chat T&D game
  *
+ * Legacy/unused. Active Phase-2 private chat Truth or Dare uses
+ * BottleSpinGame with convex/games.ts; do not reconnect this hook without a
+ * fresh server-side audit.
+ *
  * Abstracts the choice between Convex (real mode) and Zustand (demo mode).
  *
  * REAL MODE (Convex):

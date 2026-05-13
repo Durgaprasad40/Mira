@@ -80,11 +80,7 @@ const PREMIUM = {
   shadowColor: '#000',
 };
 
-const debugTodLog = (...args: unknown[]) => {
-  if (__DEV__) {
-    console.log(...args);
-  }
-};
+const debugTodLog = (..._args: unknown[]) => {};
 
 // Format millis as `m:ss` for the voice prompt scrubber readout.
 function formatVoiceTime(ms: number): string {
@@ -130,16 +126,6 @@ export function prewarmTodCache(prompts: any[] | undefined, trending: any | unde
   if (__DEV__ && (prompts !== undefined || trending !== undefined)) {
     debugTodLog('[T/D PREWARM] skipped until user-scoped prewarm is re-enabled');
   }
-}
-
-/** Get URL prefix for diagnostics */
-function getUrlPrefix(url?: string): string {
-  if (!url) return 'none';
-  if (url.startsWith('https://')) return 'https';
-  if (url.startsWith('http://')) return 'http';
-  if (url.startsWith('file://')) return 'file';
-  if (url.startsWith('convex://')) return 'convex';
-  return 'unknown';
 }
 
 /** Check if URL is valid for display:
@@ -429,6 +415,7 @@ type TrendingPromptData = {
   isAnonymous?: boolean;
   photoBlurMode?: 'none' | 'blur';
   ownerName?: string;
+  ownerUserId?: string;
   ownerPhotoUrl?: string;
   ownerAge?: number;
   ownerGender?: string;
@@ -1353,6 +1340,7 @@ export default function TruthOrDareScreen() {
   }, []);
 
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // Delete popup state
   const [deletePopupPromptId, setDeletePopupPromptId] = useState<string | null>(null);
@@ -1361,11 +1349,9 @@ export default function TruthOrDareScreen() {
   // Prompt-owner media viewer state. Tapping the covered media tile on a feed
   // card opens this modal. For non-owner photo/video the URL is NOT present
   // in the inline payload (server-side redaction). We resolve the URL via
-  // `preparePromptMedia` on the first (preload) tap WITHOUT burning the
-  // one-time view; the view ledger row is inserted only after the user
-  // actually consumes the media (photo render + close, or video finishes
-  // playback) by calling `markPromptMediaViewed`. Voice and owner branches
-  // never burn a view.
+  // `preparePromptMedia` on the first (preload) tap, which now claims the
+  // one-time view before returning the URL. The later `markPromptMediaViewed`
+  // call is idempotent. Voice and owner branches never burn a view.
   const [viewingPromptMedia, setViewingPromptMedia] = useState<PromptMediaPayload | null>(null);
   const preparePromptMediaMutation = useMutation(api.truthDare.preparePromptMedia);
   const markPromptMediaViewedMutation = useMutation(api.truthDare.markPromptMediaViewed);
@@ -1474,17 +1460,15 @@ export default function TruthOrDareScreen() {
           // Owner branch: payload already carries the URL; no view consumption.
           resolvedUrl = payload.mediaUrl;
         } else {
-          // Non-owner first-view: round-trip `preparePromptMedia` to resolve
-          // a fresh URL WITHOUT burning the one-time view. The view ledger
-          // row is inserted later, by `markPromptMediaViewed`, only when
-          // the user actually consumes the media (photo: viewer closed
-          // after the image rendered; video: playback finished). This is
-          // the entire point of Phase 4 part-2 — preload != viewed.
-          if (!userId) {
+          // Non-owner first-view: round-trip `preparePromptMedia` to claim
+          // the one-time view before returning a fresh URL. The later
+          // `markPromptMediaViewed` call is idempotent.
+          if (!userId || !token) {
             updatePromptMediaPreloadEntry(promptId, { status: 'failed' });
             return;
           }
           const result = await preparePromptMediaMutation({
+            token,
             promptId,
             viewerUserId: userId,
           });
@@ -1560,6 +1544,7 @@ export default function TruthOrDareScreen() {
     [
       preparePromptMediaMutation,
       userId,
+      token,
       promptMediaPreloadMap,
       updatePromptMediaPreloadEntry,
     ]
@@ -1576,17 +1561,18 @@ export default function TruthOrDareScreen() {
   // one-time view ledger row is inserted only on real consumption.
   const handlePromptMediaConsumed = useCallback(
     (promptId: string) => {
-      if (!userId) return;
+      if (!userId || !token) return;
       // Best-effort; we already know the asset was consumed, so any
       // network failure here just leaves the ledger row missing — which
       // means the user could re-view next session. That's an acceptable
       // failure mode (lenient, never blocks playback).
       markPromptMediaViewedMutation({
+        token,
         promptId,
         viewerUserId: userId,
       }).catch(() => {});
     },
-    [markPromptMediaViewedMutation, userId]
+    [markPromptMediaViewedMutation, token, userId]
   );
 
   // Resolves the visual preload status for a given prompt. Voice and
@@ -1624,18 +1610,18 @@ export default function TruthOrDareScreen() {
   // Get trending prompts (1 Dare + 1 Truth) using viewerUserId
   const trendingDataQuery = useQuery(
     api.truthDare.getTrendingTruthAndDare,
-    userId && !queryPaused ? { viewerUserId: userId } : 'skip'
+    userId && token && !queryPaused ? { token, viewerUserId: userId } : 'skip'
   );
 
   // Get all prompts (sorted by engagement)
   const promptsDataQuery = useQuery(
     api.truthDare.listActivePromptsWithTop2Answers,
-    userId && !queryPaused ? { viewerUserId: userId } : 'skip'
+    userId && token && !queryPaused ? { token, viewerUserId: userId } : 'skip'
   );
 
   const pendingConnectRequestCount = useQuery(
     api.truthDare.getPendingTodConnectRequestsCount,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { token, authUserId: userId } : 'skip'
   );
   const connectRequestCount = pendingConnectRequestCount ?? 0;
 
@@ -1688,11 +1674,7 @@ export default function TruthOrDareScreen() {
         debugTodLog(`[T/D REPORT] first_data_ms=${dataMs}`);
         debugTodLog(`[T/D REPORT] feed_count=${promptsDataQuery.length}`);
 
-        // Log latest 3 prompts details
-        promptsDataQuery.slice(0, 3).forEach((p: any, idx: number) => {
-          const visibility = p.isAnonymous ? 'anonymous' : (p.photoBlurMode === 'blur' ? 'blurred' : 'everyone');
-          debugTodLog(`[T/D REPORT] item${idx + 1} id=${String(p._id).slice(-6)} visibility=${visibility} hasName=${!!p.ownerName} hasPhoto=${!!p.ownerPhotoUrl} photoPrefix=${getUrlPrefix(p.ownerPhotoUrl)} blurMode=${p.photoBlurMode || 'none'}`);
-        });
+        debugTodLog('[T/D REPORT] first items received');
       }
     }
   }, [promptsDataQuery, userId]);
@@ -1793,23 +1775,24 @@ export default function TruthOrDareScreen() {
 
   // Handle delete confirmation
   const handleDeletePrompt = useCallback(async () => {
-    if (!deletePopupPromptId || !userId) return;
+    if (!deletePopupPromptId || !userId || !token) return;
 
     setIsDeleting(true);
     try {
       await deletePromptMutation({
+        token,
         promptId: deletePopupPromptId,
         authUserId: userId,
       });
       setDeletePopupPromptId(null);
       // Feed will auto-refresh via Convex reactivity
     } catch (error: any) {
-      console.error('[T/D] Delete prompt failed:', error);
+      console.error('[T/D] Delete prompt failed');
       Alert.alert('Error', error?.message || 'Failed to delete. Please try again.');
     } finally {
       setIsDeleting(false);
     }
-  }, [deletePopupPromptId, userId, deletePromptMutation]);
+  }, [deletePopupPromptId, token, userId, deletePromptMutation]);
 
   // Close delete popup
   const handleCloseDeletePopup = useCallback(() => {
@@ -1940,7 +1923,7 @@ export default function TruthOrDareScreen() {
 
     if (item.type === 'trending') {
       const promptId = item.prompt._id as unknown as string;
-      const isOwner = (item.prompt as any).ownerUserId === userId;
+      const isOwner = item.prompt.ownerUserId === userId;
       const preloadStatus = getPromptMediaPreloadStatus(promptId, item.prompt);
       return (
         <TrendingCard
@@ -1966,7 +1949,7 @@ export default function TruthOrDareScreen() {
     }
 
     const promptId = item.prompt._id as unknown as string;
-    const isOwner = (item.prompt as any).ownerUserId === userId;
+    const isOwner = item.prompt.ownerUserId === userId;
     const preloadStatus = getPromptMediaPreloadStatus(promptId, item.prompt);
     return (
       <PromptCard
@@ -2273,6 +2256,7 @@ export default function TruthOrDareScreen() {
 
       <TodConnectRequestsSheet
         visible={requestInboxVisible}
+        token={token}
         authUserId={userId}
         focusRequestId={focusedRequestId}
         onClose={closeConnectRequests}

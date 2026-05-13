@@ -161,11 +161,10 @@ export default function PrivateTabsLayout() {
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SAFE QUERY 2: Truth or Dare Pending Connect Requests (for T/D badge)
-  // Uses authUserId string (FIXED from old token-based call)
   // ═══════════════════════════════════════════════════════════════════════════
   const pendingConnectRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    currentUserId && !isDemoMode ? { authUserId: currentUserId } : 'skip'
+    currentUserId && token && !isDemoMode ? { token, authUserId: currentUserId } : 'skip'
   );
   const todPendingCount = useMemo(() => {
     try {

@@ -1,11 +1,9 @@
 /**
  * ChatTodOverlay - Full-screen game container for mandatory Truth-or-Dare
  *
- * CONSTRAINTS:
- * - MAY import chatTodStore
- * - MAY import BottleSpin
- * - Must NOT touch Convex yet
- * - Must NOT modify incognito-chat.tsx yet
+ * Legacy/unused. Active Phase-2 private chat Truth or Dare uses
+ * BottleSpinGame with convex/games.ts; do not reconnect this overlay without a
+ * fresh server-side audit.
  *
  * This component is the orchestrator for the in-chat T&D game.
  * It blocks normal chat until one full round is completed.
@@ -250,14 +248,10 @@ export function ChatTodOverlay({
             durationSec: data.durationSec,
           };
           submitAnswer(conversationId, meta);
-
-          if (__DEV__) {
-            console.log('[ChatTodOverlay] Camera answer received:', data.type);
-          }
         }
-      } catch (error) {
+      } catch {
         if (__DEV__) {
-          console.error('[ChatTodOverlay] Error checking camera answer:', error);
+          console.error('[ChatTodOverlay] Error checking camera answer');
         }
       }
     };

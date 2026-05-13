@@ -168,38 +168,43 @@ export function TruthDarePromptUploadManager() {
       let ownerPhotoStorageId = item.ownerPhotoStorageId;
       let lastProgressAt = 0;
 
+      const ensureCurrentUser = () => {
+        const authState = useAuthStore.getState();
+        if (authState.userId !== item.userId) {
+          throw new Error('Upload cancelled after user switch');
+        }
+        if (!authState.token) {
+          throw new Error('Upload requires an active session');
+        }
+        return authState.token;
+      };
+
       const trackStorageId = async (storageId: string | undefined) => {
         if (!storageId) return;
         try {
+          const token = ensureCurrentUser();
           await trackPendingTodUploads({
+            token,
             storageIds: [storageId as Id<'_storage'>],
             authUserId: item.userId,
           });
           trackedStorageIds.push(storageId);
-        } catch (trackError) {
-          if (__DEV__) {
-            console.warn('[T/D PROMPT QUEUE] track failed', trackError);
-          }
+        } catch {
+          // Best-effort tracking; upload ownership is revalidated before attach.
         }
       };
 
       const cleanupTrackedUploads = async () => {
         if (trackedStorageIds.length === 0) return;
         try {
+          const token = ensureCurrentUser();
           await cleanupPendingTodUploads({
+            token,
             storageIds: trackedStorageIds as Id<'_storage'>[],
             authUserId: item.userId,
           });
-        } catch (cleanupError) {
-          if (__DEV__) {
-            console.warn('[T/D PROMPT QUEUE] cleanup failed', cleanupError);
-          }
-        }
-      };
-
-      const ensureCurrentUser = () => {
-        if (useAuthStore.getState().userId !== item.userId) {
-          throw new Error('Upload cancelled after user switch');
+        } catch {
+          // Best-effort cleanup only; the queue surfaces the upload failure.
         }
       };
 
@@ -215,7 +220,7 @@ export function TruthDarePromptUploadManager() {
           const limitKind = limitKindFor(item.attachment.kind);
           mediaStorageId = await uploadMediaToConvexWithProgress(
             item.attachment.localUri,
-            () => generateUploadUrl({ authUserId: item.userId }),
+            () => generateUploadUrl({ token: ensureCurrentUser(), authUserId: item.userId }),
             mediaType,
             (progress) => {
               const now = Date.now();
@@ -235,21 +240,15 @@ export function TruthDarePromptUploadManager() {
           try {
             ownerPhotoStorageId = await uploadMediaToConvexWithProgress(
               item.ownerPhotoLocalUri,
-              () => generateUploadUrl({ authUserId: item.userId }),
+              () => generateUploadUrl({ token: ensureCurrentUser(), authUserId: item.userId }),
               'photo',
               undefined,
               getTodUploadOptions('photo', item.ownerPhotoLocalUri, 'image/jpeg')
             );
             await trackStorageId(ownerPhotoStorageId);
-          } catch (ownerPhotoError) {
+          } catch {
             // Owner-photo upload failure is non-fatal: prompt still posts,
             // just without the avatar (matches existing composer behavior).
-            if (__DEV__) {
-              console.warn(
-                '[T/D PROMPT QUEUE] owner photo upload failed, posting without it',
-                ownerPhotoError
-              );
-            }
             ownerPhotoStorageId = undefined;
           }
         }
@@ -261,6 +260,7 @@ export function TruthDarePromptUploadManager() {
 
         ensureCurrentUser();
         const result = await createPrompt({
+          token: ensureCurrentUser(),
           type: item.type,
           text: item.text,
           authUserId: item.userId,
@@ -282,14 +282,14 @@ export function TruthDarePromptUploadManager() {
 
         if (trackedStorageIds.length > 0) {
           try {
+            const token = ensureCurrentUser();
             await releasePendingTodUploads({
+              token,
               storageIds: trackedStorageIds as Id<'_storage'>[],
               authUserId: item.userId,
             });
-          } catch (releaseError) {
-            if (__DEV__) {
-              console.warn('[T/D PROMPT QUEUE] release failed', releaseError);
-            }
+          } catch {
+            // Release is best effort; retry cleanup handles stale pending rows.
           }
         }
 

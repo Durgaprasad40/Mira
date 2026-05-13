@@ -1,4 +1,4 @@
-import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
+import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { type Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, getPhase2DisplayName, validateSessionToken } from './helpers';
@@ -440,6 +440,26 @@ const BOTTLE_SPIN_SESSION_SCAN_LIMIT = 50;
 
 const isPendingInviteExpired = (session: BottleSpinSessionDoc, now: number) =>
   session.status === 'pending' && now - session.createdAt >= BOTTLE_SPIN_PENDING_INVITE_TIMEOUT_MS;
+
+function getBottleSpinExpiredReason(
+  session: BottleSpinSessionDoc,
+  now: number
+): 'invite_expired' | 'not_started' | 'timeout' | null {
+  if (isPendingInviteExpired(session, now)) {
+    return 'invite_expired';
+  }
+  if (session.status !== 'active') {
+    return null;
+  }
+
+  const acceptedAt = session.acceptedAt || session.respondedAt || session.createdAt;
+  if (!session.gameStartedAt) {
+    return now - acceptedAt >= BOTTLE_SPIN_NOT_STARTED_TIMEOUT_MS ? 'not_started' : null;
+  }
+
+  const lastAction = session.lastActionAt || session.gameStartedAt || acceptedAt;
+  return now - lastAction >= BOTTLE_SPIN_INACTIVITY_TIMEOUT_MS ? 'timeout' : null;
+}
 
 async function listRecentBottleSpinSessions(
   ctx: QueryCtx | MutationCtx,
@@ -987,6 +1007,40 @@ export const cleanupExpiredSession = mutation({
           ? `tod:${sessionId}:invite_expired`
           : `tod:${sessionId}:inactivity_end`,
       });
+    }
+
+    return { success: true, cleanedCount };
+  },
+});
+
+// Scheduler-ready cleanup for one Phase-2 private conversation. The active
+// app still uses cleanupExpiredSession for user-visible chips; this internal
+// helper only patches stale DB rows/cooldowns so old sessions do not linger
+// forever if neither participant reopens the thread.
+export const cleanupExpiredBottleSpinSessionsForConversation = internalMutation({
+  args: {
+    conversationId: v.string(),
+  },
+  handler: async (ctx, { conversationId }) => {
+    const now = Date.now();
+    const sessions = await listRecentBottleSpinSessions(ctx, conversationId);
+    let cleanedCount = 0;
+
+    for (const session of sessions) {
+      const endedReason = getBottleSpinExpiredReason(session, now);
+      if (!endedReason) continue;
+      if (session.cooldownUntil && session.cooldownUntil <= now) continue;
+
+      await ctx.db.patch(session._id, {
+        status: 'expired',
+        respondedAt: session.respondedAt ?? now,
+        endedAt: session.endedAt ?? now,
+        endedReason,
+        ...(session.cooldownUntil && session.cooldownUntil > now
+          ? {}
+          : { cooldownUntil: now + BOTTLE_SPIN_COOLDOWN_MS }),
+      });
+      cleanedCount++;
     }
 
     return { success: true, cleanedCount };

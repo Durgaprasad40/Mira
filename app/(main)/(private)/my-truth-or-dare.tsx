@@ -53,6 +53,7 @@ export default function MyTruthOrDareScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [queryPaused, setQueryPaused] = useState(false);
   const [loadTimedOut, setLoadTimedOut] = useState(false);
@@ -61,14 +62,14 @@ export default function MyTruthOrDareScreen() {
 
   const myPromptsQuery = useQuery(
     api.truthDare.getMyPrompts,
-    authUserId && !queryPaused ? { authUserId } : 'skip',
+    authUserId && token && !queryPaused ? { token, authUserId } : 'skip',
   );
 
   const prompts = useMemo(
     () => ((myPromptsQuery ?? []) as MyTruthDarePrompt[]),
     [myPromptsQuery],
   );
-  const isLoading = myPromptsQuery === undefined && !loadTimedOut;
+  const isLoading = Boolean(authUserId && token && myPromptsQuery === undefined && !loadTimedOut);
 
   useEffect(() => {
     if (myPromptsQuery !== undefined) {

@@ -40,6 +40,9 @@ import {
   type TodMediaLimitKind,
 } from '@/lib/todMediaLimits';
 
+// Route name is legacy. This screen is the active Phase-2 Truth or Dare
+// prompt composer and remains at this path for navigation compatibility.
+
 /** Check if URL is a valid remote URL (http/https) */
 function isRemoteUrl(url: string | undefined | null): boolean {
   if (!url) return false;
@@ -72,6 +75,7 @@ type PromptMediaAttachment = {
 };
 
 type PromptMediaAction = 'camera' | 'gallery' | 'voice';
+type LocalFileInfo = Awaited<ReturnType<typeof FileSystem.getInfoAsync>>;
 
 const PROMPT_MEDIA_ACTIONS: {
   action: PromptMediaAction;
@@ -135,13 +139,16 @@ function normalizePickerDurationMs(duration: number | null | undefined): number 
     : Math.round(duration);
 }
 
+function getFileInfoSize(info: LocalFileInfo): number | undefined {
+  return info.exists && 'size' in info && typeof info.size === 'number'
+    ? info.size
+    : undefined;
+}
+
 async function getLocalFileSizeBytes(uri: string): Promise<number | undefined> {
   try {
     const info = await FileSystem.getInfoAsync(uri);
-    if (info.exists && typeof (info as any).size === 'number') {
-      return (info as any).size as number;
-    }
-    return undefined;
+    return getFileInfoSize(info);
   } catch {
     return undefined;
   }
@@ -190,17 +197,9 @@ function isRetryableTodError(error: unknown): boolean {
   );
 }
 
-const debugTodLog = (...args: unknown[]) => {
-  if (__DEV__) {
-    console.log(...args);
-  }
-};
+const debugTodLog = (..._args: unknown[]) => {};
 
-const debugTodWarn = (...args: unknown[]) => {
-  if (__DEV__) {
-    console.warn(...args);
-  }
-};
+const debugTodWarn = (..._args: unknown[]) => {};
 
 export default function CreateTodScreen() {
   const router = useRouter();
@@ -228,6 +227,7 @@ export default function CreateTodScreen() {
 
   // Get user data from canonical sources
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   // Source 1: demoStore - select STABLE primitives
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
@@ -304,7 +304,7 @@ export default function CreateTodScreen() {
   const minLength = 20;
   const trimmedLength = content.trim().length;
   const canSubmit =
-    trimmedLength >= minLength && !isSubmitting && !!effectiveUserId;
+    trimmedLength >= minLength && !isSubmitting && !!effectiveUserId && !!token;
 
   // Synchronous lock to prevent double-tap race condition
   const isSubmittingRef = useRef(false);
@@ -368,7 +368,7 @@ export default function CreateTodScreen() {
           let exists = localPhotoExistsCacheRef.current.get(uri);
           if (exists === undefined) {
             const info = await FileSystem.getInfoAsync(uri);
-            const size = info.exists ? ((info as any).size || 0) : 0;
+            const size = getFileInfoSize(info) ?? 0;
             exists = info.exists && size > 0;
             localPhotoExistsCacheRef.current.set(uri, exists);
           }
@@ -807,9 +807,8 @@ export default function CreateTodScreen() {
         uploadedStorageIds.push(storageId);
         try {
           await trackPendingTodUploads({
+            token,
             storageIds: [storageId as any],
-            // Required: server uses two-tier auth (identity → authUserId fallback);
-            // omitting this throws Unauthorized in demo/custom-auth mode.
             authUserId: effectiveUserId,
           });
         } catch (trackError) {
@@ -845,6 +844,7 @@ export default function CreateTodScreen() {
       if (visibility === 'anonymous') {
         // Anonymous: no identity, no photo
         await createPrompt({
+          token,
           type: postType,
           text: content.trim(),
           authUserId: effectiveUserId,
@@ -872,7 +872,7 @@ export default function CreateTodScreen() {
             try {
               ownerPhotoStorageIdNoPhoto = await uploadMediaToConvex(
                 photoResultNoPhoto.url,
-                () => generateUploadUrl({ authUserId: effectiveUserId }),
+                () => generateUploadUrl({ token, authUserId: effectiveUserId }),
                 'photo'
               );
               await trackUploadedStorageId(ownerPhotoStorageIdNoPhoto);
@@ -886,6 +886,7 @@ export default function CreateTodScreen() {
         }
 
         await createPrompt({
+          token,
           type: postType,
           text: content.trim(),
           authUserId: effectiveUserId,
@@ -917,7 +918,7 @@ export default function CreateTodScreen() {
             try {
               ownerPhotoStorageId = await uploadMediaToConvex(
                 photoResult.url,
-                () => generateUploadUrl({ authUserId: effectiveUserId }),
+                () => generateUploadUrl({ token, authUserId: effectiveUserId }),
                 'photo'
               );
               await trackUploadedStorageId(ownerPhotoStorageId);
@@ -933,6 +934,7 @@ export default function CreateTodScreen() {
         // User selected "public" visibility, so identity is still shown - just without photo
 
         await createPrompt({
+          token,
           type: postType,
           text: content.trim(),
           authUserId: effectiveUserId,
@@ -953,6 +955,7 @@ export default function CreateTodScreen() {
       if (uploadedStorageIds.length > 0) {
         try {
           await releasePendingTodUploads({
+            token,
             storageIds: uploadedStorageIds as any,
             authUserId: effectiveUserId,
           });
@@ -963,12 +966,13 @@ export default function CreateTodScreen() {
 
       router.back();
     } catch (error: any) {
-      console.error('[T/D UI] Post failed:', error);
+      console.error('[T/D UI] Post failed');
       const retryableError = isRetryableTodError(error);
 
       if (!retryableError && uploadedStorageIds.length > 0) {
         try {
           await cleanupPendingTodUploads({
+            token,
             storageIds: uploadedStorageIds as any,
             authUserId: effectiveUserId,
           });
