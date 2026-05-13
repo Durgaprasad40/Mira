@@ -241,10 +241,12 @@ function Phase2ChatThreadPrefetcher({
 }) {
   const conv = useQuery(api.privateConversations.getPrivateConversation, {
     conversationId: conversationId as any,
+    token,
     authUserId: userId,
   });
   const msgs = useQuery(api.privateConversations.getPrivateMessages, {
     conversationId: conversationId as any,
+    token,
     authUserId: userId,
     limit: 100,
   });
@@ -343,7 +345,7 @@ export default function ChatsScreen() {
   // P0-AUTH-CRASH-FIX: Simple gating - requires userId + authReady
   // Note: useConvexAuth was removed as it caused release crashes
   // The query will return undefined until auth is ready, which is handled gracefully
-  const isAuthReadyForQueries = !!(currentUserId && authReady);
+  const isAuthReadyForQueries = !!(currentUserId && token && authReady);
 
   // ─────────────────────────────────────────────────────────────────────────
   // P2_THREAD_OPEN_GATE: navigate + tap handler.
@@ -372,7 +374,6 @@ export default function ChatsScreen() {
     (id: string) => {
       // Ignore taps on other rows while one open is in flight (single-flight).
       if (openingId) return;
-      console.log('[P2_CHAT_OPEN] chat-row', id);
       // No userId yet (rare — auth hydrating) → fall through to immediate
       // navigation; the thread route's own loading shell will cover it.
       if (!currentUserId) {
@@ -392,9 +393,8 @@ export default function ChatsScreen() {
   // P0-AUTH-CRASH-FIX: Gate queries AND add delayed auth confirmation
   // The query is skipped until auth is confirmed ready to prevent release crashes
   // ═══════════════════════════════════════════════════════════════════════════
-  // P0-AUTH-CRASH-FIX: Use delayed auth confirmation to ensure Convex identity is synced
-  // The Convex JWT (ctx.auth.getUserIdentity) takes longer to sync than Clerk token
-  // Using 500ms delay to ensure identity is fully propagated before firing queries
+  // P0-AUTH-CRASH-FIX: Use delayed auth confirmation so the custom session
+  // token and local user id are both hydrated before firing private queries.
   const [authConfirmed, setAuthConfirmed] = useState(false);
   useEffect(() => {
     if (isAuthReadyForQueries && !authConfirmed) {
@@ -413,23 +413,23 @@ export default function ChatsScreen() {
 
   const incomingLikes = useQuery(
     api.privateSwipes.getIncomingLikes,
-    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+    canRunQueries && currentUserId && token ? { token, authUserId: currentUserId } : 'skip'
   );
   const incomingLikesCount = useQuery(
     api.privateSwipes.getIncomingLikesCount,
-    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+    canRunQueries && currentUserId && token ? { token, authUserId: currentUserId } : 'skip'
   );
   const incomingStandOutsResult = useQuery(
     api.privateSwipes.getIncomingStandOuts,
-    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+    canRunQueries && currentUserId && token ? { token, authUserId: currentUserId } : 'skip'
   );
   const outgoingStandOutsResult = useQuery(
     api.privateSwipes.getOutgoingStandOuts,
-    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+    canRunQueries && currentUserId && token ? { token, authUserId: currentUserId } : 'skip'
   );
   const standOutCounts = useQuery(
     api.privateSwipes.getStandOutCounts,
-    canRunQueries && currentUserId ? { authUserId: currentUserId } : 'skip'
+    canRunQueries && currentUserId && token ? { token, authUserId: currentUserId } : 'skip'
   );
   const acceptStandOutMutation = useMutation(api.privateSwipes.acceptStandOut);
   const replyToStandOutMutation = useMutation(api.privateSwipes.replyToStandOut);
@@ -467,16 +467,6 @@ export default function ChatsScreen() {
     });
   }, []);
 
-  // Log incoming likes count
-  useEffect(() => {
-    if (__DEV__ && incomingLikes !== undefined) {
-      console.log('[P2_FRONTEND_LIKES]', {
-        count: incomingLikes.length,
-        likes: incomingLikes.map(l => ({ from: l.fromUserId?.slice(-8), action: l.action }))
-      });
-    }
-  }, [incomingLikes]);
-
   const getStandOutActionError = useCallback((error: unknown) => {
     const message = String((error as any)?.message ?? error ?? '');
     if (/already|handled|not found|no longer|blocked|available/i.test(message)) {
@@ -486,11 +476,12 @@ export default function ChatsScreen() {
   }, []);
 
   const handleAcceptStandOut = useCallback(async (request: IncomingStandOutRow) => {
-    if (!currentUserId || activeStandOutAction) return;
+    if (!currentUserId || !token || activeStandOutAction) return;
     const actionKey = `accept:${request.likeId}`;
     setActiveStandOutAction(actionKey);
     try {
       const result = await acceptStandOutMutation({
+        token,
         authUserId: currentUserId,
         likeId: request.likeId as any,
       });
@@ -511,17 +502,19 @@ export default function ChatsScreen() {
     acceptStandOutMutation,
     activeStandOutAction,
     currentUserId,
+    token,
     getStandOutActionError,
     handleOpenConversation,
     markStandOutHandled,
   ]);
 
   const handleIgnoreStandOut = useCallback(async (request: IncomingStandOutRow) => {
-    if (!currentUserId || activeStandOutAction) return;
+    if (!currentUserId || !token || activeStandOutAction) return;
     const actionKey = `ignore:${request.likeId}`;
     setActiveStandOutAction(actionKey);
     try {
       await ignoreStandOutMutation({
+        token,
         authUserId: currentUserId,
         likeId: request.likeId as any,
       });
@@ -536,6 +529,7 @@ export default function ChatsScreen() {
   }, [
     activeStandOutAction,
     currentUserId,
+    token,
     getStandOutActionError,
     ignoreStandOutMutation,
     markStandOutHandled,
@@ -565,7 +559,7 @@ export default function ChatsScreen() {
   }, [activeStandOutAction]);
 
   const handleSubmitStandOutReply = useCallback(async () => {
-    if (!currentUserId || !replyTarget || activeStandOutAction) return;
+    if (!currentUserId || !token || !replyTarget || activeStandOutAction) return;
     const trimmedReply = replyText.trim();
     if (!trimmedReply) {
       Alert.alert('Reply required', 'Write a short reply to accept this Stand Out.');
@@ -576,6 +570,7 @@ export default function ChatsScreen() {
     setActiveStandOutAction(actionKey);
     try {
       const result = await replyToStandOutMutation({
+        token,
         authUserId: currentUserId,
         likeId: replyTarget.likeId as any,
         replyText: trimmedReply,
@@ -597,6 +592,7 @@ export default function ChatsScreen() {
   }, [
     activeStandOutAction,
     currentUserId,
+    token,
     getStandOutActionError,
     handleOpenConversation,
     markStandOutHandled,
@@ -647,24 +643,21 @@ export default function ChatsScreen() {
   // FIX: Use useFocusEffect to mark delivered every time tab gains focus
   useFocusEffect(
     useCallback(() => {
-      if (!currentUserId) return;
+      if (!currentUserId || !token) return;
 
-      // P2-INSTRUMENTATION: Bulk deliver on tab focus
-      // CONTRACT FIX: Use authUserId instead of token
-      if (__DEV__) console.log('[P2_MSG_DELIVER] Tab focused, marking all delivered');
+      // authUserId is an assertion hint; token remains the identity source.
       P2.messages.deliverRequested('bulk-focus');
-      markAllDeliveredMutation({ authUserId: currentUserId })
+      markAllDeliveredMutation({ token, authUserId: currentUserId })
         .then((result) => {
           const count = (result as any)?.count || 0;
-          if (__DEV__) console.log('[P2_MSG_DELIVER] Bulk delivered count:', count);
           P2.messages.deliverSuccess('bulk-focus', count);
         })
         .catch((err) => {
           if (process.env.NODE_ENV !== 'production') {
-            console.warn('[Phase2Chats] Failed to mark all messages delivered:', err);
+            console.warn('[Phase2Chats] Failed to mark messages delivered:', String((err as any)?.message ?? err));
           }
         });
-    }, [currentUserId, markAllDeliveredMutation])
+    }, [currentUserId, token, markAllDeliveredMutation])
   );
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -678,7 +671,7 @@ export default function ChatsScreen() {
   // Update presence on mount and start heartbeat
   useFocusEffect(
     useCallback(() => {
-      if (!currentUserId) return;
+      if (!currentUserId || !token) return;
 
       // FIX: Prevent duplicate intervals using ref guard
       if (isHeartbeatActiveRef.current) {
@@ -692,7 +685,7 @@ export default function ChatsScreen() {
 
       // Update presence immediately on focus
       P2.presence.mutationRequested(currentUserId);
-      updatePresenceMutation({ authUserId: currentUserId })
+      updatePresenceMutation({ token, authUserId: currentUserId })
         .then(() => P2.presence.mutationSuccess(currentUserId))
         .catch(() => {});
 
@@ -706,7 +699,7 @@ export default function ChatsScreen() {
       heartbeatRef.current = setInterval(() => {
         P2.presence.heartbeatTick(currentUserId);
         P2.presence.mutationRequested(currentUserId);
-        updatePresenceMutation({ authUserId: currentUserId })
+        updatePresenceMutation({ token, authUserId: currentUserId })
           .then(() => P2.presence.mutationSuccess(currentUserId))
           .catch(() => {});
       }, PRESENCE_HEARTBEAT_INTERVAL);
@@ -720,21 +713,21 @@ export default function ChatsScreen() {
         }
         isHeartbeatActiveRef.current = false;
       };
-    }, [currentUserId, updatePresenceMutation])
+    }, [currentUserId, token, updatePresenceMutation])
   );
 
   // Update presence when app comes to foreground
   useEffect(() => {
-    if (!currentUserId) return;
+    if (!currentUserId || !token) return;
 
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'active') {
-        updatePresenceMutation({ authUserId: currentUserId }).catch(() => {});
+        updatePresenceMutation({ token, authUserId: currentUserId }).catch(() => {});
       }
     });
 
     return () => subscription.remove();
-  }, [currentUserId, updatePresenceMutation]);
+  }, [currentUserId, token, updatePresenceMutation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002 FIX: Backend conversations from Phase-2 privateConversations table
@@ -744,7 +737,7 @@ export default function ChatsScreen() {
   // P0-AUTH-CRASH-FIX: Gate on canRunQueries to prevent early query errors
   const backendConversations = useQuery(
     api.privateConversations.getUserPrivateConversations,
-    canRunQueries ? { authUserId: currentUserId } : 'skip'
+    canRunQueries && token ? { token, authUserId: currentUserId } : 'skip'
   );
 
   // P2-INSTRUMENTATION: Track conversation list sync
@@ -770,14 +763,12 @@ export default function ChatsScreen() {
       .join('|');
 
     // If unread hash changed (new messages arrived), mark them as delivered
-    // CONTRACT FIX: Use authUserId instead of token
+    // authUserId is an assertion hint; token remains the identity source.
     if (unreadHash && unreadHash !== lastUnreadHashRef.current && currentUserId) {
-      if (__DEV__) console.log('[P2_MSG_DELIVER] Subscription detected new unread, marking delivered');
       P2.messages.deliverRequested('subscription-update');
-      markAllDeliveredMutation({ authUserId: currentUserId })
+      markAllDeliveredMutation({ token, authUserId: currentUserId })
         .then((result) => {
           const count = (result as any)?.count || 0;
-          if (__DEV__) console.log('[P2_MSG_DELIVER] Reactive delivered count:', count);
           P2.messages.deliverSuccess('subscription-update', count);
         })
         .catch(() => {});
@@ -868,13 +859,6 @@ export default function ChatsScreen() {
   useEffect(() => {
     pruneDeletedMessages();
   }, [pruneDeletedMessages]);
-
-  // Debug log for Phase 2 Messages
-  useEffect(() => {
-    if (__DEV__) {
-      console.log('[Phase2Messages] conversations=', conversations.length, conversations.map(c => c.id));
-    }
-  }, [conversations]);
 
   const hasRealMessagesByConversationId = useMemo(() => {
     if (!normalizedBackend) return null;

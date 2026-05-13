@@ -16,6 +16,7 @@ import { shouldCreatePhase2PrivateMessagesNotification } from './phase2Notificat
 import { markPrivateMessageNotificationsForConversation } from './privateNotifications';
 import { softMaskText } from './softMask';
 import { awardWalletCoins } from './wallet';
+import { filterOwnedSafePrivatePhotoUrls } from './phase2PrivatePhotos';
 
 // P1-001: Generate upload URL for secure media (photos/videos)
 // Used by incognito-chat.tsx to upload protected media to Convex storage
@@ -24,6 +25,8 @@ import { awardWalletCoins } from './wallet';
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice'];
 const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
 const PRIVATE_PROTECTED_MEDIA_TIMERS = new Set([0, 30, 60]);
+const MAX_PRIVATE_CONVERSATION_LIST_LIMIT = 80;
+const MAX_PRIVATE_CONVERSATION_SCAN_LIMIT = 200;
 
 type PrivateMessageMediaKind = 'image' | 'video' | 'audio';
 
@@ -212,6 +215,54 @@ function isUnavailableUser(user: Doc<'users'> | null | undefined): boolean {
   );
 }
 
+async function requirePrivateConversationActor(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  authUserId?: string,
+): Promise<Id<'users'>> {
+  const userId = await validateSessionToken(ctx, token.trim());
+  if (!userId) {
+    throw new Error('UNAUTHORIZED');
+  }
+
+  const authHint = authUserId?.trim();
+  if (authHint) {
+    const assertedUserId = await resolveUserIdByAuthId(ctx, authHint);
+    if (!assertedUserId || assertedUserId !== userId) {
+      throw new Error('UNAUTHORIZED');
+    }
+  }
+
+  return userId;
+}
+
+async function usersShareActivePrivateConversation(
+  ctx: QueryCtx | MutationCtx,
+  viewerId: Id<'users'>,
+  targetUserId: Id<'users'>,
+): Promise<boolean> {
+  if (viewerId === targetUserId) return true;
+
+  const participations = await ctx.db
+    .query('privateConversationParticipants')
+    .withIndex('by_user', (q) => q.eq('userId', viewerId))
+    .collect();
+
+  for (const participation of participations) {
+    if (participation.isHidden === true) continue;
+    const conversation = await ctx.db.get(participation.conversationId);
+    if (!conversation) continue;
+    if (
+      conversation.participants.includes(viewerId) &&
+      conversation.participants.includes(targetUserId)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function buildClosedPrivateConversationPayload(
   conversation: Doc<'privateConversations'>,
   otherParticipantId: Id<'users'> | null
@@ -319,46 +370,35 @@ async function batchFetchPresence(
  * - Unread count
  * - Connection source (desire_match, desire_super_like, tod, room)
  *
- * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
+ * Identity is resolved from Mira's custom session token. authUserId is an assertion hint only.
  */
 export const getUserPrivateConversations = query({
   args: {
-    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
+    token: v.string(),
     authUserId: v.optional(v.string()),
+    limit: v.optional(v.number()),
   },
-  handler: async (ctx, { authUserId }) => {
-    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
-    let userId: Id<'users'> | null = null;
+  handler: async (ctx, { token, authUserId, limit }) => {
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
+    const requestedLimit =
+      typeof limit === 'number' && Number.isFinite(limit)
+        ? Math.max(1, Math.min(Math.floor(limit), MAX_PRIVATE_CONVERSATION_LIST_LIMIT))
+        : MAX_PRIVATE_CONVERSATION_LIST_LIMIT;
+    const scanLimit = Math.min(
+      MAX_PRIVATE_CONVERSATION_SCAN_LIMIT,
+      Math.max(requestedLimit * 3, requestedLimit),
+    );
 
-    // Primary: Try server-side auth identity (future-proofing)
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      userId = await resolveUserIdByAuthId(ctx, identity.subject);
-      console.log('[PHASE2 MESSAGES] Resolved from identity.subject:', (userId as string)?.slice(-8) ?? 'NULL');
-    }
-
-    // Fallback: Use client-supplied authUserId (current custom auth system)
-    if (!userId && authUserId) {
-      userId = await resolveUserIdByAuthId(ctx, authUserId);
-      console.log('[PHASE2 MESSAGES] Fallback to authUserId:', (userId as string)?.slice(-8) ?? 'NULL');
-    }
-
-    if (!userId) {
-      console.log('[PHASE2 MESSAGES] Could not resolve user from any source');
-      return [];
-    }
-
-    // Get all conversation participations for this user (Phase-2 table)
-    // Filter out hidden/left conversations
+    // Get a bounded recent participation window for this user (Phase-2 table).
+    // Full cursor pagination can use a denormalized participant lastMessageAt index later.
     const allParticipations = await ctx.db
       .query('privateConversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .order('desc')
+      .take(scanLimit);
 
     // LEAVE CONVERSATION FIX: Exclude conversations user has left/hidden
     const participations = allParticipations.filter((p) => p.isHidden !== true);
-
-    console.log('[PHASE2 MESSAGES] Found participations:', participations.length, '(hidden:', allParticipations.length - participations.length, ')');
 
     if (participations.length === 0) {
       return [];
@@ -455,7 +495,14 @@ export const getUserPrivateConversations = query({
         // PHASE-2 ISOLATION: Use ONLY Phase-2 private photos
         // NO fallback to Phase-1 photos table or primaryPhotoUrl
         // If no Phase-2 photo exists, return null (UI will show placeholder)
-        const photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
+        const safePrivatePhotoUrls = otherPrivateProfile
+          ? await filterOwnedSafePrivatePhotoUrls(
+              ctx,
+              otherParticipantId,
+              otherPrivateProfile.privatePhotoUrls ?? [],
+            )
+          : [];
+        const photoUrl = safePrivatePhotoUrls[0] ?? null;
 
         // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
         // Stored displayName may contain old full names from before the fix
@@ -538,7 +585,8 @@ export const getUserPrivateConversations = query({
     // Filter nulls and sort by last activity (most recent first)
     return results
       .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+      .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0))
+      .slice(0, requestedLimit);
   },
 });
 
@@ -549,48 +597,27 @@ export const getUserPrivateConversations = query({
 /**
  * Get messages for a Phase-2 conversation.
  *
- * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
+ * Identity is resolved from Mira's custom session token. authUserId is an assertion hint only.
  */
 export const getPrivateMessages = query({
   args: {
     conversationId: v.id('privateConversations'),
-    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
+    token: v.string(),
     authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
     before: v.optional(v.number()), // For pagination: get messages before this timestamp
   },
-  handler: async (ctx, { conversationId, authUserId, limit = 50, before }) => {
-    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
-    let userId: Id<'users'> | null = null;
-
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-
-    if (!userId && authUserId) {
-      userId = await resolveUserIdByAuthId(ctx, authUserId);
-    }
-
-    console.log('[PHASE2 MSGS] Auth resolve:', {
-      conversationId: (conversationId as string)?.slice(-8),
-      resolvedUserId: (userId as string)?.slice(-8) ?? 'NULL',
-    });
-
-    if (!userId) {
-      return [];
-    }
+  handler: async (ctx, { conversationId, token, authUserId, limit = 50, before }) => {
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
     // Get conversation and verify user is participant
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
-      console.log('[PHASE2 MSGS] Conversation not found');
       return [];
     }
 
     // SECURITY: Verify user is part of this conversation (IDOR prevention)
     if (!conversation.participants.includes(userId)) {
-      console.log('[PHASE2 MSGS] User not authorized');
       return [];
     }
 
@@ -613,20 +640,10 @@ export const getPrivateMessages = query({
       return [];
     }
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
-      console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to read messages:', {
-        userId: (userId as string)?.slice(-8),
-        otherUserId: (otherParticipantId as string)?.slice(-8),
-        conversationId: (conversationId as string)?.slice(-8),
-      });
       return []; // Fail closed - return empty, do not leak message history
     }
     const otherUser = await ctx.db.get(otherParticipantId);
     if (isUnavailableUser(otherUser)) {
-      console.log('[P2_MSG_CLOSED] Unavailable participant attempted message read:', {
-        userId: (userId as string)?.slice(-8),
-        otherUserId: (otherParticipantId as string)?.slice(-8),
-        conversationId: (conversationId as string)?.slice(-8),
-      });
       return [];
     }
 
@@ -787,7 +804,6 @@ export const markPrivateMessagesRead = mutation({
       return { success: true, markedCount: 0 };
     }
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
-      console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to mark messages read');
       throw new Error('Access denied');
     }
     {
@@ -813,8 +829,6 @@ export const markPrivateMessagesRead = mutation({
     for (const message of unreadMessages) {
       await ctx.db.patch(message._id, { readAt: now });
     }
-
-    console.log('[P2_MSG_READ] Marked', unreadMessages.length, 'messages as read for user:', (userId as string).slice(-8));
 
     // Update participant's unread count to 0
     const participantRecord = await ctx.db
@@ -1003,8 +1017,6 @@ export const sendPrivateMessage = mutation({
       clientMessageId,
     });
 
-    console.log('[P2_MSG_SEND] Sent:', type, 'from:', (senderId as string).slice(-8), 'msgId:', (messageId as string).slice(-8));
-
     const isRealUserMessage =
       COUNTABLE_MESSAGE_TYPES.includes(type) &&
       (type !== 'text' || maskedContent.trim().length > 0);
@@ -1049,13 +1061,6 @@ export const sendPrivateMessage = mutation({
           createdAt: now,
         });
         await ctx.db.patch(conversationId, { firstMutualReplyAt: now });
-
-        console.log('[P2_POINT_AWARD]', {
-          conversationId,
-          senderId,
-          recipientId,
-          awardedBoth: true,
-        });
       }
     }
 
@@ -1135,54 +1140,26 @@ export const sendPrivateMessage = mutation({
 /**
  * Get details of a single Phase-2 conversation.
  *
- * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
+ * Identity is resolved from Mira's custom session token. authUserId is an assertion hint only.
  */
 export const getPrivateConversation = query({
   args: {
     conversationId: v.id('privateConversations'),
-    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
+    token: v.string(),
     authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { conversationId, authUserId }) => {
-    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
-    let userId: Id<'users'> | null = null;
-
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-
-    if (!userId && authUserId) {
-      userId = await resolveUserIdByAuthId(ctx, authUserId);
-    }
-
-    console.log('[PHASE2 CONVO] Auth resolve:', {
-      conversationId: (conversationId as string)?.slice(-8),
-      resolvedUserId: (userId as string)?.slice(-8) ?? 'NULL',
-      source: identity?.subject ? 'identity' : authUserId ? 'authUserId' : 'none',
-    });
-
-    if (!userId) {
-      console.log('[PHASE2 CONVO] No user resolved - returning null');
-      return null;
-    }
+  handler: async (ctx, { conversationId, token, authUserId }) => {
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
     // Get conversation
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
-      console.log('[PHASE2 CONVO] Conversation not found in DB');
       return null;
     }
 
     // SECURITY: Verify user is participant (IDOR prevention)
     const isParticipant = conversation.participants.includes(userId);
-    console.log('[PHASE2 CONVO] Participant check:', {
-      isParticipant,
-      participants: conversation.participants.map((p) => (p as string)?.slice(-8)),
-      userId: (userId as string)?.slice(-8),
-    });
     if (!isParticipant) {
-      console.log('[PHASE2 CONVO] User not authorized - not a participant');
       return null;
     }
 
@@ -1195,7 +1172,6 @@ export const getPrivateConversation = query({
       .first();
 
     if (userParticipation?.isHidden === true) {
-      console.log('[PHASE2 CONVO] User has left/hidden this conversation');
       return null;
     }
 
@@ -1229,8 +1205,14 @@ export const getPrivateConversation = query({
       )
       .first();
 
-    // Get photo URL - use Phase-2 private profile photos only (strict isolation)
-    const photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
+    const safePrivatePhotoUrls = otherPrivateProfile
+      ? await filterOwnedSafePrivatePhotoUrls(
+          ctx,
+          otherParticipantId,
+          otherPrivateProfile.privatePhotoUrls ?? [],
+        )
+      : [];
+    const photoUrl = safePrivatePhotoUrls[0] ?? null;
 
     // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
     // Stored displayName may contain old full names from before the fix
@@ -1276,7 +1258,6 @@ export const getPrivateConversation = query({
       .withIndex('by_user', (q) => q.eq('userId', otherParticipantId))
       .first();
     const participantLastActive = otherUserPresence?.lastActiveAt ?? 0;
-    console.log('[P2_PRESENCE_READ] Chat:', (otherParticipantId as string).slice(-8), 'lastActive:', participantLastActive ? new Date(participantLastActive).toISOString() : 'null');
 
     return {
       id: conversation._id,
@@ -1309,29 +1290,15 @@ export const getPrivateConversation = query({
  * Get total unread message count across all Phase-2 conversations.
  * Used for notification badges.
  *
- * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
+ * Identity is resolved from Mira's custom session token. authUserId is an assertion hint only.
  */
 export const getTotalUnreadCount = query({
   args: {
-    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
+    token: v.string(),
     authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { authUserId }) => {
-    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
-    let userId: Id<'users'> | null = null;
-
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-
-    if (!userId && authUserId) {
-      userId = await resolveUserIdByAuthId(ctx, authUserId);
-    }
-
-    if (!userId) {
-      return 0;
-    }
+  handler: async (ctx, { token, authUserId }) => {
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
     const participations = await ctx.db
       .query('privateConversationParticipants')
@@ -1365,25 +1332,11 @@ export const getTotalUnreadCount = query({
 
 export const getPrivateUnreadConversationCount = query({
   args: {
-    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
+    token: v.string(),
     authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { authUserId }) => {
-    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
-    let userId: Id<'users'> | null = null;
-
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-
-    if (!userId && authUserId) {
-      userId = await resolveUserIdByAuthId(ctx, authUserId);
-    }
-
-    if (!userId) {
-      return 0;
-    }
+  handler: async (ctx, { token, authUserId }) => {
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
     const participations = await ctx.db
       .query('privateConversationParticipants')
@@ -1469,7 +1422,6 @@ export const markPrivateMessagesDelivered = mutation({
       return { success: true, count: 0 };
     }
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
-      console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to mark messages delivered');
       return { success: false, count: 0 };
     }
     {
@@ -1496,8 +1448,6 @@ export const markPrivateMessagesDelivered = mutation({
       await ctx.db.patch(message._id, { deliveredAt: now });
     }
 
-    console.log('[P2_MSG_DELIVER] Marked', undeliveredMessages.length, 'messages as delivered for user:', (userId as string).slice(-8));
-
     return { success: true, count: undeliveredMessages.length };
   },
 });
@@ -1513,21 +1463,18 @@ export const markPrivateMessagesDelivered = mutation({
  * DELIVERED-TICK-FIX: Ensures "delivered" state is set when message reaches device,
  * not when conversation is opened. Follows Phase-1 pattern exactly.
  *
- * CONTRACT FIX: Changed from token to authUserId
+ * authUserId is an assertion hint; token remains the identity source.
  */
 export const markAllPrivateMessagesDelivered = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
+    const { token, authUserId } = args;
     const now = Date.now();
 
-    // Resolve authUserId to Convex user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false, count: 0 };
-    }
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
     // Get all conversations this user is part of
     const participations = await ctx.db
@@ -1888,11 +1835,6 @@ export const leavePrivateConversation = mutation({
       isHidden: true,
     });
 
-    console.log('[leavePrivateConversation] User left conversation:', {
-      userId: (userId as string)?.slice(-8),
-      conversationId: (conversationId as string)?.slice(-8),
-    });
-
     return { success: true };
   },
 });
@@ -2012,12 +1954,6 @@ export const markPrivateSecureMediaViewed = mutation({
       ...(timerEndsAt ? { timerEndsAt } : {}),
     });
 
-    console.log('[markPrivateSecureMediaViewed]', {
-      messageId: (messageId as string)?.slice(-8),
-      timerSeconds: protectedMediaTimer,
-      viewOnce: isViewOnce,
-    });
-
     return { success: true, viewedAt: now, timerEndsAt };
   },
 });
@@ -2079,10 +2015,6 @@ export const markPrivateSecureMediaExpired = mutation({
     await ctx.db.patch(messageId, {
       isExpired: true,
       expiredAt: message.timerEndsAt ?? now,
-    });
-
-    console.log('[markPrivateSecureMediaExpired]', {
-      messageId: (messageId as string)?.slice(-8),
     });
 
     return { success: true };
@@ -2165,15 +2097,6 @@ export const cleanupExpiredPrivateProtectedMedia = internalMutation({
       redactedCount += 1;
     }
 
-    if (redactedCount > 0 || storageDeleteFailures > 0) {
-      console.log('[cleanupExpiredPrivateProtectedMedia] sweep complete', {
-        scannedCount,
-        redactedCount,
-        storageDeletedCount,
-        storageDeleteFailures,
-      });
-    }
-
     return {
       success: true,
       scannedCount,
@@ -2201,14 +2124,11 @@ export const cleanupExpiredPrivateProtectedMedia = internalMutation({
  */
 export const updatePresence = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { authUserId }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      console.log('[P2_PRESENCE_WRITE] Failed: user_not_found for authUserId:', authUserId?.slice(-8));
-      return { success: false, error: 'user_not_found' };
-    }
+  handler: async (ctx, { token, authUserId }) => {
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
     const user = await ctx.db.get(userId);
     if (isUnavailableUser(user)) {
       return { success: false, error: 'user_unavailable' };
@@ -2228,7 +2148,6 @@ export const updatePresence = mutation({
         lastActiveAt: now,
         updatedAt: now,
       });
-      console.log('[P2_PRESENCE_WRITE] Updated:', (userId as string).slice(-8), 'at', new Date(now).toISOString());
     } else {
       // Create new presence record
       await ctx.db.insert('privateUserPresence', {
@@ -2236,7 +2155,6 @@ export const updatePresence = mutation({
         lastActiveAt: now,
         updatedAt: now,
       });
-      console.log('[P2_PRESENCE_WRITE] Created:', (userId as string).slice(-8), 'at', new Date(now).toISOString());
     }
 
     return { success: true };
@@ -2249,9 +2167,16 @@ export const updatePresence = mutation({
  */
 export const getPresence = query({
   args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     userId: v.id('users'),
   },
-  handler: async (ctx, { userId }) => {
+  handler: async (ctx, { token, authUserId, userId }) => {
+    const viewerId = await requirePrivateConversationActor(ctx, token, authUserId);
+    if (!(await usersShareActivePrivateConversation(ctx, viewerId, userId))) {
+      return 0;
+    }
+
     const user = await ctx.db.get(userId);
     if (isUnavailableUser(user)) {
       return 0;
@@ -2331,22 +2256,14 @@ export const setPrivateTypingStatus = mutation({
 export const getPrivateTypingStatus = query({
   args: {
     conversationId: v.id('privateConversations'),
+    token: v.string(),
     authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { conversationId, authUserId }) => {
+  handler: async (ctx, { conversationId, token, authUserId }) => {
     const now = Date.now();
     const TYPING_TIMEOUT = 5000; // 5 seconds
 
-    // Resolve user ID
-    let userId: Id<'users'> | null = null;
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity?.subject) {
-      userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    }
-    if (!userId && authUserId) {
-      userId = await resolveUserIdByAuthId(ctx, authUserId);
-    }
-    if (!userId) return { isTyping: false };
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
     // Get conversation to find the other participant
     const conversation = await ctx.db.get(conversationId);

@@ -57,11 +57,11 @@ export default function PrivateTabsLayout() {
   // ═══════════════════════════════════════════════════════════════════════════
   const backendConversations = useQuery(
     api.privateConversations.getUserPrivateConversations,
-    currentUserId && !isDemoMode ? { authUserId: currentUserId } : 'skip'
+    currentUserId && token && !isDemoMode ? { token, authUserId: currentUserId } : 'skip'
   );
   const privateUnreadConversationCount = useQuery(
     api.privateConversations.getPrivateUnreadConversationCount,
-    currentUserId && !isDemoMode ? { authUserId: currentUserId } : 'skip'
+    currentUserId && token && !isDemoMode ? { token, authUserId: currentUserId } : 'skip'
   );
   const messagesBadgeCount = privateUnreadConversationCount ?? 0;
 
@@ -126,7 +126,7 @@ export default function PrivateTabsLayout() {
   // CONTRACT FIX: Use authUserId (currentUserId) instead of token
   const lastUnreadHashRef = useRef<string>('');
   useEffect(() => {
-    if (!backendConversations || !currentUserId) return;
+    if (!backendConversations || !currentUserId || !token) return;
 
     try {
       const unreadHash = backendConversations
@@ -135,29 +135,29 @@ export default function PrivateTabsLayout() {
         .join('|');
 
       if (unreadHash && unreadHash !== lastUnreadHashRef.current) {
-        markAllDeliveredMutation({ authUserId: currentUserId }).catch(() => {});
+        markAllDeliveredMutation({ token, authUserId: currentUserId }).catch(() => {});
       }
       lastUnreadHashRef.current = unreadHash;
     } catch {
       // Silent fail - badge will just show stale data
     }
-  }, [backendConversations, currentUserId, markAllDeliveredMutation]);
+  }, [backendConversations, currentUserId, token, markAllDeliveredMutation]);
 
   // Mark messages delivered on app foreground
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   useEffect(() => {
-    if (!currentUserId) return;
+    if (!currentUserId || !token) return;
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
-        markAllDeliveredMutation({ authUserId: currentUserId }).catch(() => {});
+        markAllDeliveredMutation({ token, authUserId: currentUserId }).catch(() => {});
       }
       appStateRef.current = nextAppState;
     };
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
     return () => subscription.remove();
-  }, [currentUserId, markAllDeliveredMutation]);
+  }, [currentUserId, token, markAllDeliveredMutation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SAFE QUERY 2: Truth or Dare Pending Connect Requests (for T/D badge)

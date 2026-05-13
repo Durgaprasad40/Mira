@@ -27,6 +27,7 @@ import {
   TouchableOpacity,
   InteractionManager,
   Modal,
+  ActivityIndicator,
 } from "react-native";
 import { Image } from "expo-image";
 import Animated, {
@@ -200,6 +201,8 @@ const PHASE1_LOCATION_FOCUS_REVISIT_GAP_MS = 30 * 1000;
 const DEEP_CONNECT_QUERY_TIMEOUT_MS = 8500;
 /** Deep Connect: downward pull distance before the deck refreshes */
 const DEEP_CONNECT_PULL_REFRESH_MIN_DISTANCE = 92;
+const DEBUG_DEEPCONNECT_LOGS =
+  __DEV__ && process.env.EXPO_PUBLIC_DEBUG_DEEPCONNECT === 'true';
 
 function getDistanceDebugValue(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value)
@@ -1230,7 +1233,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Phase-2 private discover query args (skip if Phase-1 mode)
   // CRITICAL: This queries userPrivateProfiles table which requires isSetupComplete=true
-  // AUTH_FIX: Pass authUserId for fallback resolution when server auth fails
+  // AUTH_FIX: Pass authUserId only as a token cross-check hint.
   // FIRST_MOUNT_FIX: queryTrigger forces re-subscription when userId becomes available
   // AUTH_READY_FIX: Wait for authReady before querying to ensure onboardingCompleted is correct
   // FLICKER_FIX: Use stable ref so once auth is ready, it stays ready (no query skip toggle)
@@ -1249,14 +1252,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const isAuthReadyForQuery = stableAuthReadyRef.current;
 
   // FLICKER_FIX: Debug log for auth state stability (Phase-2 only; log when snapshot changes — no per-render spam)
-  if (__DEV__ && isPhase2) {
+  if (DEBUG_DEEPCONNECT_LOGS && isPhase2) {
     const readyLogKey = JSON.stringify({
       authReady,
       onboardingCompleted,
       rawAuthReady,
       stableReady: stableAuthReadyRef.current,
       isAuthReadyForQuery,
-      userId: userId?.slice(0, 10) ?? 'null',
+      hasUserId: typeof userId === 'string' && userId.length > 0,
     });
     if (prevDiscoverReadyLogKeyRef.current !== readyLogKey) {
       prevDiscoverReadyLogKeyRef.current = readyLogKey;
@@ -1266,12 +1269,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         rawAuthReady,
         stableReady: stableAuthReadyRef.current,
         isAuthReadyForQuery,
-        userId: userId?.slice(0, 10) ?? 'null',
       });
     }
   }
 
-  // Deep Connect query args: auth fallback + server-side intent filtering.
+  // Deep Connect query args: token-bound viewer + server-side intent filtering.
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
   const privateDiscoverArgs = useMemo(
     () =>
@@ -1294,10 +1296,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   const phase2ConversationsArgs = useMemo(
     () =>
-      isPhase2 && !isDemoMode && !externalProfiles && typeof userId === "string" && userId.trim().length > 0
-        ? { authUserId: userId }
+      isPhase2 && !isDemoMode && !externalProfiles && token && typeof userId === "string" && userId.trim().length > 0
+        ? { token, authUserId: userId }
         : "skip" as const,
-    [externalProfiles, isDemoMode, isPhase2, userId],
+    [externalProfiles, isDemoMode, isPhase2, token, userId],
   );
   const phase2Conversations = useQuery(
     api.privateConversations.getUserPrivateConversations,
@@ -1407,8 +1409,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           .map((p) => {
             const intentKeys = resolvePhase2IntentKeys(p);
             // DEV assertion: warn if profile has no valid intent keys
-            if (__DEV__ && (!intentKeys || intentKeys.length === 0)) {
-              console.warn('[demo] Missing privateIntentKeys for', p.id);
+            if (DEBUG_DEEPCONNECT_LOGS && (!intentKeys || intentKeys.length === 0)) {
+              console.warn('[demo] Missing privateIntentKeys');
             }
             return mapPhase2CardProfile({
               profileId: p.id,
@@ -1485,7 +1487,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       const withPhotos = profilesSafe.filter((p: any) => p.blurredPhotoUrls?.length > 0).length;
       const withoutPhotos = profilesSafe.filter((p: any) => !p.blurredPhotoUrls?.length).length;
       const incomplete = profilesSafe.filter((p: any) => !p.isSetupComplete).length;
-      if (__DEV__ && DEBUG_PHASE2) {
+      if (DEBUG_DEEPCONNECT_LOGS) {
         console.log('[PHASE2_DISCOVER_FE] Profile stats:', { total: profilesSafe.length, withPhotos, withoutPhotos, incomplete });
       }
 
@@ -1494,15 +1496,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const resolvedPhase2Name = resolvePhase2CardName(p.displayName);
         const intentKeys = resolvePhase2IntentKeys(p, []);
 
-        if (__DEV__ && DEBUG_PHASE2) {
-          console.log(`[P2_DATA] ${resolvedPhase2Name}(${p.userId?.slice?.(-6)}) ${photoUrls.length}p`);
+        if (DEBUG_DEEPCONNECT_LOGS) {
+          console.log('[P2_DATA]', { photoCount: photoUrls.length });
         }
 
         // [P2_PROMPT_DUP] One-shot dev probe — warns when backend
         // promptAnswers contain duplicate promptId values for the same
         // profile. Used to confirm the data-side hypothesis behind the
         // OnePlus prompt-repetition report.
-        if (__DEV__ && Array.isArray(p.promptAnswers) && p.promptAnswers.length > 1) {
+        if (DEBUG_DEEPCONNECT_LOGS && Array.isArray(p.promptAnswers) && p.promptAnswers.length > 1) {
           const seen = new Set<string>();
           const dups: string[] = [];
           for (const ans of p.promptAnswers) {
@@ -1513,7 +1515,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           }
           if (dups.length > 0) {
             console.warn(
-              `[P2_PROMPT_DUP] ${resolvedPhase2Name}(${p.userId?.slice?.(-6)}): duplicate promptIds in profilePrompts:`,
+              '[P2_PROMPT_DUP] duplicate promptIds in profilePrompts:',
               dups,
             );
           }
@@ -1558,7 +1560,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       if (isPhase2) {
         // Phase-2: Allow ALL profiles - ProfileCard will show placeholder for no photos
         // This implements the 90/10 soft matching rule
-        if (__DEV__ && DEBUG_PHASE2) {
+        if (DEBUG_DEEPCONNECT_LOGS) {
           const withPhotos = latestProfiles.filter((p) => p.photos?.length > 0).length;
           const withoutPhotos = latestProfiles.length - withPhotos;
           console.log('[PHASE2_DISCOVER_FE] Soft match: all', latestProfiles.length, 'profiles kept (', withPhotos, 'with photos,', withoutPhotos, 'without)');
@@ -1611,8 +1613,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // FLICKER_FIX: Only clear if there WAS a previous user (not first mount)
     if (stableUserIdRef.current !== null) {
       phase1StableProfilesMapRef.current.clear();
-      if (__DEV__ && isPhase2) {
-        console.log('[DISCOVER_RESET] reason=user_changed, prev=', stableUserIdRef.current?.slice(0, 10), 'new=', userId?.slice(0, 10));
+      if (DEBUG_DEEPCONNECT_LOGS && isPhase2) {
+        console.log('[DISCOVER_RESET] reason=user_changed');
       }
     }
     stableUserIdRef.current = userId;
@@ -1697,7 +1699,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const usingStableCache = isPhase2
     ? validProfiles.length === 0 && phase2CacheBelongsToViewer && phase2RenderableCachedProfileCount > 0
     : effectiveConvexProfiles === undefined && phase1StableProfilesMapRef.current.size > 0;
-  if (__DEV__ && isPhase2 && usingStableCache) {
+  if (DEBUG_DEEPCONNECT_LOGS && isPhase2 && usingStableCache) {
     console.log('[DISCOVER_GUARD] Using stable cache:', phase2RenderableCachedProfileCount, 'profiles (validProfiles was empty)');
   }
   const profilesRaw = isPhase2 ? phase2ProfilesRaw : phase1ProfilesRaw;
@@ -1760,8 +1762,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       phase2InitialFilterCapturedRef.current = true;
       prevFilterRef.current = intentFilterKey;
       setPhase2InitialFilterReady(true);
-      if (__DEV__) {
-        console.log('[P2_FILTER_INITIAL_CAPTURE]', { intentFilterKey, intentFilters });
+      if (DEBUG_DEEPCONNECT_LOGS) {
+        console.log('[P2_FILTER_INITIAL_CAPTURE]', {
+          intentFilterKey,
+          intentFilterCount: intentFilters.length,
+        });
       }
       return;
     }
@@ -1868,7 +1873,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   useMemo(() => {
     // FLICKER_FIX: Only update map if we have profiles - don't clear on empty
     if (sourceProfiles.length === 0) {
-      if (__DEV__ && isPhase2 && profileMapRef.current.size > 0) {
+      if (DEBUG_DEEPCONNECT_LOGS && isPhase2 && profileMapRef.current.size > 0) {
         console.log('[DISCOVER_GUARD] Ignored empty sourceProfiles overwrite, keeping', profileMapRef.current.size, 'profiles in map');
       }
       return; // Keep existing map data
@@ -1919,7 +1924,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       const removed = removedProfileIds.size;
       if (removed > 0) {
         setQueueVersion((version) => version + 1);
-        if (__DEV__) {
+        if (DEBUG_DEEPCONNECT_LOGS) {
           console.log('[P2_CACHE_PURGE_CONNECTED]', `removed=${removed}`, reason);
         }
       }
@@ -2244,7 +2249,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         refreshLocationCached({ allowBackgroundFreshen: true }).finally(() => {
           isRefreshingLocationRef.current = false;
         });
-        if (__DEV__) {
+        if (DEBUG_DEEPCONNECT_LOGS || (__DEV__ && !isPhase2)) {
           console.log('[SCREEN_FOCUS_REFRESH]', isPhase2 ? 'DeepConnect' : 'Discover', 'focus gained');
         }
       }
@@ -2527,6 +2532,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     () => (next ? getRenderableProfilePhotos(next.photos)[0]?.url ?? null : null),
     [next],
   );
+  const currentHeroPhotoUrl = useMemo(
+    () => (current ? getRenderableProfilePhotos(current.photos)[0]?.url ?? null : null),
+    [current],
+  );
+  const [phase2TopCardMediaReady, setPhase2TopCardMediaReady] = useState(true);
+  const phase2TopCardReady = !isPhase2 || !current || phase2TopCardMediaReady;
 
   // next+1 hero (one card behind the next card). Pulled from the same stable
   // queue/profileMap that drives queueCurrent / queueNext.
@@ -2550,6 +2561,32 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       });
     }
   }, [nextHeroPhotoUrl, nextNextHeroPhotoUrl]);
+
+  useEffect(() => {
+    if (!isPhase2 || !current || !currentHeroPhotoUrl) {
+      setPhase2TopCardMediaReady(true);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = setTimeout(() => {
+      if (!cancelled) setPhase2TopCardMediaReady(true);
+    }, 2500);
+
+    setPhase2TopCardMediaReady(false);
+    Image.prefetch(currentHeroPhotoUrl)
+      .catch(() => {})
+      .finally(() => {
+        if (cancelled) return;
+        clearTimeout(timeout);
+        setPhase2TopCardMediaReady(true);
+      });
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [isPhase2, current?.id, currentHeroPhotoUrl]);
 
   // P2-4: Prefetch the CURRENT card's remaining photos (beyond the hero) so
   // that tapping into the full profile / swiping between photos does not
@@ -2811,6 +2848,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       const swipedProfile = currentRef.current;
       if (!swipedProfile) { releaseSwipeLock(activeSwipeId); return; }
 
+      if (isPhase2 && !phase2TopCardReady) {
+        resetPosition();
+        releaseSwipeLock(activeSwipeId);
+        return;
+      }
 
       // Check daily limits — release lock and bail without advancing
       if (direction === "right" && hasReachedLikeLimit()) { releaseSwipeLock(activeSwipeId); return; }
@@ -2891,7 +2933,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           return;
         }
 
-        if (!convexUserId) { releaseSwipeLock(activeSwipeId); return; }
+        if (!convexUserId || (isPhase2 && !isDemoMode && !token)) { releaseSwipeLock(activeSwipeId); return; }
         const action: SwipeAction = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
 
         // Track swipe action for user journey replay
@@ -2911,11 +2953,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         if (isPhase2 && !isDemoMode) {
           const p2ToUserId = swipedProfile.userId;
           if (!p2ToUserId || p2ToUserId === swipedProfile.id) {
-            if (__DEV__) {
+            if (DEBUG_DEEPCONNECT_LOGS) {
               console.warn('[P2_SWIPE_GUARD] Phase-2 profile is missing a valid users._id; refusing swipe', {
                 hasUserId: !!p2ToUserId,
                 idEqualsUserId: p2ToUserId === swipedProfile.id,
-                profileIdSuffix: (swipedProfile.id as string | undefined)?.slice?.(-8),
               });
             }
             Toast.show("Couldn't process swipe. Please try again.");
@@ -2928,6 +2969,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const swipePromise =
           isPhase2 && !isDemoMode
             ? phase2SwipeMutation({
+                token: token as string,
                 authUserId: convexUserId as string,
                 toUserId: swipedProfile.userId as Id<'users'>,
                 action,
@@ -3109,6 +3151,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       releaseSwipeLock,
       resetPosition,
       token,
+      phase2TopCardReady,
     ],
   );
 
@@ -3117,6 +3160,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // Guard: don't start new animations if navigating, unfocused, or already swiping
       if (navigatingRef.current || !isFocusedRef.current) return;
       if (swipeLockRef.current) return;
+      if (isPhase2 && !phase2TopCardReady) return;
       // Check limits before animating
       if (direction === "right" && hasReachedLikeLimit()) return;
       if (direction === "up" && hasReachedStandOutLimit()) return;
@@ -3194,7 +3238,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         },
       );
     },
-    [panAX, panAY, panBX, panBY, overlayOpacity, hasReachedLikeLimit, hasReachedStandOutLimit, acquireSwipeLock, releaseSwipeLock],
+    [
+      panAX,
+      panAY,
+      panBX,
+      panBY,
+      overlayOpacity,
+      hasReachedLikeLimit,
+      hasReachedStandOutLimit,
+      acquireSwipeLock,
+      releaseSwipeLock,
+      isPhase2,
+      phase2TopCardReady,
+    ],
   );
 
   // Stable refs so the panResponder (created once) always calls the latest version
@@ -3261,7 +3317,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       1.25,
     );
 
-    if (__DEV__) {
+    if (__DEV__ && (!isPhase2 || DEBUG_DEEPCONNECT_LOGS)) {
       // Dev-only: one log per release, NOT per frame. No PII.
       console.log("[SWIPE_CLASSIFY]", {
         dx: Math.round(dx),
@@ -3271,6 +3327,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         direction,
         phase: isPhase2 ? "phase2" : "phase1",
       });
+    }
+
+    if (isPhase2 && direction && !phase2TopCardReady) {
+      resetPosition();
+      return;
     }
 
     if (direction === "up") {
@@ -3327,7 +3388,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
 
     resetPosition();
-  }, [thresholdX, thresholdY, velocityX, velocityY, profileOpenMinDistance, profileOpenMaxDistance, profileOpenMinVelocity, resetPosition, hasReachedStandOutLimit, standOutsRemaining, openProfileCb, isPhase2, showPhaseTransition, triggerPhase2Refresh]);
+  }, [thresholdX, thresholdY, velocityX, velocityY, profileOpenMinDistance, profileOpenMaxDistance, profileOpenMinVelocity, resetPosition, hasReachedStandOutLimit, openProfileCb, isPhase2, phase2TopCardReady, showPhaseTransition, triggerPhase2Refresh]);
 
   // P0-001 FIX: Keep handlePanEndRef in sync with latest handlePanEnd
   handlePanEndRef.current = handlePanEnd;
@@ -3417,10 +3478,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // CORRECTNESS FIX: Validate that standOutResult.profileId matches current profile
     // This prevents sending the message to a different profile if the deck changed
     if (standOutResult.profileId !== currentRef.current.id) {
-      if (__DEV__) console.log('[StandOut] Profile mismatch - clearing stale result', {
-        resultId: standOutResult.profileId,
-        currentId: currentRef.current.id,
-      });
+      if (DEBUG_DEEPCONNECT_LOGS) {
+        console.log('[StandOut] Profile mismatch - clearing stale result');
+      }
       useInteractionStore.getState().setStandOutResult(null);
       return;
     }
@@ -3525,7 +3585,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         icon: "cloud-offline-outline" as const,
         iconColor: "rgba(125, 211, 252, 0.95)",
         title: "Deep Connect hit a connection snag",
-        subtitle: "We couldn't refresh the deck just now. Pull down on the top card or try again in a moment.",
+        subtitle: "We couldn't refresh the deck just now. Try again in a moment.",
         primaryAction: "retry" as const,
         primaryLabel: "Try again",
         secondaryAction: null,
@@ -3538,11 +3598,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         icon: "options-outline" as const,
         iconColor: "rgba(255, 206, 102, 0.96)",
         title: "You’ve seen everyone for now",
-        subtitle: "Adjust your preferences to discover more profiles.",
+        subtitle: "No Deep Connect profiles match these preferences right now. Try refreshing or adjust your preferences.",
         primaryAction: "adjust_preferences" as const,
         primaryLabel: "Adjust preferences",
-        secondaryAction: null,
-        secondaryLabel: null,
+        secondaryAction: "refresh" as const,
+        secondaryLabel: "Refresh",
       };
     }
 
@@ -3550,11 +3610,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       icon: "sparkles-outline" as const,
       iconColor: "rgba(233, 69, 96, 0.95)",
       title: "You’ve seen everyone for now",
-      subtitle: "Adjust your preferences to discover more profiles.",
+      subtitle: "No Deep Connect profiles are available right now. Try refreshing, or check your preferences and private profile setup.",
       primaryAction: "adjust_preferences" as const,
       primaryLabel: "Adjust preferences",
-      secondaryAction: null,
-      secondaryLabel: null,
+      secondaryAction: "refresh" as const,
+      secondaryLabel: "Refresh",
     };
   }, [intentFilters, isPhase2, isPhase2NetworkIssueSettled, sourceProfiles.length]);
 
@@ -3609,13 +3669,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       phase2ReadyToDecideLoggedRef.current = false;
       return;
     }
-    if (__DEV__ && !phase2ReadyToDecideLoggedRef.current) {
+    if (DEBUG_DEEPCONNECT_LOGS && !phase2ReadyToDecideLoggedRef.current) {
       phase2ReadyToDecideLoggedRef.current = true;
       console.log('[P2_READY_TO_DECIDE]', {
         phase2HasHydrated,
         phase2InitialFilterReady,
         phase2QueryResolved,
-        intentFilters,
+        intentFilterCount: intentFilters.length,
       });
     }
   }, [intentFilters, isPhase2, phase2HasHydrated, phase2InitialFilterReady, phase2QueryResolved, phase2ReadyToDecide]);
@@ -3627,7 +3687,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [cachedSearchingDone, isPhase2, markCachedSearchingDone, state]);
 
   useEffect(() => {
-    if (!__DEV__ || !isPhase2) return;
+    if (!DEBUG_DEEPCONNECT_LOGS || !isPhase2) return;
     console.log("[P2_STATE_DEBUG]", {
       profilesSafeLength: profilesSafe.length,
       profilesLength: profiles.length,
@@ -3635,7 +3695,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       cachedHas,
       searchingDone: cachedSearchingDone,
       state,
-      intentFilters,
+      intentFilterCount: intentFilters.length,
     });
   }, [cachedHas, cachedSearchingDone, intentFilters, isPhase2, profiles.length, profilesSafe.length, state, usingStableCache]);
 
@@ -4329,6 +4389,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     religion={current.religion}
                   />
                   <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} dark={dark} />
+                  {isPhase2 && !phase2TopCardReady ? (
+                    <View style={styles.phase2TopCardMediaLoading} pointerEvents="none">
+                      <ActivityIndicator size="small" color="rgba(255,255,255,0.82)" />
+                    </View>
+                  ) : null}
                 </Animated.View>
               </GestureDetector>
             )}
@@ -4360,10 +4425,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             styles.actionButton,
             styles.premiumSkipBtn,
             isPhase2 && styles.deepConnectSkipBtn,
-            !current && styles.premiumBtnDisabled,
+            (!current || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
           ]}
           onPress={() => animateSwipeRef.current("left")}
-          disabled={!current}
+          disabled={!current || (isPhase2 && !phase2TopCardReady)}
           feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="light"
         >
@@ -4402,11 +4467,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             styles.actionButton,
             styles.premiumStandOutBtn,
             isPhase2 && styles.deepConnectStandOutBtn,
-            (hasReachedStandOutLimit() || !current) && styles.premiumBtnDisabled,
+            (hasReachedStandOutLimit() || !current || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
           ]}
           onPress={() => {
             const c = currentRef.current;
-            if (!hasReachedStandOutLimit() && c) {
+            if (!hasReachedStandOutLimit() && c && (!isPhase2 || phase2TopCardReady)) {
               // Open inline composer over the current profile card. The
               // numeric `standOutsLeft` is read live by the sheet via the
               // standOutsRemaining() callback below — no need to pass it
@@ -4414,7 +4479,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               setStandOutSheetTarget({ profileId: c.id, name: c.name });
             }
           }}
-          disabled={hasReachedStandOutLimit() || !current}
+          disabled={hasReachedStandOutLimit() || !current || (isPhase2 && !phase2TopCardReady)}
           feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="medium"
         >
@@ -4455,10 +4520,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             styles.actionButton,
             styles.premiumLikeBtn,
             isPhase2 && styles.deepConnectLikeBtn,
-            !current && styles.premiumBtnDisabled,
+            (!current || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
           ]}
           onPress={() => animateSwipeRef.current("right")}
-          disabled={!current}
+          disabled={!current || (isPhase2 && !phase2TopCardReady)}
           feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="medium"
         >
@@ -4631,7 +4696,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     const convoId = phase2MatchCelebration.matchedProfile?.conversationId;
                     setPhase2MatchCelebration({ visible: false, matchedProfile: null });
                     if (convoId) {
-                      router.push(`/(main)/incognito-chat?id=${convoId}` as any);
+                      router.push(`/(main)/(private)/(tabs)/chats/${encodeURIComponent(convoId)}` as any);
                     }
                   }}
                 >
@@ -5128,6 +5193,12 @@ const styles = StyleSheet.create({
     bottom: SPACING.sm,
     borderRadius: SIZES.radius.lg,
     overflow: "hidden",
+  },
+  phase2TopCardMediaLoading: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(5, 8, 18, 0.16)",
   },
 
   // 3-Button Action Bar (base)

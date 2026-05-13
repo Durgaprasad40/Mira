@@ -14,6 +14,14 @@ import { shouldCreatePhase2DeepConnectNotification } from './phase2NotificationP
 import { dispatchPrivatePush } from './privateNotifications';
 import { softMaskText } from './softMask';
 import {
+  filterOwnedSafePrivatePhotoUrls,
+  PHASE2_MIN_PRIVATE_PHOTOS,
+} from './phase2PrivatePhotos';
+import {
+  assertCanDeepConnectInteract,
+  canDeepConnectInteract,
+} from './privateDiscover';
+import {
   createPhase2MatchNotificationIfMissing,
   ensurePhase2MatchAndConversation,
   getPhase2UserPair,
@@ -42,34 +50,22 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
-async function hasViewerReportedUser(
-  ctx: MutationCtx | QueryCtx,
-  viewerId: Id<'users'>,
-  targetUserId: Id<'users'>
-): Promise<boolean> {
-  const report = await ctx.db
-    .query('reports')
-    .withIndex('by_reporter_reported_created', (q) =>
-      q.eq('reporterId', viewerId).eq('reportedUserId', targetUserId)
-    )
-    .first();
-  return !!report;
-}
-
 async function isIncomingLikeHiddenBySafety(
   ctx: QueryCtx,
   viewerId: Id<'users'>,
   likerUserId: Id<'users'>
 ): Promise<boolean> {
-  if (await isBlockedBidirectional(ctx, viewerId, likerUserId)) return true;
-  if (await hasViewerReportedUser(ctx, viewerId, likerUserId)) return true;
-  return false;
+  return !(await canDeepConnectInteract(ctx, viewerId, likerUserId));
 }
 
 const STAND_OUT_DAILY_LIMIT = 2;
 const STAND_OUT_COOLDOWN_MS = 30 * 1000;
 const STAND_OUT_MESSAGE_MAX_LENGTH = 120;
 const STAND_OUT_REPLY_MAX_LENGTH = 500;
+const MAX_STAND_OUT_LIST_FETCH_WINDOW = 200;
+const MAX_STAND_OUT_COUNT_SCAN = 300;
+const MAX_INCOMING_LIKE_LIST_FETCH_WINDOW = 150;
+const MAX_INCOMING_LIKE_COUNT_SCAN = 500;
 
 const STAND_OUT_UNSAFE_PATTERNS: RegExp[] = [
   /\bp[o0]rn/i,
@@ -96,6 +92,38 @@ function getStandOutDayStartMs(now: number): number {
   const date = new Date(now);
   date.setUTCHours(0, 0, 0, 0);
   return date.getTime();
+}
+
+function normalizePrivateSwipeLimit(value: number | undefined, fallback = 50, max = 50): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(Math.floor(value), max));
+}
+
+function sortPrivateLikesNewestFirst<T extends Doc<'privateLikes'>>(rows: T[]): T[] {
+  return [...rows].sort(
+    (a, b) => b.createdAt - a.createdAt || String(b._id).localeCompare(String(a._id)),
+  );
+}
+
+async function requirePrivateSwipeActor(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  authUserId?: string,
+): Promise<Id<'users'>> {
+  const actorId = await validateSessionToken(ctx, token.trim());
+  if (!actorId) {
+    throw new Error('UNAUTHORIZED');
+  }
+
+  const authHint = authUserId?.trim();
+  if (authHint) {
+    const assertedUserId = await resolveUserIdByAuthId(ctx, authHint);
+    if (!assertedUserId || assertedUserId !== actorId) {
+      throw new Error('UNAUTHORIZED');
+    }
+  }
+
+  return actorId;
 }
 
 function assertStandOutTextIsSafe(text: string): void {
@@ -233,7 +261,7 @@ async function countStandOutsSentToday(
     .withIndex('by_from_action_createdAt', (q) =>
       q.eq('fromUserId', fromUserId).eq('action', 'super_like').gte('createdAt', dayStart)
     )
-    .collect();
+    .take(STAND_OUT_DAILY_LIMIT);
   return rows.length;
 }
 
@@ -277,18 +305,23 @@ async function getStandOutProfilePreview(
     return null;
   }
 
-  const hasPrivatePhotos = (
-    profile.privatePhotosBlurred?.length ??
-    profile.privatePhotoUrls?.length ??
-    0
-  ) > 0;
+  const safePrivatePhotoUrls = await filterOwnedSafePrivatePhotoUrls(
+    ctx,
+    userId,
+    profile.privatePhotoUrls ?? [],
+  );
+  if (safePrivatePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) {
+    return null;
+  }
+  const hasPrivatePhotos =
+    (profile.privatePhotosBlurred?.length ?? 0) > 0 || safePrivatePhotoUrls.length > 0;
 
   return {
     userId,
     displayName,
     age: profile.age,
     gender: profile.gender,
-    blurredPhotoUrl: profile.privatePhotoUrls?.[0] ?? null,
+    blurredPhotoUrl: safePrivatePhotoUrls[0] ?? null,
     photoBlurEnabled: (profile as any).photoBlurEnabled ?? undefined,
     photoBlurSlots: profile.photoBlurSlots ?? undefined,
     hasPrivatePhotos,
@@ -305,8 +338,7 @@ async function isPendingStandOutVisibleToViewer(
 ): Promise<boolean> {
   if (like.action !== 'super_like') return false;
   if (await getActivePrivateMatch(ctx, viewerId, otherUserId)) return false;
-  if (await isBlockedBidirectional(ctx, viewerId, otherUserId)) return false;
-  if (await hasViewerReportedUser(ctx, viewerId, otherUserId)) return false;
+  if (!(await canDeepConnectInteract(ctx, viewerId, otherUserId))) return false;
 
   const reciprocal = await ctx.db
     .query('privateLikes')
@@ -354,9 +386,7 @@ async function getPendingStandOutForReceiver(
   if (!isPhase2UserEligible(receiver) || !isPhase2UserEligible(sender)) {
     throw new Error('Stand Out request is no longer available');
   }
-  if (await isBlockedBidirectional(ctx, receiverId, like.fromUserId)) {
-    throw new Error('Stand Out request is no longer available');
-  }
+  await assertCanDeepConnectInteract(ctx, receiverId, like.fromUserId);
   if (await getActivePrivateMatch(ctx, receiverId, like.fromUserId)) {
     throw new Error('Stand Out request is already handled');
   }
@@ -449,28 +479,58 @@ async function createStandOutMatchNotifications(
   ]);
   const senderDisplayName = senderDisplayNameRaw ?? 'Someone';
   const receiverDisplayName = receiverDisplayNameRaw ?? 'Someone';
+  const receiverNotificationData = { otherUserId: args.senderId as string };
+  const senderNotificationData = { otherUserId: args.receiverId as string };
 
-  await createPhase2MatchNotificationIfMissing(ctx, {
+  const receiverNotification = await createPhase2MatchNotificationIfMissing(ctx, {
     userId: args.receiverId,
     matchId: args.matchId,
     conversationId: args.conversationId,
     title: 'New Match! 🎉',
     body: `You matched with ${senderDisplayName} in Deep Connect!`,
     now: args.now,
-    data: { otherUserId: args.senderId as string },
-    push: true,
+    data: receiverNotificationData,
+    push: false,
   });
 
-  await createPhase2MatchNotificationIfMissing(ctx, {
+  const senderNotification = await createPhase2MatchNotificationIfMissing(ctx, {
     userId: args.senderId,
     matchId: args.matchId,
     conversationId: args.conversationId,
     title: 'New Match! 🎉',
     body: `You matched with ${receiverDisplayName} in Deep Connect!`,
     now: args.now,
-    data: { otherUserId: args.receiverId as string },
-    push: true,
+    data: senderNotificationData,
+    push: false,
   });
+
+  if (receiverNotification.inserted) {
+    await dispatchPrivatePush(ctx, {
+      userId: args.receiverId,
+      type: 'phase2_match',
+      title: 'New Match! 🎉',
+      body: `You matched with ${senderDisplayName} in Deep Connect!`,
+      data: {
+        ...receiverNotificationData,
+        matchId: args.matchId as string,
+        privateConversationId: args.conversationId as string,
+      },
+    });
+  }
+
+  if (senderNotification.inserted) {
+    await dispatchPrivatePush(ctx, {
+      userId: args.senderId,
+      type: 'phase2_match',
+      title: 'New Match! 🎉',
+      body: `You matched with ${receiverDisplayName} in Deep Connect!`,
+      data: {
+        ...senderNotificationData,
+        matchId: args.matchId as string,
+        privateConversationId: args.conversationId as string,
+      },
+    });
+  }
 }
 
 async function acceptPendingStandOut(
@@ -551,20 +611,17 @@ async function acceptPendingStandOut(
  */
 export const swipe = mutation({
   args: {
-    authUserId: v.string(), // CONTRACT FIX: Changed from token to authUserId
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     toUserId: v.id('users'),
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like')),
     message: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, toUserId, action, message } = args;
+    const { authUserId, toUserId, action, message, token } = args;
     const now = Date.now();
 
-    // Resolve authUserId to Convex user ID
-    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!fromUserId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const fromUserId = await requirePrivateSwipeActor(ctx, token, authUserId);
 
     // Prevent self-swiping
     if (fromUserId === toUserId) {
@@ -579,6 +636,8 @@ export const swipe = mutation({
     if (!fromUser.phase2OnboardingCompleted) {
       throw new Error('Phase-2 onboarding required');
     }
+
+    await assertCanDeepConnectInteract(ctx, fromUserId, toUserId);
 
     // Check if already swiped (in Phase-2 privateLikes table)
     const existingLike = await ctx.db
@@ -783,16 +842,6 @@ export const swipe = mutation({
       createdAt: now,
     });
 
-    // Log like creation
-    if (action === 'like' || action === 'super_like') {
-      console.log('[P2_LIKE_CREATED]', {
-        from: fromUserId,
-        to: toUserId,
-        action,
-        likeId
-      });
-    }
-
     // Check for match (only on like or super_like)
     if (action === 'like' || action === 'super_like') {
       // Check for reciprocal like in privateLikes (Phase-2 only)
@@ -821,17 +870,10 @@ export const swipe = mutation({
           reactivateInactive: true,
         });
 
-        const { user1Id, user2Id } = getPhase2UserPair(fromUserId, toUserId);
         const matchId = ensured.matchId;
         const conversationId = ensured.conversationId;
 
         if (ensured.alreadyMatched) {
-          console.log('[P2_MATCH_ALREADY_EXISTS]', {
-            user1: (user1Id as string)?.slice(-8),
-            user2: (user2Id as string)?.slice(-8),
-            matchId: (matchId as string)?.slice(-8),
-            conversationId: (conversationId as string)?.slice(-8),
-          });
           return {
             success: true,
             isMatch: true,
@@ -882,45 +924,14 @@ export const swipe = mutation({
           }
         }
 
-        // Log match creation
-        console.log('[P2_MATCH_CREATED]', {
-          user1: user1Id,
-          user2: user2Id,
+        // Notify both users only after match, conversation, participants, and
+        // any seeded Stand Out message have been written.
+        await createStandOutMatchNotifications(ctx, {
+          senderId: fromUserId,
+          receiverId: toUserId,
           matchId,
           conversationId,
-          source: isSuperLikeMatch ? 'super_like' : 'like'
-        });
-
-        // ANON-LOADING-FIX: getPhase2DisplayName may now return null. Use
-        // 'Someone' as a graceful generic label so match notifications never
-        // read "You matched with null" or leak the intentional-anonymous-only
-        // word "Anonymous" for a missing-data state.
-        const [fromDisplayNameRaw, toDisplayNameRaw] = await Promise.all([
-          getPhase2DisplayName(ctx, fromUserId),
-          getPhase2DisplayName(ctx, toUserId),
-        ]);
-        const fromDisplayName = fromDisplayNameRaw ?? 'Someone';
-        const toDisplayName = toDisplayNameRaw ?? 'Someone';
-
-        // Notify both users exactly once per match/user pair.
-        await createPhase2MatchNotificationIfMissing(ctx, {
-          userId: toUserId,
-          matchId,
-          conversationId,
-          title: 'New Match! 🎉',
-          body: `You matched with ${fromDisplayName} in Deep Connect!`,
           now,
-          push: true,
-        });
-
-        await createPhase2MatchNotificationIfMissing(ctx, {
-          userId: fromUserId,
-          matchId,
-          conversationId,
-          title: 'New Match! 🎉',
-          body: `You matched with ${toDisplayName} in Deep Connect!`,
-          now,
-          push: true,
         });
 
         return {
@@ -932,15 +943,8 @@ export const swipe = mutation({
           source: ensured.source,
         };
       } else {
-        // NO RECIPROCAL LIKE YET - send "someone liked you" notification
-        // This is the pending like state - match will be created when other user likes back
-        console.log('[P2_LIKE_PENDING]', {
-          from: fromUserId,
-          to: toUserId,
-          action,
-          awaitingReciprocal: true
-        });
-
+        // NO RECIPROCAL LIKE YET - send "someone liked you" notification.
+        // This is the pending like state; match is created when the other user likes back.
         // Notify the recipient that someone liked them (anonymous)
         // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
         if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId)) {
@@ -993,26 +997,24 @@ export const swipe = mutation({
  */
 export const getIncomingStandOuts = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, limit = 50, refreshKey } = args;
+    const { authUserId, token, refreshKey } = args;
+    const limit = normalizePrivateSwipeLimit(args.limit);
     void refreshKey;
 
-    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!viewerId) {
-      console.log('[STANDOUT_INCOMING_DENIED] Auth ID not linked to user:', authUserId);
-      return [];
-    }
+    const viewerId = await requirePrivateSwipeActor(ctx, token, authUserId);
 
     const viewer = await ctx.db.get(viewerId);
     if (!isPhase2UserEligible(viewer)) {
       return [];
     }
 
-    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), 200);
+    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), MAX_STAND_OUT_LIST_FETCH_WINDOW);
     const likes = await ctx.db
       .query('privateLikes')
       .withIndex('by_to_action_createdAt', (q) =>
@@ -1022,7 +1024,7 @@ export const getIncomingStandOuts = query({
       .take(fetchWindow);
 
     const rows = [];
-    for (const like of likes) {
+    for (const like of sortPrivateLikesNewestFirst(likes)) {
       if (rows.length >= limit) break;
       if (!(await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.fromUserId))) {
         continue;
@@ -1050,26 +1052,24 @@ export const getIncomingStandOuts = query({
  */
 export const getOutgoingStandOuts = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, limit = 50, refreshKey } = args;
+    const { authUserId, token, refreshKey } = args;
+    const limit = normalizePrivateSwipeLimit(args.limit);
     void refreshKey;
 
-    const viewerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!viewerId) {
-      console.log('[STANDOUT_OUTGOING_DENIED] Auth ID not linked to user:', authUserId);
-      return [];
-    }
+    const viewerId = await requirePrivateSwipeActor(ctx, token, authUserId);
 
     const viewer = await ctx.db.get(viewerId);
     if (!isPhase2UserEligible(viewer)) {
       return [];
     }
 
-    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), 200);
+    const fetchWindow = Math.min(Math.max(limit * 4, limit + 30), MAX_STAND_OUT_LIST_FETCH_WINDOW);
     const likes = await ctx.db
       .query('privateLikes')
       .withIndex('by_from_action_createdAt', (q) =>
@@ -1079,7 +1079,7 @@ export const getOutgoingStandOuts = query({
       .take(fetchWindow);
 
     const rows = [];
-    for (const like of likes) {
+    for (const like of sortPrivateLikesNewestFirst(likes)) {
       if (rows.length >= limit) break;
       if (!(await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.toUserId))) {
         continue;
@@ -1107,18 +1107,11 @@ export const getOutgoingStandOuts = query({
  */
 export const getStandOutCounts = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const viewerId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!viewerId) {
-      console.log('[STANDOUT_COUNTS_DENIED] Auth ID not linked to user:', args.authUserId);
-      return {
-        incoming: 0,
-        outgoing: 0,
-        remainingToday: STAND_OUT_DAILY_LIMIT,
-      };
-    }
+    const viewerId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     const viewer = await ctx.db.get(viewerId);
     if (!isPhase2UserEligible(viewer)) {
@@ -1135,13 +1128,15 @@ export const getStandOutCounts = query({
         .withIndex('by_to_action_createdAt', (q) =>
           q.eq('toUserId', viewerId).eq('action', 'super_like')
         )
-        .collect(),
+        .order('desc')
+        .take(MAX_STAND_OUT_COUNT_SCAN),
       ctx.db
         .query('privateLikes')
         .withIndex('by_from_action_createdAt', (q) =>
           q.eq('fromUserId', viewerId).eq('action', 'super_like')
         )
-        .collect(),
+        .order('desc')
+        .take(MAX_STAND_OUT_COUNT_SCAN),
       countStandOutsSentToday(ctx, viewerId, Date.now()),
     ]);
 
@@ -1174,14 +1169,12 @@ export const getStandOutCounts = query({
  */
 export const acceptStandOut = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     likeId: v.id('privateLikes'),
   },
   handler: async (ctx, args) => {
-    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!receiverId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const receiverId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     return await acceptPendingStandOut(ctx, {
       receiverId,
@@ -1195,15 +1188,13 @@ export const acceptStandOut = mutation({
  */
 export const replyToStandOut = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     likeId: v.id('privateLikes'),
     replyText: v.string(),
   },
   handler: async (ctx, args) => {
-    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!receiverId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const receiverId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     return await acceptPendingStandOut(ctx, {
       receiverId,
@@ -1221,14 +1212,12 @@ export const replyToStandOut = mutation({
  */
 export const ignoreStandOut = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     likeId: v.id('privateLikes'),
   },
   handler: async (ctx, args) => {
-    const receiverId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!receiverId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const receiverId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     const like = await ctx.db.get(args.likeId);
     if (!like || like.toUserId !== receiverId || like.action !== 'super_like') {
@@ -1278,20 +1267,14 @@ export const ignoreStandOut = mutation({
  */
 export const getSwipeHistory = query({
   args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const { limit = 50 } = args;
 
-    // P1-SECURITY FIX: Validate caller identity - fail closed
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      throw new Error('Authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!userId) {
-      throw new Error('User not found');
-    }
+    const userId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     return await ctx.db
       .query('privateLikes')
@@ -1307,20 +1290,14 @@ export const getSwipeHistory = query({
  */
 export const hasSwipedOn = query({
   args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     toUserId: v.id('users'),
   },
   handler: async (ctx, args) => {
     const { toUserId } = args;
 
-    // P1-SECURITY FIX: Validate caller identity - fail closed
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      throw new Error('Authentication required');
-    }
-    const fromUserId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!fromUserId) {
-      throw new Error('User not found');
-    }
+    const fromUserId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     const existingLike = await ctx.db
       .query('privateLikes')
@@ -1338,17 +1315,12 @@ export const hasSwipedOn = query({
  * P1-SECURITY FIX: Requires auth - users can only access their OWN swipe list
  */
 export const getSwipedUserIds = query({
-  args: {},
-  handler: async (ctx) => {
-    // P1-SECURITY FIX: Validate caller identity - fail closed
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      throw new Error('Authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!userId) {
-      throw new Error('User not found');
-    }
+  args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     const swipes = await ctx.db
       .query('privateLikes')
@@ -1368,23 +1340,20 @@ export const getSwipedUserIds = query({
  */
 export const getIncomingLikes = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
     refreshKey: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, limit = 50, refreshKey } = args;
+    const { authUserId, token, refreshKey } = args;
+    const limit = normalizePrivateSwipeLimit(args.limit);
     void refreshKey;
 
-    // Resolve auth ID to Convex user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      console.log('[LIKES_FETCH_DENIED] Auth ID not linked to user:', authUserId);
-      return []; // Return empty for graceful degradation
-    }
+    const userId = await requirePrivateSwipeActor(ctx, token, authUserId);
 
     // Get all likes TO the current user
-    const fetchWindow = Math.min(Math.max(limit * 3, limit + 20), 150);
+    const fetchWindow = Math.min(Math.max(limit * 3, limit + 20), MAX_INCOMING_LIKE_LIST_FETCH_WINDOW);
     const incomingLikes = await ctx.db
       .query('privateLikes')
       .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
@@ -1394,7 +1363,7 @@ export const getIncomingLikes = query({
     // Filter to only likes/super_likes (not passes), and exclude already matched.
     // Overfetching keeps the visible pending set more complete when recent rows
     // include passes or reciprocal likes that should be filtered out.
-    const pendingLikes = await Promise.all(incomingLikes.map(async (like) => {
+    const pendingLikes = await Promise.all(sortPrivateLikesNewestFirst(incomingLikes).map(async (like) => {
       if (like.action !== 'like' && like.action !== 'super_like') {
         return null;
       }
@@ -1426,11 +1395,14 @@ export const getIncomingLikes = query({
       }
 
       const displayName = await getPhase2DisplayName(ctx, like.fromUserId);
-      const hasPrivatePhotos = (
-        likerProfile.privatePhotosBlurred?.length ??
-        likerProfile.privatePhotoUrls?.length ??
-        0
-      ) > 0;
+      const safePrivatePhotoUrls = await filterOwnedSafePrivatePhotoUrls(
+        ctx,
+        like.fromUserId,
+        likerProfile.privatePhotoUrls ?? [],
+      );
+      const hasPrivatePhotos =
+        (likerProfile.privatePhotosBlurred?.length ?? 0) > 0 ||
+        safePrivatePhotoUrls.length > 0;
 
       return {
         likeId: like._id,
@@ -1442,7 +1414,7 @@ export const getIncomingLikes = query({
           displayName,
           age: likerProfile.age,
           gender: likerProfile.gender,
-          blurredPhotoUrl: likerProfile.privatePhotoUrls?.[0] ?? null,
+          blurredPhotoUrl: safePrivatePhotoUrls[0] ?? null,
           photoBlurEnabled: (likerProfile as any).photoBlurEnabled ?? undefined,
           photoBlurSlots: likerProfile.photoBlurSlots ?? undefined,
           hasPrivatePhotos,
@@ -1462,23 +1434,18 @@ export const getIncomingLikes = query({
  */
 export const getIncomingLikesCount = query({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId } = args;
-
-    // Resolve auth ID to Convex user ID
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      console.log('[LIKES_COUNT_DENIED] Auth ID not linked to user:', authUserId);
-      return 0; // Return 0 for graceful degradation
-    }
+    const userId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
     // Get all likes TO the current user
     const incomingLikes = await ctx.db
       .query('privateLikes')
       .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
-      .collect();
+      .order('desc')
+      .take(MAX_INCOMING_LIKE_COUNT_SCAN);
 
     let count = 0;
     for (const like of incomingLikes) {
@@ -1517,16 +1484,14 @@ export const getIncomingLikesCount = query({
  */
 export const unmatchPrivate = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     conversationId: v.id('privateConversations'),
   },
   handler: async (ctx, args) => {
-    const { authUserId, conversationId } = args;
+    const { authUserId, token, conversationId } = args;
 
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      return { success: false, error: 'unauthorized' as const };
-    }
+    const userId = await requirePrivateSwipeActor(ctx, token, authUserId);
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {

@@ -356,7 +356,7 @@ export default function Phase2FullProfileScreen() {
   const swipeMutation = useMutation(api.privateSwipes.swipe);
 
   useEffect(() => {
-    if (!standOutResult || !profileUserId || !currentUserId) return;
+    if (!standOutResult || !profileUserId || !currentUserId || !token) return;
     // Only handle if this is for our profile
     if (standOutResult.profileId !== profileUserId) return;
 
@@ -366,6 +366,7 @@ export default function Phase2FullProfileScreen() {
     const sendStandOut = async () => {
       try {
         const result = await swipeMutation({
+          token,
           authUserId: currentUserId,
           toUserId: profileUserId as any,
           action: 'super_like',
@@ -394,7 +395,7 @@ export default function Phase2FullProfileScreen() {
     };
 
     sendStandOut();
-  }, [standOutResult, profileUserId, currentUserId, router, incrementStandOuts, swipeMutation]);
+  }, [standOutResult, profileUserId, currentUserId, token, router, incrementStandOuts, swipeMutation]);
 
   // Phase-2 profile query
   const profile = useQuery(
@@ -557,10 +558,11 @@ export default function Phase2FullProfileScreen() {
 
   // Handle like action
   const handleLike = async () => {
-    if (!currentUserId || !profileUserId) return;
+    if (!currentUserId || !profileUserId || !token) return;
 
     try {
       const result = await swipeMutation({
+        token,
         authUserId: currentUserId,
         toUserId: profileUserId as any,
         action: 'like',
@@ -586,10 +588,11 @@ export default function Phase2FullProfileScreen() {
 
   // Handle pass action
   const handlePass = async () => {
-    if (!currentUserId || !profileUserId) return;
+    if (!currentUserId || !profileUserId || !token) return;
 
     try {
       await swipeMutation({
+        token,
         authUserId: currentUserId,
         toUserId: profileUserId as any,
         action: 'pass',

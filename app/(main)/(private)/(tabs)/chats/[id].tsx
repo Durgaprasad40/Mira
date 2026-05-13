@@ -99,6 +99,8 @@ type PendingPhase2Message = {
 const P2_PROGRESS_UPDATE_INTERVAL_MS = 50;
 const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
 const SYSTEM_MESSAGE_ROW_RE = /^\[SYSTEM:[a-z_]+\]/i;
+const DEBUG_PHASE2_CHAT_LOGS =
+  __DEV__ && process.env.EXPO_PUBLIC_DEBUG_PHASE2_CHAT === 'true';
 
 function getPhase2SecureMediaExpiredAt(message: any, nowMs: number): number | null {
   if (!message?.isProtected) return null;
@@ -333,7 +335,7 @@ export default function Phase2ChatThread() {
   // --------------------------------------------------------------------- queries
   const conversation = useQuery(
     api.privateConversations.getPrivateConversation,
-    id && userId ? { conversationId: id as any, authUserId: userId } : 'skip'
+    id && userId && token ? { conversationId: id as any, token, authUserId: userId } : 'skip'
   );
   const isConversationClosed =
     conversation !== undefined &&
@@ -343,8 +345,8 @@ export default function Phase2ChatThread() {
 
   const messages = useQuery(
     api.privateConversations.getPrivateMessages,
-    id && userId && !isConversationClosed
-      ? { conversationId: id as any, authUserId: userId, limit: 100 }
+    id && userId && token && !isConversationClosed
+      ? { conversationId: id as any, token, authUserId: userId, limit: 100 }
       : 'skip'
   );
 
@@ -373,8 +375,8 @@ export default function Phase2ChatThread() {
   const setTyping = useMutation(api.privateConversations.setPrivateTypingStatus);
   const typingStatus = useQuery(
     api.privateConversations.getPrivateTypingStatus,
-    id && userId && !isConversationClosed
-      ? { conversationId: id as any, authUserId: userId }
+    id && userId && token && !isConversationClosed
+      ? { conversationId: id as any, token, authUserId: userId }
       : 'skip'
   ) as { isTyping?: boolean } | undefined;
   const markRead = useMutation(api.privateConversations.markPrivateMessagesRead);
@@ -525,18 +527,18 @@ export default function Phase2ChatThread() {
   // and every 30s thereafter so the OTHER side sees a fresh "Online" dot
   // and ladder subtitle in their header.
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || !token) return;
     if (isConversationClosed) return;
-    updatePrivatePresence({ authUserId: userId }).catch(() => {
+    updatePrivatePresence({ token, authUserId: userId }).catch(() => {
       // Silent fail — presence is best-effort.
     });
     const interval = setInterval(() => {
-      updatePrivatePresence({ authUserId: userId }).catch(() => {
+      updatePrivatePresence({ token, authUserId: userId }).catch(() => {
         // Silent fail — presence is best-effort.
       });
     }, 30_000);
     return () => clearInterval(interval);
-  }, [userId, isConversationClosed, updatePrivatePresence]);
+  }, [userId, token, isConversationClosed, updatePrivatePresence]);
 
   // SECURE-MEDIA OPEN STATE (Phase-1 parity, Phase-2 backend):
   //   - protectedViewer: holds the message currently shown in the secure
@@ -653,24 +655,6 @@ export default function Phase2ChatThread() {
     return (u?.name as string) || (u?.handle as string) || 'You';
   }, [currentUser]);
 
-  // --------------------------------------------------------------------- logs
-  useEffect(() => {
-    console.log('[P2_THREAD_OPEN]', { id, userId });
-  }, [id, userId]);
-
-  useEffect(() => {
-    if (gameSession === undefined) {
-      console.log('[P2_TD_STATE] loading', { id });
-    } else {
-      console.log('[P2_TD_STATE]', {
-        id,
-        state: tdState,
-        amInviter,
-        amInvitee,
-      });
-    }
-  }, [id, gameSession, tdState, amInviter, amInvitee]);
-
   useEffect(() => {
     if (!isConversationClosed) return;
     setShowInviteModal(false);
@@ -752,11 +736,8 @@ export default function Phase2ChatThread() {
       lastAutoPromptKeyRef.current === truthDareAutoPromptKey &&
       showGameModal
     ) {
-      if (__DEV__) {
-        console.log('[P2_TD_AUTO_PROMPT] already_shown', {
-          conversationId: id,
-          promptKey: truthDareAutoPromptKey,
-        });
+      if (DEBUG_PHASE2_CHAT_LOGS) {
+        console.log('[P2_TD_AUTO_PROMPT] already_shown');
       }
       return;
     }
@@ -765,10 +746,8 @@ export default function Phase2ChatThread() {
     setTdPaused(false);
     setShowInviteModal(false);
     setShowGameModal(true);
-    if (__DEV__) {
+    if (DEBUG_PHASE2_CHAT_LOGS) {
       console.log('[P2_TD_AUTO_PROMPT] show', {
-        conversationId: id,
-        promptKey: truthDareAutoPromptKey,
         chooserRole: truthDareChooserRole,
         myRole: myTruthDareRole,
       });
@@ -812,10 +791,7 @@ export default function Phase2ChatThread() {
       | undefined;
     if (tdState === 'pending' && amInvitee && pendingSessionId) {
       if (autoOpenedInviteSessionRef.current !== pendingSessionId) {
-        console.log('[P2_TD_RECEIVE_AUTO_OPEN]', {
-          id,
-          sessionId: pendingSessionId,
-        });
+        if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_RECEIVE_AUTO_OPEN]');
         autoOpenedInviteSessionRef.current = pendingSessionId;
         setShowInviteModal(true);
       }
@@ -825,8 +801,7 @@ export default function Phase2ChatThread() {
       autoOpenedInviteSessionRef.current !== null &&
       tdState !== 'pending'
     ) {
-      console.log('[P2_TD_RECEIVE_AUTO_CLOSE]', {
-        id,
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_RECEIVE_AUTO_CLOSE]', {
         nextState: tdState,
       });
       autoOpenedInviteSessionRef.current = null;
@@ -851,7 +826,7 @@ export default function Phase2ChatThread() {
     if (!id || !token) return;
     if (isConversationClosed) return;
     if (tdState !== 'expired' || !endedReason) return;
-    console.log('[P2_TD_CLEANUP]', { id, endedReason });
+    if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_CLEANUP]', { endedReason });
     cleanupExpired({
       token,
       conversationId: id,
@@ -910,16 +885,15 @@ export default function Phase2ChatThread() {
     }
 
     setShowSpinHint(true);
-    console.log('[P2_TD_SPIN_HINT_SHOW]', {
-      conversationId: id,
+    if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_SPIN_HINT_SHOW]', {
       spinTurnRole,
-      lastActionAt: truthDareLastActionAt,
+      hasLastAction: typeof truthDareLastActionAt === 'number',
     });
 
     spinHintTimerRef.current = setTimeout(() => {
       setShowSpinHint(false);
       spinHintTimerRef.current = null;
-      console.log('[P2_TD_SPIN_HINT_HIDE]', { conversationId: id });
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_SPIN_HINT_HIDE]');
     }, 3000);
   }, [
     id,
@@ -969,7 +943,7 @@ export default function Phase2ChatThread() {
       clearTimeout(tdToastTimerRef.current);
     }
     setTdToast(label);
-    console.log('[P2_TD_TOAST_SHOW]', { conversationId: id, label });
+    if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_TOAST_SHOW]');
     tdToastTimerRef.current = setTimeout(() => {
       setTdToast(null);
       tdToastTimerRef.current = null;
@@ -1063,17 +1037,16 @@ export default function Phase2ChatThread() {
   // removed so no future caller can accidentally write a T/D row.
 
   const handleTruthDarePress = useCallback(async () => {
-    console.log('[P2_TD_PRESS]', {
-      id,
+    if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_PRESS]', {
       state: tdState,
       amInviter,
       amInvitee,
-      gameStartedAt,
-      userId,
+      hasStarted: !!gameStartedAt,
+      hasUser: !!userId,
     });
 
     if (!userId || !token || !id) {
-      console.log('[P2_TD] missing user, token, or id', { currentUserId: userId, hasToken: !!token, id });
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD] missing user, token, or id', { hasToken: !!token });
       return;
     }
     if (isConversationClosed) {
@@ -1085,7 +1058,7 @@ export default function Phase2ChatThread() {
     // silently. The backend mutation enforces the real cooldown / active /
     // pending rules, so this is safe.
     if (gameSession === undefined) {
-      console.log('[P2_TD] session loading → open invite modal');
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD] session loading → open invite modal');
       setTdPaused(false);
       setShowInviteModal(true);
       return;
@@ -1098,7 +1071,7 @@ export default function Phase2ChatThread() {
       // and shouldn't be opened.
       if (!gameStartedAt) {
         if (amInviter) {
-          console.log('[P2_TD_MANUAL_START]', { id });
+          if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_MANUAL_START]');
           try {
             await startGame({
               token,
@@ -1119,12 +1092,12 @@ export default function Phase2ChatThread() {
           }
         } else {
           // Invitee: accepted but inviter hasn't pressed start yet — no-op.
-          console.log('[P2_TD] invitee waiting for inviter to start', { id });
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD] invitee waiting for inviter to start');
         }
         return;
       }
       // Game is started — open the modal normally.
-      console.log('[P2_TD_ACTIVE_OPEN]', { id });
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_ACTIVE_OPEN]');
       setTdPaused(false);
       setShowGameModal(true);
       return;
@@ -1164,13 +1137,13 @@ export default function Phase2ChatThread() {
     // returns; we mirror that — no Alert, the user can tap again once the
     // session refreshes.
     if (tdState === 'expired') {
-      console.log('[P2_TD_EXPIRED] awaiting cleanup', { id, endedReason });
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_EXPIRED] awaiting cleanup', { endedReason });
       return;
     }
 
     // No session — open invite/cancel modal.
     if (!gameSession || tdState === 'none') {
-      console.log('[P2_TD] opening invite modal');
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD] opening invite modal');
       setTdPaused(false);
       setShowInviteModal(true);
       return;
@@ -1202,7 +1175,7 @@ export default function Phase2ChatThread() {
     // those states elsewhere, but this protects against stale modal opens
     // (e.g. user opened modal in 'none' state, then session became 'active').
     if (tdState === 'active') {
-      console.log('[P2_TD_ACTIVE_OPEN] redirecting send→game', { id });
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_ACTIVE_OPEN] redirecting send→game');
       setShowInviteModal(false);
       setTdPaused(false);
       setShowGameModal(true);
@@ -1218,7 +1191,7 @@ export default function Phase2ChatThread() {
         conversationId: id,
         otherUserId,
       });
-      console.log('[P2_TD_PRESS] invite sent');
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_PRESS] invite sent');
       setShowInviteModal(false);
       // P2_TD_PARITY: do NOT announce the invite as a chat row. Phase-1
       // (ChatScreenInner.tsx) shows the inviter waiting bar (already rendered
@@ -1232,7 +1205,7 @@ export default function Phase2ChatThread() {
       // or stale active row not yet cleaned up). Open the live game modal
       // instead of crashing the UI.
       if (msg.includes('Game already active')) {
-        console.log('[P2_TD_ACTIVE_OPEN] recovered from invite error', { id });
+        if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_ACTIVE_OPEN] recovered from invite error');
         setShowInviteModal(false);
         setTdPaused(false);
         setShowGameModal(true);
@@ -1350,7 +1323,7 @@ export default function Phase2ChatThread() {
       if (!id || !token) return;
       const isEndGameSystemMessage = /^[^\s].* ended the game$/.test(msg);
       if (isEndGameSystemMessage) {
-        console.log('[P2_TD_END]', { id, msg });
+        if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_TD_END]', { msg });
         endGame({
           token,
           conversationId: id,
@@ -1368,11 +1341,8 @@ export default function Phase2ChatThread() {
   const handleBottleGameClose = useCallback(() => {
     if (isTruthDareChoosingForMe && truthDareAutoPromptKey) {
       closedAfterActionPromptKeyRef.current = truthDareAutoPromptKey;
-      if (__DEV__) {
-        console.log('[P2_TD_AUTO_PROMPT] closed_after_action', {
-          conversationId: id,
-          promptKey: truthDareAutoPromptKey,
-        });
+      if (DEBUG_PHASE2_CHAT_LOGS) {
+        console.log('[P2_TD_AUTO_PROMPT] closed_after_action');
       }
     }
     setShowGameModal(false);
@@ -1497,16 +1467,13 @@ export default function Phase2ChatThread() {
         (m) => m._id === pendingId
       );
       if (!pending) {
-        console.warn('[P2_MEDIA_UPLOAD_START] pending row not in ref', {
-          pendingId,
-          refLen: pendingMessagesRef.current.length,
-        });
+        console.warn('[P2_MEDIA_UPLOAD_START] pending row not in ref');
         return;
       }
 
       const isVideo = pending.type === 'video';
       const mediaTypeForUpload: 'photo' | 'video' = isVideo ? 'video' : 'photo';
-      console.log('[P2_MEDIA_UPLOAD_START]', {
+      if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_MEDIA_UPLOAD_START]', {
         pendingId,
         type: pending.type,
         isProtected: pending.isProtected,
@@ -1523,15 +1490,12 @@ export default function Phase2ChatThread() {
           });
           lastP2ProgressUpdateRef.current.set(pendingId, 0);
 
-          console.log('[P2_MEDIA_UPLOAD_URL_REQUEST]', { pendingId });
+          if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_MEDIA_UPLOAD_URL_REQUEST]');
           storageId = (await uploadMediaToConvexWithProgress(
             pending.localUri,
             async () => {
               const url = await generateMediaUploadUrl({ token });
-              console.log('[P2_MEDIA_UPLOAD_URL_OK]', {
-                pendingId,
-                hasUrl: !!url,
-              });
+              if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_MEDIA_UPLOAD_URL_OK]', { hasUrl: !!url });
               return url as unknown as string;
             },
             mediaTypeForUpload,
@@ -1549,9 +1513,8 @@ export default function Phase2ChatThread() {
               const clamped = Math.max(0, Math.min(100, pct));
               // Sample log at 0/25/50/75/100 so we don't flood logcat.
               const rounded = Math.round(clamped);
-              if (rounded % 25 === 0) {
+              if (DEBUG_PHASE2_CHAT_LOGS && rounded % 25 === 0) {
                 console.log('[P2_MEDIA_UPLOAD_PROGRESS]', {
-                  pendingId,
                   pct: rounded,
                 });
               }
@@ -1561,10 +1524,7 @@ export default function Phase2ChatThread() {
             }
           )) as unknown as string;
 
-          console.log('[P2_MEDIA_UPLOAD_STORAGE_ID]', {
-            pendingId,
-            storageId,
-          });
+          if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_MEDIA_UPLOAD_STORAGE_ID]');
           updatePendingPhase2Message(pendingId, {
             storageId,
             uploadProgress: 100,
@@ -1573,9 +1533,7 @@ export default function Phase2ChatThread() {
 
         // ---------------------------------------------------------------- send
         updatePendingPhase2Message(pendingId, { uploadStatus: 'sending' });
-        console.log('[P2_MEDIA_SEND_START]', {
-          pendingId,
-          storageId,
+        if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_MEDIA_SEND_START]', {
           isProtected: pending.isProtected,
         });
 
@@ -1597,7 +1555,7 @@ export default function Phase2ChatThread() {
         // Server insert succeeded. The optimistic bubble can now be dropped:
         // the canonical message will arrive via getPrivateMessages and render
         // in the same chronological position.
-        console.log('[P2_MEDIA_SEND_OK]', { pendingId });
+        if (DEBUG_PHASE2_CHAT_LOGS) console.log('[P2_MEDIA_SEND_OK]');
         removePendingPhase2Message(pendingId);
       } catch (err: any) {
         // [P2_MEDIA_UPLOAD] Split failure path mirrors Phase-1: keep the
@@ -1619,7 +1577,6 @@ export default function Phase2ChatThread() {
             : 'upload_failed';
         updatePendingPhase2Message(pendingId, { uploadStatus: nextStatus });
         console.warn('[P2_MEDIA_UPLOAD_FAILED]', {
-          pendingId,
           nextStatus,
           hasStorageId: !!latestStorageId,
           err: msg,
@@ -1870,7 +1827,7 @@ export default function Phase2ChatThread() {
   // immediately, then navigates back. Phase-1 tables are never touched.
   const handleUnmatch = useCallback(() => {
     setShowMenu(false);
-    if (!userId || !id) return;
+    if (!userId || !token || !id) return;
     Alert.alert(
       'Unmatch?',
       `This will remove your match and close the conversation with ${otherUserName}.`,
@@ -1882,6 +1839,7 @@ export default function Phase2ChatThread() {
           onPress: async () => {
             try {
               const result = await unmatchPrivate({
+                token,
                 authUserId: userId,
                 conversationId: id as any,
               });

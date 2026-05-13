@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { query, mutation } from './_generated/server';
+import { query, mutation, type MutationCtx, type QueryCtx } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
@@ -184,6 +184,52 @@ function hasEligibleAdultAge(age: number | null): age is number {
   return age !== null && age >= DEFAULT_MIN_AGE;
 }
 
+type DeepConnectAccessContext = {
+  user: Doc<'users'>;
+  profile: Doc<'userPrivateProfiles'>;
+  age: number;
+  safePhotoUrls: string[];
+};
+
+async function getDeepConnectAccessContext(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<'users'>,
+): Promise<DeepConnectAccessContext | null> {
+  const [user, profile] = await Promise.all([
+    ctx.db.get(userId),
+    ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first(),
+  ]);
+
+  if (!isPrivateDiscoverVisibleUser(user)) return null;
+  if (user.phase2OnboardingCompleted !== true) return null;
+
+  const age = calculateAgeFromDateOfBirth(user.dateOfBirth);
+  if (!hasEligibleAdultAge(age)) return null;
+
+  if (
+    !profile ||
+    profile.isPrivateEnabled !== true ||
+    profile.isSetupComplete !== true ||
+    profile.hideFromDeepConnect === true
+  ) {
+    return null;
+  }
+
+  if (await isPrivateDataDeleted(ctx as QueryCtx, userId)) return null;
+
+  const safePhotoUrls = await filterOwnedSafePrivatePhotoUrls(
+    ctx,
+    userId,
+    profile.privatePhotoUrls ?? [],
+  );
+  if (safePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) return null;
+
+  return { user, profile, age, safePhotoUrls };
+}
+
 function distanceBetweenUsersKm(
   viewer: Doc<'users'>,
   candidate: Doc<'users'>,
@@ -210,6 +256,79 @@ function distanceBetweenUsersKm(
 
 function isDistanceAllowed(distanceKm: number | undefined, maxDistanceKm: number): boolean {
   return typeof distanceKm === 'number' && Number.isFinite(distanceKm) && distanceKm <= maxDistanceKm;
+}
+
+async function isDeepConnectBlockedPair(
+  ctx: QueryCtx | MutationCtx,
+  userAId: Id<'users'>,
+  userBId: Id<'users'>,
+): Promise<boolean> {
+  const [aBlockedB, bBlockedA] = await Promise.all([
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker_blocked', (q) =>
+        q.eq('blockerId', userAId).eq('blockedUserId', userBId)
+      )
+      .first(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker_blocked', (q) =>
+        q.eq('blockerId', userBId).eq('blockedUserId', userAId)
+      )
+      .first(),
+  ]);
+  return !!aBlockedB || !!bBlockedA;
+}
+
+async function hasDeepConnectViewerReportedTarget(
+  ctx: QueryCtx | MutationCtx,
+  viewerUserId: Id<'users'>,
+  targetUserId: Id<'users'>,
+): Promise<boolean> {
+  const report = await ctx.db
+    .query('reports')
+    .withIndex('by_reporter_reported_created', (q) =>
+      q.eq('reporterId', viewerUserId).eq('reportedUserId', targetUserId)
+    )
+    .first();
+  return !!report;
+}
+
+export async function canDeepConnectInteract(
+  ctx: QueryCtx | MutationCtx,
+  viewerUserId: Id<'users'>,
+  targetUserId: Id<'users'>,
+): Promise<boolean> {
+  if (viewerUserId === targetUserId) return false;
+
+  const [viewerAccess, targetAccess] = await Promise.all([
+    getDeepConnectAccessContext(ctx, viewerUserId),
+    getDeepConnectAccessContext(ctx, targetUserId),
+  ]);
+
+  if (!viewerAccess || !targetAccess) return false;
+  if (await isDeepConnectBlockedPair(ctx, viewerUserId, targetUserId)) return false;
+  if (await hasDeepConnectViewerReportedTarget(ctx, viewerUserId, targetUserId)) return false;
+
+  const viewerPrefs = normalizeDiscoveryPreferences(viewerAccess.user);
+  const targetPrefs = normalizeDiscoveryPreferences(targetAccess.user);
+  const distanceKm = distanceBetweenUsersKm(viewerAccess.user, targetAccess.user);
+  if (!isDistanceAllowed(distanceKm, viewerPrefs.maxDistance)) return false;
+  if (!isDistanceAllowed(distanceKm, targetPrefs.maxDistance)) return false;
+  if (targetAccess.age < viewerPrefs.minAge || targetAccess.age > viewerPrefs.maxAge) return false;
+  if (viewerAccess.age < targetPrefs.minAge || viewerAccess.age > targetPrefs.maxAge) return false;
+
+  return true;
+}
+
+export async function assertCanDeepConnectInteract(
+  ctx: QueryCtx | MutationCtx,
+  viewerUserId: Id<'users'>,
+  targetUserId: Id<'users'>,
+): Promise<void> {
+  if (!(await canDeepConnectInteract(ctx, viewerUserId, targetUserId))) {
+    throw new Error('Profile is no longer available');
+  }
 }
 
 function getProfileIntentKeys(profile: { privateIntentKeys?: string[]; privateIntentKey?: string | null | undefined }): string[] {
@@ -319,11 +438,12 @@ export const getProfiles = query({
       userId: args.userId,
       authUserId: args.authUserId,
     });
-    const viewerUserDoc = await ctx.db.get(viewerUserId);
-    const viewerAge = calculateAgeFromDateOfBirth(viewerUserDoc?.dateOfBirth);
-    if (!isPrivateDiscoverVisibleUser(viewerUserDoc) || !hasEligibleAdultAge(viewerAge)) {
+    const viewerAccess = await getDeepConnectAccessContext(ctx, viewerUserId);
+    if (!viewerAccess) {
       return [];
     }
+    const viewerUserDoc = viewerAccess.user;
+    const viewerAge = viewerAccess.age;
     const viewerPrefs = normalizeDiscoveryPreferences(viewerUserDoc);
 
     // Phase 3: Shadow mode decision (once per request)
@@ -433,11 +553,8 @@ export const getProfiles = query({
     const ownerById = new Map(ownerIds.map((id, i) => [id, ownerDocs[i]]));
 
     // Viewer private profile signals (Phase-2 only) for compatibility-aware ranking.
-    // NOTE: This does NOT affect eligibility filtering; it only improves ordering.
-    const viewerPrivateProfile = await ctx.db
-      .query('userPrivateProfiles')
-      .withIndex('by_user', (q) => q.eq('userId', viewerUserId))
-      .first();
+    // Viewer eligibility has already been enforced by getDeepConnectAccessContext.
+    const viewerPrivateProfile = viewerAccess.profile;
 
     // Get all deletion states to filter out pending deletions
     const deletionStates = await ctx.db
@@ -460,6 +577,7 @@ export const getProfiles = query({
     const passesStage1PreferenceGates = (p: typeof profiles[number]): boolean => {
       const ownerUser = ownerById.get(p.userId as string);
       if (!isPrivateDiscoverVisibleUser(ownerUser)) return false;
+      if (ownerUser.phase2OnboardingCompleted !== true) return false;
 
       const candidateAge = calculateAgeFromDateOfBirth(ownerUser.dateOfBirth);
       if (!hasEligibleAdultAge(candidateAge)) return false;
@@ -738,18 +856,11 @@ export const getProfiles = query({
       };
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
-      const ownerUser = ownerById.get(p.userId as string);
-      if (!isPrivateDiscoverVisibleUser(ownerUser)) {
-        return null;
-      }
-      const ownerAge = calculateAgeFromDateOfBirth(ownerUser.dateOfBirth);
-      if (!hasEligibleAdultAge(ownerAge)) {
-        return null;
-      }
-      const safePhotoUrls = await filterOwnedSafePrivatePhotoUrls(ctx, p.userId, p.privatePhotoUrls);
-      if (safePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) {
-        return null;
-      }
+      const targetAccess = await getDeepConnectAccessContext(ctx, p.userId);
+      if (!targetAccess || targetAccess.profile._id !== p._id) return null;
+      const ownerUser = targetAccess.user;
+      const ownerAge = targetAccess.age;
+      const safePhotoUrls = targetAccess.safePhotoUrls;
       // Privacy: hide age from others in Deep Connect (viewer is never self here — excluded above)
       const age = profile.hideAge === true ? undefined : ownerAge;
       let distanceKm: number | undefined;
@@ -795,7 +906,7 @@ export const getProfiles = query({
 
 // Get a single private profile for viewing (blurred only)
 // Also checks blocks before returning
-// viewer resolves from server auth first, then optional viewerId / viewerAuthUserId fallback
+// viewer resolves from the custom session token; optional viewer hints are assertions only.
 export const getProfileCard = query({
   args: {
     token: v.string(),
@@ -808,12 +919,13 @@ export const getProfileCard = query({
       viewerId: args.viewerId,
       viewerAuthUserId: args.viewerAuthUserId,
     });
+    if (!(await getDeepConnectAccessContext(ctx, viewerUserId))) return null;
 
     const p = await ctx.db.get(args.profileId);
-    if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
-    const owner = await ctx.db.get(p.userId);
-    if (!isPrivateDiscoverVisibleUser(owner)) return null;
-    if (await isPrivateDataDeleted(ctx, p.userId)) return null;
+    if (!p) return null;
+    const targetAccess = await getDeepConnectAccessContext(ctx, p.userId);
+    if (!targetAccess || targetAccess.profile._id !== p._id) return null;
+    const owner = targetAccess.user;
 
     // Check if viewer blocked the profile owner
     const blockedByViewer = await ctx.db
@@ -875,8 +987,7 @@ export const getProfileCard = query({
 
     // P1-009: reveal check for this exact pair (viewerUserId is guaranteed defined above)
     const revealed = await isRevealed(ctx, viewerUserId, p.userId);
-    const safePhotoUrls = await filterOwnedSafePrivatePhotoUrls(ctx, p.userId, p.privatePhotoUrls);
-    if (safePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) return null;
+    const safePhotoUrls = targetAccess.safePhotoUrls;
 
     return {
       _id: p._id,
@@ -907,7 +1018,7 @@ export const getProfileCard = query({
 
 // Get a Phase-2 profile by userId (for full profile view)
 // Returns full profile data including intentKeys for display
-// viewer resolves from server auth first, then optional viewerId / viewerAuthUserId fallback
+// viewer resolves from the custom session token; optional viewer hints are assertions only.
 export const getProfileByUserId = query({
   args: {
     token: v.string(),
@@ -920,6 +1031,7 @@ export const getProfileByUserId = query({
       viewerId: args.viewerId,
       viewerAuthUserId: args.viewerAuthUserId,
     });
+    if (!(await getDeepConnectAccessContext(ctx, viewerUserId))) return null;
 
     // Find the private profile for this user
     const p = await ctx.db
@@ -927,10 +1039,10 @@ export const getProfileByUserId = query({
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
       .first();
 
-    if (!p || !p.isPrivateEnabled || !p.isSetupComplete) return null;
-    const owner = await ctx.db.get(args.userId);
-    if (!isPrivateDiscoverVisibleUser(owner)) return null;
-    if (await isPrivateDataDeleted(ctx, args.userId)) return null;
+    if (!p) return null;
+    const targetAccess = await getDeepConnectAccessContext(ctx, args.userId);
+    if (!targetAccess || targetAccess.profile._id !== p._id) return null;
+    const owner = targetAccess.user;
 
     // Check if viewer blocked the profile owner
     const blockedByViewer = await ctx.db
@@ -994,8 +1106,7 @@ export const getProfileByUserId = query({
 
     // P1-009: reveal check for this exact pair (viewerUserId is guaranteed defined above)
     const revealed = await isRevealed(ctx, viewerUserId, args.userId);
-    const safePhotoUrls = await filterOwnedSafePrivatePhotoUrls(ctx, p.userId, p.privatePhotoUrls);
-    if (safePhotoUrls.length < PHASE2_MIN_PRIVATE_PHOTOS) return null;
+    const safePhotoUrls = targetAccess.safePhotoUrls;
 
     return {
       _id: p._id,

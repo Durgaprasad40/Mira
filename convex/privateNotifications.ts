@@ -1,8 +1,8 @@
 import { v } from 'convex/values';
 import { internal } from './_generated/api';
-import { mutation, query, internalMutation, type MutationCtx } from './_generated/server';
+import { mutation, query, internalMutation, type MutationCtx, type QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 
 /**
  * Phase-2 notifications backend.
@@ -17,6 +17,26 @@ import { resolveUserIdByAuthId } from './helpers';
 
 // 24h TTL, mirroring Phase-1 conventions
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function requirePrivateNotificationUser(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  assertedUser?: string | Id<'users'>,
+): Promise<Id<'users'>> {
+  const userId = await validateSessionToken(ctx, token.trim());
+  if (!userId) {
+    throw new Error('UNAUTHORIZED');
+  }
+
+  if (assertedUser) {
+    const assertedUserId = await resolveUserIdByAuthId(ctx, assertedUser as string);
+    if (!assertedUserId || assertedUserId !== userId) {
+      throw new Error('UNAUTHORIZED');
+    }
+  }
+
+  return userId;
+}
 
 /**
  * Marks Phase-2 inbox rows for a private conversation as read.
@@ -49,18 +69,15 @@ export async function markPrivateMessageNotificationsForConversation(
 // Get Phase-2 notifications for a user
 export const getPrivateNotifications = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
+    userId: v.optional(v.union(v.id('users'), v.string())),
     limit: v.optional(v.number()),
     unreadOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { limit = 50, unreadOnly = false } = args;
 
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!userId) {
-      console.log('[getPrivateNotifications] User not found for authUserId:', args.userId);
-      return [];
-    }
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.userId);
 
     const now = Date.now();
 
@@ -86,11 +103,11 @@ export const getPrivateNotifications = query({
 // Phase-2 unread count
 export const getPrivateUnreadCount = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
+    userId: v.optional(v.union(v.id('users'), v.string())),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!userId) return 0;
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.userId);
 
     const now = Date.now();
     const notifications = await ctx.db
@@ -115,11 +132,11 @@ export const getPrivateUnreadCount = query({
 const BELL_EXCLUDED_TYPES = new Set<string>(['phase2_private_message']);
 export const getPrivateBellUnreadCount = query({
   args: {
-    userId: v.union(v.id('users'), v.string()),
+    token: v.string(),
+    userId: v.optional(v.union(v.id('users'), v.string())),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!userId) return 0;
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.userId);
 
     const now = Date.now();
     const notifications = await ctx.db
@@ -149,12 +166,12 @@ export const getPrivateBellUnreadCount = query({
 
 export const markPrivateNotificationRead = mutation({
   args: {
+    token: v.string(),
     notificationId: v.id('privateNotifications'),
-    authUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) throw new Error('Unauthorized: user not found');
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.authUserId);
 
     const notification = await ctx.db.get(args.notificationId);
     if (!notification || notification.userId !== userId) {
@@ -167,10 +184,9 @@ export const markPrivateNotificationRead = mutation({
 });
 
 export const markAllPrivateNotificationsRead = mutation({
-  args: { authUserId: v.string() },
+  args: { token: v.string(), authUserId: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) throw new Error('Unauthorized: user not found');
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.authUserId);
 
     const now = Date.now();
     const unread = await ctx.db
@@ -189,12 +205,12 @@ export const markAllPrivateNotificationsRead = mutation({
 
 export const deletePrivateNotification = mutation({
   args: {
+    token: v.string(),
     notificationId: v.id('privateNotifications'),
-    authUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) throw new Error('Unauthorized: user not found');
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.authUserId);
 
     const notification = await ctx.db.get(args.notificationId);
     if (!notification || notification.userId !== userId) {
@@ -207,10 +223,9 @@ export const deletePrivateNotification = mutation({
 });
 
 export const deleteAllPrivateNotifications = mutation({
-  args: { authUserId: v.string() },
+  args: { token: v.string(), authUserId: v.optional(v.string()) },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) throw new Error('Unauthorized: user not found');
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.authUserId);
 
     const all = await ctx.db
       .query('privateNotifications')
@@ -227,12 +242,12 @@ export const deleteAllPrivateNotifications = mutation({
 
 export const markPrivateReadForConversation = mutation({
   args: {
-    authUserId: v.string(),
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     privateConversationId: v.string(),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) throw new Error('Unauthorized: user not found');
+    const userId = await requirePrivateNotificationUser(ctx, args.token, args.authUserId);
 
     const count = await markPrivateMessageNotificationsForConversation(
       ctx,

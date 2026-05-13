@@ -181,11 +181,12 @@ export function ReportModal({
             setIsLoading(true);
 
             try {
-              if (!userId || !conversationId) {
+              if (!userId || !token || !conversationId) {
                 throw new Error('Missing authentication or conversation ID');
               }
 
               const result = await unmatchPrivateMutation({
+                token,
                 authUserId: userId,
                 conversationId: conversationId as any,
               });

@@ -7,7 +7,7 @@
  * - Like-back and ignore action buttons
  *
  * STRICT ISOLATION: Only uses Phase-2 queries (privateSwipes.getIncomingLikes)
- * CONTRACT FIX: Uses authUserId pattern (not token)
+ * Identity is token-bound; authUserId is sent only as a compatibility assertion.
  */
 import React, { useState, useEffect, useCallback } from 'react';
 import {
@@ -40,23 +40,24 @@ export default function Phase2LikesScreen() {
   useScreenTrace('P2_LIKES_PAGE');
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
-  // P0-AUTH-FIX: Wait for Convex auth identity to be ready before running queries
+  const { userId, token } = useAuthStore();
+  // P0-AUTH-FIX: Wait for the local custom session to hydrate before running queries
   const authReady = useAuthStore((s) => s.authReady);
 
   // P0-AUTH-CRASH-FIX: Simple gating - requires userId + authReady
-  const isAuthReadyForQueries = !!(userId && authReady);
+  const isAuthReadyForQueries = !!(userId && token && authReady);
   const isAuthWarming = !isAuthReadyForQueries;
 
   // P2-003: Error and retry state
   const [retryKey, setRetryKey] = useState(0);
   const [hasError, setHasError] = useState(false);
 
-  // Phase-2 incoming likes query
-  // CONTRACT FIX: Uses authUserId (not userId as Id)
+  // Phase-2 incoming likes query. authUserId is an assertion hint only.
   const incomingLikes = useQuery(
     api.privateSwipes.getIncomingLikes,
-    isAuthReadyForQueries && userId ? { authUserId: userId, refreshKey: retryKey } : 'skip'
+    isAuthReadyForQueries && userId && token
+      ? { token, authUserId: userId, refreshKey: retryKey }
+      : 'skip'
   );
 
   // P2-003: Query states
@@ -94,27 +95,19 @@ export default function Phase2LikesScreen() {
   const swipeMutation = useMutation(api.privateSwipes.swipe);
 
   // Handle like-back (triggers match creation)
-  // CONTRACT FIX: Uses authUserId instead of token
   const handleLikeBack = async (like: any) => {
-    if (!userId) {
+    if (!userId || !token) {
       Toast.show('Please sign in again to continue.');
       return;
     }
 
     try {
       const result = await swipeMutation({
+        token,
         authUserId: userId,
         toUserId: like.fromUserId,
         action: 'like',
       });
-
-      if (__DEV__) {
-        console.log('[P2_LIKES_PAGE] Like-back result:', {
-          fromUserId: like.fromUserId?.slice?.(-8),
-          isMatch: result?.isMatch,
-          matchId: result?.matchId?.slice?.(-8),
-        });
-      }
 
       if (result?.isMatch) {
         const matchResult = result as any;
@@ -125,40 +118,34 @@ export default function Phase2LikesScreen() {
         Toast.show('Liked! Keep swiping to find more matches.');
       }
     } catch (error: any) {
-      console.warn('[P2_LIKES_PAGE] Like-back error:', error?.message);
+      console.warn('[P2_LIKES_PAGE] Like-back error:', String(error?.message ?? error));
       Toast.show("Couldn't like back. Please try again.");
     }
   };
 
   // Handle ignore/pass
-  // CONTRACT FIX: Uses authUserId instead of token
   const handleIgnore = async (like: any) => {
-    if (!userId) {
+    if (!userId || !token) {
       Toast.show('Please sign in again to continue.');
       return;
     }
 
     try {
       await swipeMutation({
+        token,
         authUserId: userId,
         toUserId: like.fromUserId,
         action: 'pass',
       });
 
-      if (__DEV__) {
-        console.log('[P2_LIKES_PAGE] Ignored:', like.fromUserId?.slice?.(-8));
-      }
     } catch (error: any) {
-      console.warn('[P2_LIKES_PAGE] Ignore error:', error?.message);
+      console.warn('[P2_LIKES_PAGE] Ignore error:', String(error?.message ?? error));
       Toast.show("Couldn't skip this person. Please try again.");
     }
   };
 
   // Handle tap on card/photo to open full Phase-2 profile
   const handleOpenProfile = (like: any) => {
-    if (__DEV__) {
-      console.log('[P2_LIKES_PAGE] Opening profile:', like.fromUserId?.slice?.(-8));
-    }
     router.push(`/(main)/(private)/p2-profile/${like.fromUserId}` as any);
   };
 

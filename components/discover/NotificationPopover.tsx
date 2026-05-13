@@ -127,7 +127,7 @@ export function NotificationPopover({
           break;
         }
         case 'phase2_like':
-          router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
+          router.push(`/(main)/(private)/phase2-likes?${notifParams}${dedupeParam}` as any);
           break;
         case 'phase2_deep_connect': {
           const requestId = notification.data?.threadId;
@@ -142,9 +142,9 @@ export function NotificationPopover({
         case 'phase2_chat_room': {
           const roomId = notification.data?.chatRoomId;
           if (roomId) {
-            router.push(`/(main)/(private)/chat-room/${roomId}?${notifParams}${dedupeParam}` as any);
+            router.push(`/(main)/(private)/(tabs)/chat-rooms/${encodeURIComponent(roomId)}?${notifParams}${dedupeParam}` as any);
           } else {
-            router.push(`/(main)/(private)?${notifParams}${dedupeParam}` as any);
+            router.push(`/(main)/(private)/(tabs)/chat-rooms?${notifParams}${dedupeParam}` as any);
           }
           break;
         }

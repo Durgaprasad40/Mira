@@ -686,7 +686,7 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
   const phase2Notifications = useQuery(
     api.privateNotifications.getPrivateNotifications,
     phase === 'phase2' && !isDemoMode && convexUserId && authReady && hasValidToken
-      ? { userId: convexUserId }
+      ? { token, userId: convexUserId }
       : 'skip',
   );
   const convexNotifications = phase === 'phase1' ? phase1Notifications : phase2Notifications;
@@ -813,9 +813,10 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
     if (phase === 'phase1') {
       markAllAsReadMutationP1({ authUserId: userId }).catch(console.error);
     } else {
-      markAllAsReadMutationP2({ authUserId: userId }).catch(console.error);
+      if (!token) return;
+      markAllAsReadMutationP2({ token, authUserId: userId }).catch(console.error);
     }
-  }, [phase, convexUserId, userId, markAllAsReadMutationP1, markAllAsReadMutationP2, demoMarkAllRead]);
+  }, [phase, convexUserId, token, userId, markAllAsReadMutationP1, markAllAsReadMutationP2, demoMarkAllRead]);
 
   // ── Mark single notification as read (phase-scoped) ──
   const markRead = useCallback(
@@ -825,6 +826,7 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
         return;
       }
       if (!convexUserId || !userId) return;
+      if (phase === 'phase2' && !token) return;
 
       pendingReadsRef.current.add(notificationId);
       forceUpdate((n) => n + 1);
@@ -832,7 +834,7 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
       const promise =
         phase === 'phase1'
           ? markAsReadMutationP1({ notificationId: notificationId as any, authUserId: userId })
-          : markAsReadMutationP2({ notificationId: notificationId as any, authUserId: userId });
+          : markAsReadMutationP2({ token: token as string, notificationId: notificationId as any, authUserId: userId });
 
       promise
         .then(() => {
@@ -844,7 +846,7 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
           forceUpdate((n) => n + 1);
         });
     },
-    [phase, convexUserId, userId, markAsReadMutationP1, markAsReadMutationP2, demoMarkRead],
+    [phase, convexUserId, token, userId, markAsReadMutationP1, markAsReadMutationP2, demoMarkRead],
   );
 
   // ── Mark by dedupe key (Phase-1 only — Phase-2 has no analog yet) ──
@@ -876,6 +878,7 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
         }).catch(console.error);
       } else {
         markReadForConversationMutationP2({
+          token,
           authUserId: userId,
           privateConversationId: normalizedId,
         }).catch(console.error);
