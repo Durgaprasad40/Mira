@@ -114,12 +114,11 @@ export function InAppVideoRecorder({
         setRecordedUri(video.uri);
         setRecordedDurationMs(getCurrentRecordingDurationMs());
         setState('preview');
-        console.log(`[T/D VideoRecorder] Video recorded: ${video.uri}`);
       } else {
         setState('ready');
       }
-    } catch (error) {
-      console.error('[T/D VideoRecorder] Recording error:', error);
+    } catch {
+      console.error('[T/D VideoRecorder] Recording failed');
       setState('ready');
     }
   }, [getCurrentRecordingDurationMs, state]);
@@ -131,8 +130,8 @@ export function InAppVideoRecorder({
       setIsLoading(true);
       await cameraRef.current.stopRecording();
       // The recordAsync promise will resolve with the video
-    } catch (error) {
-      console.error('[T/D VideoRecorder] Stop error:', error);
+    } catch {
+      console.error('[T/D VideoRecorder] Stop failed');
       setState('ready');
     } finally {
       setIsLoading(false);

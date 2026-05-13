@@ -153,8 +153,8 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
       setHasRecording(false);
       setAudioUri(null);
       setSeconds(0);
-    } catch (error) {
-      console.error('[VoiceComposer] Start recording error:', error);
+    } catch {
+      console.error('[VoiceComposer] Start recording failed');
       Alert.alert('Error', 'Failed to start recording. Please try again.');
     }
   };
@@ -172,10 +172,9 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
       if (uri) {
         setAudioUri(uri);
         setHasRecording(true);
-        console.log('[VoiceComposer] Recording saved to:', uri);
       }
-    } catch (error) {
-      console.error('[VoiceComposer] Stop recording error:', error);
+    } catch {
+      console.error('[VoiceComposer] Stop recording failed');
       setIsRecording(false);
     }
   };
@@ -212,8 +211,8 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploa
 
       soundRef.current = sound;
       setIsPlaying(true);
-    } catch (error) {
-      console.error('[VoiceComposer] Playback error:', error);
+    } catch {
+      console.error('[VoiceComposer] Playback failed');
       setIsPlaying(false);
     }
   };

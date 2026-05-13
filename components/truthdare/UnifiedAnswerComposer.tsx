@@ -60,17 +60,9 @@ const CONFIRM_ICON_SIZE = SIZES.icon.xl;
 const SHEET_RADIUS = moderateScale(20, 0.25);
 const MODAL_RADIUS = moderateScale(16, 0.25);
 
-const debugTodLog = (...args: unknown[]) => {
-  if (__DEV__) {
-    console.log(...args);
-  }
-};
+const debugTodLog = (..._args: unknown[]) => {};
 
-const debugTodWarn = (...args: unknown[]) => {
-  if (__DEV__) {
-    console.warn(...args);
-  }
-};
+const debugTodWarn = (..._args: unknown[]) => {};
 
 type ComposerMediaKind = 'photo' | 'video' | 'audio';
 
@@ -302,8 +294,8 @@ export function UnifiedAnswerComposer({
       recordingRef.current = recording;
       setIsRecording(true);
       setRecordSeconds(0);
-    } catch (error) {
-      console.error('[T/D Composer] Start recording error:', error);
+    } catch {
+      console.error('[T/D Composer] Start recording failed');
       Alert.alert('Error', 'Failed to start recording. Please try again.');
     }
   };
@@ -346,8 +338,8 @@ export function UnifiedAnswerComposer({
         setMediaRemoved(false);
         debugTodLog(`[T/D Composer] Voice recorded: ${finalSeconds}s, size: ${fileSize}`);
       }
-    } catch (error) {
-      console.error('[T/D Composer] Stop recording error:', error);
+    } catch {
+      console.error('[T/D Composer] Stop recording failed');
       setIsRecording(false);
     }
   };
@@ -382,8 +374,8 @@ export function UnifiedAnswerComposer({
 
       soundRef.current = sound;
       setIsPlayingPreview(true);
-    } catch (error) {
-      console.error('[T/D Composer] Playback error:', error);
+    } catch {
+      console.error('[T/D Composer] Playback failed');
       setIsPlayingPreview(false);
     }
   };

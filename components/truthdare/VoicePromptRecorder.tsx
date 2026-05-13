@@ -147,9 +147,9 @@ export function VoicePromptRecorder({ visible, onClose, onConfirm }: Props) {
         setAudioUri(uri);
         setHasRecording(true);
       }
-    } catch (error) {
+    } catch {
       if (__DEV__) {
-        console.warn('[VoicePromptRecorder] stop failed', error);
+        console.warn('[VoicePromptRecorder] stop failed');
       }
       recordingRef.current = null;
       setIsRecording(false);
@@ -211,9 +211,9 @@ export function VoicePromptRecorder({ visible, onClose, onConfirm }: Props) {
           return next;
         });
       }, 1000);
-    } catch (error) {
+    } catch {
       if (__DEV__) {
-        console.warn('[VoicePromptRecorder] start failed', error);
+        console.warn('[VoicePromptRecorder] start failed');
       }
       setIsRecording(false);
       Alert.alert('Recording Error', 'Failed to start recording. Please try again.');
@@ -260,9 +260,9 @@ export function VoicePromptRecorder({ visible, onClose, onConfirm }: Props) {
       );
       soundRef.current = sound;
       setIsPlaying(true);
-    } catch (error) {
+    } catch {
       if (__DEV__) {
-        console.warn('[VoicePromptRecorder] preview failed', error);
+        console.warn('[VoicePromptRecorder] preview failed');
       }
       setIsPlaying(false);
     }

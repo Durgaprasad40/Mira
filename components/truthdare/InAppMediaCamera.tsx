@@ -187,10 +187,9 @@ export function InAppMediaCamera({
         setCapturedUri(photo.uri);
         setCapturedKind('photo');
         setCapturedFacing(facing);
-        console.log(`[InAppMediaCamera] captured kind=photo facingAtCapture=${facing} uri=${photo.uri.substring(0, 50)}...`);
       }
-    } catch (error) {
-      console.error('[InAppMediaCamera] Photo capture error:', error);
+    } catch {
+      console.error('[InAppMediaCamera] Photo capture failed');
     } finally {
       // STABILITY FIX: C-6 - Guard setState in finally block
       if (mountedRef.current) {
@@ -251,10 +250,9 @@ export function InAppMediaCamera({
         setCapturedKind('video');
         setCapturedDurationMs(getCurrentRecordingDurationMs());
         setCapturedFacing(facing);
-        console.log(`[InAppMediaCamera] captured kind=video facingAtCapture=${facing} uri=${video.uri.substring(0, 50)}...`);
       }
-    } catch (error) {
-      console.error('[InAppMediaCamera] Video recording error:', error);
+    } catch {
+      console.error('[InAppMediaCamera] Video recording failed');
     } finally {
       // STABILITY FIX: C-6 - Guard setState in finally block
       if (mountedRef.current) {
@@ -272,8 +270,8 @@ export function InAppMediaCamera({
       setCapturedDurationMs(getCurrentRecordingDurationMs());
       await cameraRef.current.stopRecording();
       // The recordAsync promise will resolve with the video
-    } catch (error) {
-      console.error('[InAppMediaCamera] Stop recording error:', error);
+    } catch {
+      console.error('[InAppMediaCamera] Stop recording failed');
       // STABILITY FIX: C-6 - Guard setState after async operation
       if (mountedRef.current) {
         setIsRecording(false);
@@ -381,7 +379,6 @@ export function InAppMediaCamera({
   // Front camera output may be mirrored on Android, so we apply unmirror transform
   if (capturedUri && capturedKind) {
     const unmirrorPreview = capturedFacing === 'front';
-    console.log(`[InAppMediaCamera] preview kind=${capturedKind} capturedFacing=${capturedFacing} unmirrorPreview=${unmirrorPreview}`);
 
     return (
       <Modal visible={visible} transparent={false} animationType="fade">
@@ -449,7 +446,6 @@ export function InAppMediaCamera({
 
   // Determine if we need to unmirror the camera preview (front camera on Android is mirrored)
   const applyUnmirror = facing === 'front';
-  console.log(`[InAppMediaCamera] facing=${facing} applyingUnmirror=${applyUnmirror}`);
 
   // Live camera state
   return (

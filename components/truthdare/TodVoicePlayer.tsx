@@ -43,10 +43,6 @@ const useVoicePlaybackStore = create<VoicePlaybackState>((set, get) => ({
 
     // Stop previous sound if different from new one
     if (state.currentSound && state.currentId !== newId) {
-      const prevIdPrefix = prevId?.substring(0, 8) ?? 'none';
-      const newIdPrefix = newId.substring(0, 8);
-      console.log(`[T/D VOICE] switch from=${prevIdPrefix} to=${newIdPrefix}`);
-
       try {
         await state.currentSound.stopAsync();
         await state.currentSound.unloadAsync();
@@ -139,8 +135,8 @@ export function TodVoicePlayer({ answerId, audioUrl, durationSec }: TodVoicePlay
         await stopCurrentAndSet(sound, answerId);
         setIsPlaying(true);
       }
-    } catch (error) {
-      console.error('[TodVoicePlayer] Playback error:', error);
+    } catch {
+      console.error('[TodVoicePlayer] Playback failed');
       setIsPlaying(false);
     }
   }, [isPlaying, audioUrl, answerId, durationSec, clearPlaying, stopCurrentAndSet]);
