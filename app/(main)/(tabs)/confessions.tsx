@@ -4,16 +4,11 @@ import {
   Alert,
   Animated,
   FlatList,
-  Keyboard,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
+  RefreshControl,
   StyleSheet,
-  Switch,
   Text,
-  TextInput,
   TouchableOpacity,
-  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,17 +20,14 @@ import EmojiPicker from 'rn-emoji-keyboard';
 
 import { safePush } from '@/lib/safeRouter';
 import { api } from '@/convex/_generated/api';
-import { asUserId } from '@/convex/id';
 import { COLORS, FONT_SIZE, SPACING, lineHeight, moderateScale } from '@/lib/constants';
-import { isContentClean } from '@/lib/contentFilter';
+import { CONFESSION_BLUR_PHOTO_RADIUS } from '@/lib/confessionBlur';
 import { isProbablyEmoji } from '@/lib/utils';
-import { getPhase1PrimaryPhoto } from '@/lib/photoUtils';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useScreenTrace } from '@/lib/devTrace';
 import { useAuthStore } from '@/stores/authStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { useConfessionStore } from '@/stores/confessionStore';
-import { useDemoStore } from '@/stores/demoStore';
 import { DraggableFab, DRAGGABLE_FAB_STORAGE_KEYS } from '@/components/common/DraggableFab';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
@@ -92,45 +84,6 @@ type TaggedConfessionItem = {
   taggedUserName?: string;
 };
 
-// P0/P1 MENTION_RULE:
-// Mention eligibility for user A = union(
-//   users A liked/right-swiped,
-//   users A is mutually matched with
-// ). Each candidate is tagged with matchType so we can sort mutual_match
-// above liked_only (done server-side) and optionally render a visual hint.
-type LikedUser = {
-  id: string;
-  name: string;
-  avatarUrl: string | null;
-  age?: number | null;
-  disambiguator: string;
-  matchType?: 'mutual_match' | 'liked_only';
-};
-
-const DEMO_LIKED_USERS: LikedUser[] = [
-  { id: 'demo_profile_2', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=5', age: 24, disambiguator: 'Loves coffee', matchType: 'mutual_match' },
-  { id: 'demo_profile_3', name: 'Rahul', avatarUrl: 'https://i.pravatar.cc/150?img=12', age: 27, disambiguator: 'Tech enthusiast', matchType: 'liked_only' },
-  { id: 'demo_profile_4', name: 'Ananya', avatarUrl: 'https://i.pravatar.cc/150?img=9', age: 25, disambiguator: 'Mumbai', matchType: 'liked_only' },
-  { id: 'demo_profile_5', name: 'Vikram', avatarUrl: 'https://i.pravatar.cc/150?img=11', age: 29, disambiguator: 'Photographer', matchType: 'liked_only' },
-  { id: 'demo_profile_6', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=16', age: 22, disambiguator: 'Yoga instructor', matchType: 'liked_only' },
-];
-
-function computeAge(dateOfBirth: string | undefined): number | undefined {
-  if (!dateOfBirth) return undefined;
-  const birthDate = new Date(dateOfBirth);
-  if (Number.isNaN(birthDate.getTime())) return undefined;
-  const today = new Date();
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const monthDiff = today.getMonth() - birthDate.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-    age--;
-  }
-  return age > 0 && age < 120 ? age : undefined;
-}
-
-// P0-1: Blur radius for blur_photo identity mode (matches ConfessionCard)
-const BLUR_PHOTO_RADIUS = 20;
-
 function getConfessGenderSymbol(gender?: string): { symbol: string; color: string } | null {
   if (!gender) return null;
   const normalized = gender.trim().toLowerCase();
@@ -176,11 +129,9 @@ export default function ConfessionsScreen() {
   const demoConfessions = useConfessionStore((s) => s.confessions);
   const demoUserReactions = useConfessionStore((s) => s.userReactions);
   const demoToggleReaction = useConfessionStore((s) => s.toggleReaction);
-  const demoAddConfession = useConfessionStore((s) => s.addConfession);
   const demoDeleteConfession = useConfessionStore((s) => s.deleteConfession);
   const demoReportConfession = useConfessionStore((s) => s.reportConfession);
   const demoCanPostConfession = useConfessionStore((s) => s.canPostConfession);
-  const demoRecordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
   const getTimeUntilNextConfession = useConfessionStore((s) => s.getTimeUntilNextConfession);
   const getMyLatestConfession = useConfessionStore((s) => s.getMyLatestConfession);
   const seenTaggedConfessionIds = useConfessionStore((s) => s.seenTaggedConfessionIds);
@@ -196,38 +147,27 @@ export default function ConfessionsScreen() {
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const blockUserLocal = useBlockStore((s) => s.blockUser);
 
-  const demoCurrentUserId = useDemoStore((s) => s.currentDemoUserId);
-  const demoProfiles = useDemoStore((s) => s.demoProfiles);
-  const demoCurrentUser = demoCurrentUserId ? demoProfiles[demoCurrentUserId] : null;
-
   const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
     !isDemoMode && token ? { token } : 'skip'
   );
-  const convexCurrentUserId = !isDemoMode ? (convexCurrentUser?._id ?? asUserId(currentUserId ?? '')) : undefined;
 
   const liveConfessions = useQuery(
     api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'latest', viewerId: currentUserId ?? undefined } : 'skip'
+    !isDemoMode && token ? { sortBy: 'latest', token, viewerId: currentUserId ?? undefined } : 'skip'
   );
   const liveTrending = useQuery(
     api.confessions.getTrendingConfessions,
-    !isDemoMode ? { viewerId: currentUserId ?? undefined } : 'skip'
+    !isDemoMode && token ? { token, viewerId: currentUserId ?? undefined } : 'skip'
   );
   const liveTaggedConfessions = useQuery(
     api.confessions.listTaggedConfessionsForUser,
-    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+    !isDemoMode && currentUserId && token ? { token, userId: currentUserId } : 'skip'
   );
   const liveConfessInboxBadge = useQuery(
     api.confessions.getConfessInboxBadgeCount,
     !isDemoMode && token ? { token } : 'skip'
   );
-  const likedUsersQuery = useQuery(
-    api.likes.getLikedUsers,
-    !isDemoMode && convexCurrentUserId ? { userId: convexCurrentUserId } : 'skip'
-  );
-
-  const createConfessionMutation = useMutation(api.confessions.createConfession);
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const reportConfessionMutation = useMutation(api.confessions.reportConfession);
   const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
@@ -239,18 +179,10 @@ export default function ConfessionsScreen() {
 
   const [hiddenConfessionIds, setHiddenConfessionIds] = useState<string[]>([]);
   const [showTaggedSection, setShowTaggedSection] = useState(false);
-  const [showComposer, setShowComposer] = useState(false);
-  const [composerText, setComposerText] = useState('');
-  const [composerAnonymous, setComposerAnonymous] = useState(true);
-  const [composerSubmitting, setComposerSubmitting] = useState(false);
-  const [showComposerEmoji, setShowComposerEmoji] = useState(false);
   const [showReactionEmoji, setShowReactionEmoji] = useState(false);
   const [emojiTargetConfessionId, setEmojiTargetConfessionId] = useState<string | null>(null);
-  const [tagInput, setTagInput] = useState('');
-  const [taggedUser, setTaggedUser] = useState<LikedUser | null>(null);
-  const [showDuplicatePicker, setShowDuplicatePicker] = useState(false);
-  const [duplicateCandidates, setDuplicateCandidates] = useState<LikedUser[]>([]);
   const [liveUserReactions, setLiveUserReactions] = useState<Record<string, string | null>>({});
+  const [refreshing, setRefreshing] = useState(false);
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [showMenuSheet, setShowMenuSheet] = useState(false);
@@ -258,15 +190,10 @@ export default function ConfessionsScreen() {
   const [reportingConfessionId, setReportingConfessionId] = useState<string | null>(null);
   const [countdownMs, setCountdownMs] = useState(0);
   const toastOpacity = useRef(new Animated.Value(0)).current;
-  const composerInputRef = useRef<TextInput>(null);
   const pendingBlockAuthorsRef = useRef<Set<string>>(new Set());
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const effectiveViewerId = isDemoMode ? currentUserId : convexCurrentUser?._id;
-
-  const likedUsers = useMemo<LikedUser[]>(
-    () => (isDemoMode ? DEMO_LIKED_USERS : (likedUsersQuery ?? [])),
-    [isDemoMode, likedUsersQuery]
-  );
 
   const showToastMessage = useCallback((message: string) => {
     setToastMessage(message);
@@ -302,27 +229,13 @@ export default function ConfessionsScreen() {
     return () => clearInterval(interval);
   }, [getTimeUntilNextConfession]);
 
-  const getAuthorInfo = useCallback(() => {
-    if (isDemoMode && demoCurrentUser) {
-      return {
-        authorName: demoCurrentUser.name,
-        authorPhotoUrl: demoCurrentUser.photos?.[0]?.url,
-        authorAge: (demoCurrentUser as any).age,
-        authorGender: (demoCurrentUser as any).gender,
-      };
-    }
-
-    if (!isDemoMode && convexCurrentUser) {
-      return {
-        authorName: (convexCurrentUser as any).name,
-        authorPhotoUrl: getPhase1PrimaryPhoto(convexCurrentUser) ?? undefined,
-        authorAge: computeAge((convexCurrentUser as any).dateOfBirth),
-        authorGender: (convexCurrentUser as any).gender,
-      };
-    }
-
-    return {};
-  }, [convexCurrentUser, demoCurrentUser]);
+  useEffect(() => {
+    return () => {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const confessions = useMemo<FeedConfession[]>(() => {
     const hiddenSet = new Set(hiddenConfessionIds);
@@ -482,59 +395,6 @@ export default function ConfessionsScreen() {
       .sort((a, b) => b.trendingScore - a.trendingScore)[0] ?? null;
   }, [confessions, isDemoMode, liveTrending]);
 
-  const tagSuggestions = useMemo(() => {
-    // P0/P1 MENTION_RULE + P1 Confess autocomplete:
-    // - `likedUsers` is the single source of truth: union(liked, mutual_match),
-    //   de-duped, sorted mutual_match -> liked_only -> alphabetical by the server.
-    // - Gate on 3+ typed chars, trim + lowercase, prefix match (startsWith).
-    // - DO NOT filter by candidate name length (legacy bug hid short names
-    //   like "Sruti").
-    // - DO NOT re-sort — preserve server-provided matchType order.
-    if (!tagInput) {
-      if (__DEV__) console.log('[CONFESS_SEARCH][input] empty', { tagInput, taggedUserId: taggedUser?.id });
-      return [];
-    }
-    const normalized = tagInput.toLowerCase().trim();
-    if (normalized.length < 3 || taggedUser) {
-      if (__DEV__) {
-        console.log('[CONFESS_SEARCH][dropdown] hidden', {
-          reason: taggedUser ? 'already_tagged' : 'below_min_length',
-          tagInput,
-          normalized,
-          normalizedLength: normalized.length,
-        });
-      }
-      return [];
-    }
-    const sourceCount = likedUsers.length;
-    const mutualCount = likedUsers.filter((u) => u.matchType === 'mutual_match').length;
-    const likedOnlyCount = likedUsers.filter((u) => u.matchType === 'liked_only').length;
-    const matched = likedUsers
-      .filter((user) => user.name.trim().toLowerCase().startsWith(normalized))
-      .slice(0, 5);
-    if (__DEV__) {
-      console.log('[MENTION_RULE][source]', { sourceCount, mutualCount, likedOnlyCount });
-      console.log('[MENTION_RULE][search]', {
-        query: tagInput,
-        normalized,
-        matchCount: matched.length,
-        matches: matched.map((u) => ({ id: u.id, name: u.name, matchType: u.matchType })),
-      });
-      console.log('[CONFESS_SEARCH][source]', { sourceCount });
-      console.log('[CONFESS_SEARCH][filtered]', {
-        tagInput,
-        normalized,
-        matchCount: matched.length,
-        matchedNames: matched.map((u) => u.name),
-      });
-      console.log('[CONFESS_SEARCH][dropdown]', {
-        willShow: matched.length > 0 && !taggedUser,
-        shownCount: matched.length,
-      });
-    }
-    return matched;
-  }, [likedUsers, tagInput, taggedUser]);
-
   // Get user's most recent confession (for "Your confession" section)
   const myLatestConfession = useMemo(() => {
     if (!currentUserId) return null;
@@ -590,144 +450,18 @@ export default function ConfessionsScreen() {
       return;
     }
 
-    setComposerText('');
-    setComposerAnonymous(true);
-    setTagInput('');
-    setTaggedUser(null);
-    setShowDuplicatePicker(false);
-    setDuplicateCandidates([]);
     safePush(router, '/(main)/compose-confession' as any, 'confessions->compose');
   }, [canPostNow, countdownMs, formatCountdown, router, showToastMessage]);
 
-  const handleCloseComposer = useCallback(() => {
-    Keyboard.dismiss();
-    setShowComposer(false);
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
+    refreshTimeoutRef.current = setTimeout(() => {
+      setRefreshing(false);
+    }, 450);
   }, []);
-
-  const handleTagInputChange = useCallback((text: string) => {
-    setTagInput(text);
-    setTaggedUser(null);
-
-    const normalized = text.toLowerCase().trim();
-    if (!normalized) return;
-
-    const exactMatches = likedUsers.filter((user) => user.name.toLowerCase() === normalized);
-    if (exactMatches.length === 1 && exactMatches[0].name.length <= 7) {
-      setTaggedUser(exactMatches[0]);
-      setTagInput(exactMatches[0].name);
-      return;
-    }
-
-    if (exactMatches.length > 1) {
-      setDuplicateCandidates(exactMatches);
-      setShowDuplicatePicker(true);
-    }
-  }, [likedUsers]);
-
-  const handleSubmitComposer = useCallback(async () => {
-    if (!currentUserId || composerSubmitting) return;
-
-    const trimmed = composerText.trim();
-    if (trimmed.length < 10) {
-      Alert.alert('Too Short', 'Confessions must be at least 10 characters.');
-      return;
-    }
-
-    if (tagInput.trim() && !taggedUser) {
-      Alert.alert('Select a Person', 'Pick a valid person from the suggestions, or clear the tag field.');
-      return;
-    }
-
-    const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
-    const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
-    if (phonePattern.test(trimmed) || emailPattern.test(trimmed)) {
-      Alert.alert('Safety Warning', "Don't include phone numbers or personal details.");
-      return;
-    }
-
-    if (!isContentClean(trimmed)) {
-      Alert.alert('Content Warning', 'Your confession contains inappropriate content. Please revise it.');
-      return;
-    }
-
-    if (isDemoMode && !demoCanPostConfession()) {
-      Alert.alert('Limit Reached', "You've reached today's confession limit. Try again later.");
-      return;
-    }
-
-    const authorInfo = !composerAnonymous ? getAuthorInfo() : {};
-    if (!composerAnonymous && !authorInfo.authorName) {
-      Alert.alert('Profile Not Ready', 'Your profile is still loading. Please try again in a moment, or post anonymously.');
-      return;
-    }
-
-    setComposerSubmitting(true);
-
-    try {
-      if (isDemoMode) {
-        const createdAt = Date.now();
-        demoAddConfession({
-          id: `conf_new_${createdAt}`,
-          userId: currentUserId,
-          text: trimmed,
-          isAnonymous: composerAnonymous,
-          mood: 'emotional',
-          topEmojis: [],
-          replyPreviews: [],
-          visibility: 'global',
-          replyCount: 0,
-          reactionCount: 0,
-          createdAt,
-          expiresAt: createdAt + 24 * 60 * 60 * 1000,
-          revealPolicy: 'never',
-          taggedUserId: taggedUser?.id,
-          taggedUserName: taggedUser?.name,
-          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-        } as any);
-        demoRecordConfessionTimestamp();
-      } else {
-        await createConfessionMutation({
-          userId: currentUserId,
-          text: trimmed,
-          isAnonymous: composerAnonymous,
-          mood: 'emotional',
-          visibility: 'global',
-          taggedUserId: taggedUser?.id as any,
-          ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
-          ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
-          ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
-          ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
-        });
-      }
-
-      handleCloseComposer();
-      setComposerText('');
-      setTagInput('');
-      setTaggedUser(null);
-      showToastMessage('Confession posted');
-    } catch (error: any) {
-      Alert.alert('Error', error?.message || 'Failed to post confession');
-    } finally {
-      setComposerSubmitting(false);
-    }
-  }, [
-    composerAnonymous,
-    composerSubmitting,
-    composerText,
-    currentUserId,
-    createConfessionMutation,
-    demoAddConfession,
-    demoCanPostConfession,
-    demoRecordConfessionTimestamp,
-    getAuthorInfo,
-    handleCloseComposer,
-    showToastMessage,
-    tagInput,
-    taggedUser,
-  ]);
 
   const handleOpenTaggedSection = useCallback(() => {
     const unreadActiveTaggedConfessions = taggedConfessions.filter((item) => !item.seen && !item.isExpired);
@@ -738,6 +472,7 @@ export default function ConfessionsScreen() {
         markTaggedConfessionSeen(singleUnread.confessionId);
       } else if (currentUserId) {
         markTaggedSeenMutation({
+          token: token ?? '',
           userId: currentUserId,
           notificationIds: [singleUnread.notificationId as any],
         }).catch(() => {
@@ -767,10 +502,10 @@ export default function ConfessionsScreen() {
       return;
     }
 
-    markTaggedSeenMutation({ userId: currentUserId }).catch(() => {
+    markTaggedSeenMutation({ token: token ?? '', userId: currentUserId }).catch(() => {
       // Keep the feed usable even if badge clearing fails.
     });
-  }, [currentUserId, isDemoMode, markAllTaggedConfessionsSeen, markTaggedConfessionSeen, markTaggedSeenMutation, router, taggedConfessions]);
+  }, [currentUserId, isDemoMode, markAllTaggedConfessionsSeen, markTaggedConfessionSeen, markTaggedSeenMutation, router, taggedConfessions, token]);
 
   const handleOpenConnectRequests = useCallback(() => {
     if (isDemoMode) {
@@ -791,9 +526,6 @@ export default function ConfessionsScreen() {
         console.warn('[CONFESS_CARD_PRESS_BLOCKED_MISSING_ID]', { source: 'handleOpenThread' });
       }
       return;
-    }
-    if (__DEV__) {
-      console.log('[CONFESS_THREAD_NAVIGATE]', { source: 'confessions', hasId: true });
     }
     safePush(
       router,
@@ -899,6 +631,7 @@ export default function ConfessionsScreen() {
     try {
       await toggleReactionMutation({
         confessionId: confessionId as any,
+        token: token ?? '',
         userId: currentUserId,
         type: emoji,
       });
@@ -910,7 +643,7 @@ export default function ConfessionsScreen() {
       });
       Alert.alert('Unable to react right now');
     }
-  }, [currentUserId, demoToggleReaction, isDemoMode, toggleReactionMutation]);
+  }, [currentUserId, demoToggleReaction, isDemoMode, toggleReactionMutation, token]);
 
   const handleOpenReactionPicker = useCallback((confessionId: string) => {
     setEmojiTargetConfessionId(confessionId);
@@ -945,6 +678,7 @@ export default function ConfessionsScreen() {
           try {
             await deleteConfessionMutation({
               confessionId: confessionId as any,
+              token: token ?? '',
               userId: currentUserId,
             });
           } catch {
@@ -954,7 +688,7 @@ export default function ConfessionsScreen() {
         },
       },
     ]);
-  }, [currentUserId, deleteConfessionMutation, demoDeleteConfession, effectiveViewerId, isDemoMode]);
+  }, [currentUserId, deleteConfessionMutation, demoDeleteConfession, effectiveViewerId, isDemoMode, token]);
 
   const handleSubmitReport = useCallback(async (
     confessionId: string,
@@ -972,6 +706,7 @@ export default function ConfessionsScreen() {
     try {
       await reportConfessionMutation({
         confessionId: confessionId as any,
+        token: token ?? '',
         reporterId: currentUserId,
         reason,
       });
@@ -980,7 +715,7 @@ export default function ConfessionsScreen() {
     } catch {
       Alert.alert('Unable to report right now');
     }
-  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation, showToastMessage]);
+  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation, showToastMessage, token]);
 
   const handleBlockAuthor = useCallback(async (authorId: string) => {
     if (!currentUserId || !authorId) return;
@@ -1012,17 +747,9 @@ export default function ConfessionsScreen() {
 
   // Open the premium menu sheet instead of alert
   const handleOpenMenuSheet = useCallback((confessionId: string, authorId: string) => {
-    const isOwner = authorId === effectiveViewerId;
-    if (__DEV__) {
-      console.log('[CONFESS_LONG_PRESS] menu opening', {
-        confessionId: confessionId.slice(-6),
-        isOwner,
-        menuType: isOwner ? 'owner (Edit/Delete/Cancel)' : 'non-owner (Report/Cancel)',
-      });
-    }
     setMenuTargetConfession({ id: confessionId, authorId });
     setShowMenuSheet(true);
-  }, [effectiveViewerId]);
+  }, []);
 
   const handleCloseMenuSheet = useCallback(() => {
     setShowMenuSheet(false);
@@ -1047,9 +774,7 @@ export default function ConfessionsScreen() {
   }, [handleSubmitReport, reportingConfessionId]);
 
   const handleMenuEdit = useCallback(() => {
-    console.log('[EDIT_HANDLER] handleMenuEdit called, menuTargetConfession:', menuTargetConfession);
     if (!menuTargetConfession) {
-      console.log('[EDIT_HANDLER] ABORT: menuTargetConfession is null');
       return;
     }
     // Navigate to compose-confession in edit mode
@@ -1057,7 +782,6 @@ export default function ConfessionsScreen() {
     // - fetching existing confession data
     // - prefilling form fields
     // - update mutation
-    console.log('[EDIT_NAVIGATE] Opening compose-confession for edit:', menuTargetConfession.id);
     safePush(
       router,
       {
@@ -1088,7 +812,6 @@ export default function ConfessionsScreen() {
           style={styles.trendingCard}
           activeOpacity={0.88}
           onPress={() => {
-            if (__DEV__) console.log('[CONFESS_CARD_PRESS]', { screen: 'confessions', source: 'trending', hasId: !!trendingHero.id });
             handleOpenThread(trendingHero.id);
           }}
           onLongPress={() => handleOpenMenuSheet(trendingHero.id, trendingHero.userId)}
@@ -1111,7 +834,7 @@ export default function ConfessionsScreen() {
                 source={{ uri: trendingHero.authorPhotoUrl }}
                 style={styles.trendingAvatarImage}
                 contentFit="cover"
-                blurRadius={BLUR_PHOTO_RADIUS}
+                blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
               />
             ) : trendingHero.authorPhotoUrl ? (
               <Image
@@ -1202,7 +925,6 @@ export default function ConfessionsScreen() {
           style={styles.myConfessionCard}
           activeOpacity={0.88}
           onPress={() => {
-            if (__DEV__) console.log('[CONFESS_CARD_PRESS]', { screen: 'confessions', source: 'my-confession', hasId: !!myConfessionId });
             handleOpenThread(myConfessionId);
           }}
           onLongPress={() => handleOpenMenuSheet(
@@ -1228,7 +950,7 @@ export default function ConfessionsScreen() {
                 source={{ uri: (myLatestConfession as any).authorPhotoUrl }}
                 style={styles.myConfessionAvatarImage}
                 contentFit="cover"
-                blurRadius={BLUR_PHOTO_RADIUS}
+                blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
               />
             ) : (myLatestConfession as any).authorPhotoUrl ? (
               <Image
@@ -1382,14 +1104,20 @@ export default function ConfessionsScreen() {
         </View>
       </View>
 
-      <Text maxFontSizeMultiplier={1.2} style={styles.topHint}>Choose how you want to be seen</Text>
-
       <FlatList
         data={filteredConfessions}
         keyExtractor={(item) => item.id}
         ListHeaderComponent={renderHeader}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor={COLORS.primary}
+            colors={[COLORS.primary]}
+          />
+        }
         renderItem={({ item }) => {
           const userEmoji = isDemoMode
             ? (demoUserReactions[item.id] && isProbablyEmoji(demoUserReactions[item.id]!) ? demoUserReactions[item.id]! : null)
@@ -1447,10 +1175,64 @@ export default function ConfessionsScreen() {
           // Only show empty state if NO confessions exist at all (not just filtered list)
           confessions.length === 0 ? (
             <View style={styles.emptyState}>
-              <Text maxFontSizeMultiplier={1.2} style={styles.emptyEmoji}>💬</Text>
-              <Text maxFontSizeMultiplier={1.2} style={styles.emptyTitle}>No confessions yet</Text>
-              <Text maxFontSizeMultiplier={1.2} style={styles.emptySubtitle}>Be the first to share something</Text>
-              <TouchableOpacity style={styles.emptyButton} onPress={handleOpenComposer}>
+              <View style={styles.emptyHeroIconRing}>
+                <Ionicons name="megaphone" size={moderateScale(32, 0.4)} color={COLORS.primary} />
+              </View>
+              <Text maxFontSizeMultiplier={1.2} style={styles.emptyTitle}>Say it your way</Text>
+              <Text maxFontSizeMultiplier={1.2} style={styles.emptySubtitle}>
+                Confess a feeling, a crush, a funny thought, a secret, or a campus moment — anything you want to say out loud or indirectly.
+              </Text>
+
+              <View style={styles.emptyHeroSteps}>
+                <View style={styles.emptyHeroStepRow}>
+                  <View style={styles.emptyHeroStepIconWrap}>
+                    <Ionicons name="chatbubble-ellipses-outline" size={16} color={COLORS.primary} />
+                  </View>
+                  <View style={styles.emptyHeroStepText}>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.emptyHeroStepLabel}>
+                      Post freely
+                    </Text>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.emptyHeroStepDesc}>
+                      Tagging someone is optional — you can confess without mentioning anyone.
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.emptyHeroStepRow}>
+                  <View style={styles.emptyHeroStepIconWrap}>
+                    <Ionicons name="heart-outline" size={16} color={COLORS.primary} />
+                  </View>
+                  <View style={styles.emptyHeroStepText}>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.emptyHeroStepLabel}>
+                      Mention a crush
+                    </Text>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.emptyHeroStepDesc}>
+                      Liked someone? You can mention that person in your confession.
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.emptyHeroStepRow}>
+                  <View style={styles.emptyHeroStepIconWrap}>
+                    <Ionicons name="eye-off-outline" size={16} color={COLORS.primary} />
+                  </View>
+                  <View style={styles.emptyHeroStepText}>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.emptyHeroStepLabel}>
+                      You stay in control
+                    </Text>
+                    <Text maxFontSizeMultiplier={1.2} style={styles.emptyHeroStepDesc}>
+                      Post anonymously or as yourself — your call on every confession.
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={styles.emptyButton}
+                onPress={handleOpenComposer}
+                activeOpacity={0.9}
+                accessibilityRole="button"
+                accessibilityLabel="Post a Confession"
+              >
+                <Ionicons name="sparkles" size={16} color={COLORS.white} />
                 <Text maxFontSizeMultiplier={1.2} style={styles.emptyButtonText}>Post a Confession</Text>
               </TouchableOpacity>
             </View>
@@ -1511,221 +1293,6 @@ export default function ConfessionsScreen() {
         onEmojiSelected={handleReactionEmojiSelected}
       />
 
-      <Modal visible={showComposer} animationType="slide" transparent onRequestClose={handleCloseComposer}>
-        <TouchableWithoutFeedback onPress={handleCloseComposer}>
-          <View style={styles.modalOverlay}>
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-              <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-                style={styles.sheet}
-              >
-                <View style={styles.sheetHandle} />
-
-                <View style={styles.sheetHeader}>
-                  <TouchableOpacity onPress={handleCloseComposer}>
-                    <Ionicons name="close" size={24} color={COLORS.text} />
-                  </TouchableOpacity>
-                  <Text maxFontSizeMultiplier={1.2} style={styles.sheetTitle}>New Confession</Text>
-                  <TouchableOpacity
-                    onPress={handleSubmitComposer}
-                    disabled={composerSubmitting || composerText.trim().length < 10}
-                    style={[
-                      styles.postButton,
-                      (composerSubmitting || composerText.trim().length < 10) && styles.postButtonDisabled,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.postButtonText,
-                        (composerSubmitting || composerText.trim().length < 10) && styles.postButtonTextDisabled,
-                      ]}
-                    >
-                      {composerSubmitting ? 'Posting...' : 'Post'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                <View style={styles.sheetBanner}>
-                  <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
-                  <Text maxFontSizeMultiplier={1.2} style={styles.sheetBannerText}>Don&apos;t include phone numbers or personal details.</Text>
-                </View>
-
-                <TextInput
-                  ref={composerInputRef}
-                  style={styles.composerInput}
-                  placeholder="What's on your mind? Share your confession..."
-                  placeholderTextColor={COLORS.textMuted}
-                  multiline
-                  maxLength={500}
-                  textAlignVertical="top"
-                  value={composerText}
-                  onChangeText={setComposerText}
-                />
-
-                <View style={styles.composerToolbar}>
-                  <TouchableOpacity onPress={() => setShowComposerEmoji(true)}>
-                    <Text maxFontSizeMultiplier={1.2} style={styles.toolbarEmoji}>🙂</Text>
-                  </TouchableOpacity>
-                  <View style={{ flex: 1 }} />
-                  <Text maxFontSizeMultiplier={1.2} style={styles.charCount}>{composerText.length}/500</Text>
-                </View>
-
-                <View style={styles.tagSection}>
-                  <View style={styles.tagHeader}>
-                    <Ionicons name="heart-outline" size={18} color={COLORS.primary} />
-                    <Text maxFontSizeMultiplier={1.2} style={styles.tagTitle}>Mention username (optional)</Text>
-                  </View>
-
-                  {taggedUser ? (
-                    <View style={styles.selectedTagRow}>
-                      {taggedUser.avatarUrl ? (
-                        <Image source={{ uri: taggedUser.avatarUrl }} style={styles.tagAvatar} contentFit="cover" />
-                      ) : (
-                        <View style={styles.tagAvatarFallback}>
-                          <Ionicons name="person" size={16} color={COLORS.white} />
-                        </View>
-                      )}
-                      <View style={{ flex: 1 }}>
-                        <Text maxFontSizeMultiplier={1.2} style={styles.tagName}>
-                          {taggedUser.name}{taggedUser.age ? `, ${taggedUser.age}` : ''}
-                        </Text>
-                        <Text maxFontSizeMultiplier={1.2} style={styles.tagHint}>{taggedUser.disambiguator}</Text>
-                      </View>
-                      <TouchableOpacity onPress={() => {
-                        setTaggedUser(null);
-                        setTagInput('');
-                      }}>
-                        <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    <>
-                      <TextInput
-                        style={styles.tagInput}
-                        placeholder="Type a name from people you've liked..."
-                        placeholderTextColor={COLORS.textMuted}
-                        value={tagInput}
-                        onChangeText={handleTagInputChange}
-                      />
-                      <Text maxFontSizeMultiplier={1.2} style={styles.tagHint}>
-                        {likedUsers.length > 0 ? 'You can only tag people you liked.' : 'Like someone first to confess to them.'}
-                      </Text>
-                    </>
-                  )}
-
-                  {tagSuggestions.length > 0 && !taggedUser && (
-                    <View style={styles.suggestionList}>
-                      {tagSuggestions.map((user) => (
-                        <TouchableOpacity
-                          key={user.id}
-                          style={styles.suggestionRow}
-                          onPress={() => {
-                            if (__DEV__) {
-                              console.log('[MENTION_RULE][selected]', {
-                                id: user.id,
-                                name: user.name,
-                                matchType: user.matchType,
-                              });
-                            }
-                            setTaggedUser(user);
-                            setTagInput(user.name);
-                          }}
-                        >
-                          <View style={styles.suggestionAvatar}>
-                            <Ionicons name="person" size={14} color={COLORS.white} />
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text maxFontSizeMultiplier={1.2} style={styles.suggestionName}>{user.name}</Text>
-                            <Text maxFontSizeMultiplier={1.2} style={styles.suggestionHint}>{user.disambiguator}</Text>
-                          </View>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
-                </View>
-
-                <View style={styles.visibilityRow}>
-                  <View style={styles.visibilityInfo}>
-                    <Ionicons
-                      name={composerAnonymous ? 'eye-off' : 'person'}
-                      size={20}
-                      color={composerAnonymous ? COLORS.textMuted : COLORS.primary}
-                    />
-                    <View>
-                      <Text maxFontSizeMultiplier={1.2} style={styles.visibilityTitle}>{composerAnonymous ? 'Anonymous' : 'Open to all'}</Text>
-                      <Text maxFontSizeMultiplier={1.2} style={styles.visibilitySubtitle}>
-                        {composerAnonymous ? 'Your identity stays hidden' : 'Your profile will be visible'}
-                      </Text>
-                    </View>
-                  </View>
-                  <Switch
-                    value={!composerAnonymous}
-                    onValueChange={(value) => setComposerAnonymous(!value)}
-                    trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
-                    thumbColor={!composerAnonymous ? COLORS.primary : '#f4f3f4'}
-                  />
-                </View>
-
-                <View style={{ height: Math.max(insets.bottom, 16) }} />
-              </KeyboardAvoidingView>
-            </TouchableWithoutFeedback>
-          </View>
-        </TouchableWithoutFeedback>
-      </Modal>
-
-      <EmojiPicker
-        open={showComposerEmoji}
-        onClose={() => setShowComposerEmoji(false)}
-        onEmojiSelected={(emoji: any) => setComposerText((current) => current + emoji.emoji)}
-      />
-
-      <Modal visible={showDuplicatePicker} transparent animationType="fade" onRequestClose={() => setShowDuplicatePicker(false)}>
-        <TouchableWithoutFeedback onPress={() => setShowDuplicatePicker(false)}>
-          <View style={styles.duplicateOverlay}>
-            <TouchableWithoutFeedback>
-              <View style={styles.duplicateSheet}>
-                <Text maxFontSizeMultiplier={1.2} style={styles.duplicateTitle}>Multiple people named &quot;{tagInput}&quot;</Text>
-                <Text maxFontSizeMultiplier={1.2} style={styles.duplicateSubtitle}>Choose who you want to confess to.</Text>
-                {duplicateCandidates.map((user) => (
-                  <TouchableOpacity
-                    key={user.id}
-                    style={styles.duplicateRow}
-                    onPress={() => {
-                      if (__DEV__) {
-                        console.log('[MENTION_RULE][selected]', {
-                          id: user.id,
-                          name: user.name,
-                          matchType: user.matchType,
-                          via: 'duplicate_picker',
-                        });
-                      }
-                      setTaggedUser(user);
-                      setTagInput(user.name);
-                      setShowDuplicatePicker(false);
-                    }}
-                  >
-                    {user.avatarUrl ? (
-                      <Image source={{ uri: user.avatarUrl }} style={styles.duplicateAvatar} contentFit="cover" />
-                    ) : (
-                      <View style={styles.duplicateAvatarFallback}>
-                        <Ionicons name="person" size={18} color={COLORS.white} />
-                      </View>
-                    )}
-                    <View style={{ flex: 1 }}>
-                      <Text maxFontSizeMultiplier={1.2} style={styles.duplicateName}>
-                        {user.name}{user.age ? `, ${user.age}` : ''}
-                      </Text>
-                      <Text maxFontSizeMultiplier={1.2} style={styles.duplicateHint}>{user.disambiguator}</Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </TouchableWithoutFeedback>
-          </View>
-        </TouchableWithoutFeedback>
-      </Modal>
-
       <Modal visible={showTaggedSection} transparent animationType="slide" onRequestClose={() => setShowTaggedSection(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.taggedSheet}>
@@ -1774,7 +1341,7 @@ export default function ConfessionsScreen() {
                             source={{ uri: item.authorPhotoUrl }}
                             style={styles.taggedAuthorAvatarImage}
                             contentFit="cover"
-                            blurRadius={BLUR_PHOTO_RADIUS}
+                            blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
                           />
                         ) : item.authorPhotoUrl ? (
                           <Image
@@ -1884,14 +1451,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.md,
-  },
-  topHint: {
-    fontSize: FONT_SIZE.caption,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    paddingHorizontal: SPACING.base,
-    paddingTop: SPACING.sm,
-    paddingBottom: SPACING.xs,
   },
   listContent: {
     paddingBottom: moderateScale(80, 0.5),
@@ -2048,8 +1607,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   trendingAuthorName: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: '600',
+    fontSize: moderateScale(16, 0.4),
+    fontWeight: '700',
     color: COLORS.textLight,
     flexShrink: 1,
     minWidth: 0,
@@ -2060,8 +1619,8 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
   trendingAuthorAge: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: '600',
+    fontSize: moderateScale(16, 0.4),
+    fontWeight: '700',
     color: COLORS.text,
     flexShrink: 0,
   },
@@ -2073,7 +1632,7 @@ const styles = StyleSheet.create({
   trendingText: {
     fontSize: moderateScale(15, 0.4),
     lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
-    fontWeight: '500',
+    fontWeight: '400',
     color: COLORS.text,
     marginBottom: SPACING.sm,
   },
@@ -2115,39 +1674,101 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   emptyState: {
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: moderateScale(420, 0.4),
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: moderateScale(32, 0.5),
-    paddingTop: moderateScale(64, 0.5),
+    paddingHorizontal: moderateScale(24, 0.5),
+    paddingTop: moderateScale(40, 0.5),
+    paddingBottom: moderateScale(24, 0.5),
   },
-  emptyEmoji: {
-    fontSize: moderateScale(56, 0.4),
+  emptyHeroIconRing: {
+    width: moderateScale(72, 0.4),
+    height: moderateScale(72, 0.4),
+    borderRadius: moderateScale(36, 0.4),
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 107, 107, 0.10)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 107, 107, 0.28)',
     marginBottom: SPACING.base,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 14,
+    elevation: 4,
   },
   emptyTitle: {
     fontSize: moderateScale(22, 0.4),
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: SPACING.sm,
+    marginBottom: SPACING.xs,
     textAlign: 'center',
+    letterSpacing: 0.2,
   },
   emptySubtitle: {
-    fontSize: moderateScale(15, 0.4),
-    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
+    fontSize: moderateScale(14, 0.4),
+    lineHeight: lineHeight(moderateScale(14, 0.4), 1.45),
     color: COLORS.textLight,
     textAlign: 'center',
+    marginBottom: SPACING.lg,
+  },
+  emptyHeroSteps: {
+    alignSelf: 'stretch',
+    gap: SPACING.md,
     marginBottom: SPACING.xl,
   },
+  emptyHeroStepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.md,
+  },
+  emptyHeroStepIconWrap: {
+    width: moderateScale(30, 0.4),
+    height: moderateScale(30, 0.4),
+    borderRadius: moderateScale(15, 0.4),
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 107, 107, 0.10)',
+    marginTop: 1,
+  },
+  emptyHeroStepText: {
+    flex: 1,
+    flexShrink: 1,
+  },
+  emptyHeroStepLabel: {
+    fontSize: moderateScale(14, 0.4),
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  emptyHeroStepDesc: {
+    marginTop: 2,
+    fontSize: moderateScale(13, 0.4),
+    lineHeight: lineHeight(moderateScale(13, 0.4), 1.4),
+    color: COLORS.textLight,
+  },
   emptyButton: {
-    borderRadius: 24,
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.sm,
+    borderRadius: 28,
     paddingHorizontal: SPACING.xl,
     paddingVertical: SPACING.md,
     backgroundColor: COLORS.primary,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    elevation: 4,
   },
   emptyButtonText: {
     fontSize: moderateScale(15, 0.4),
-    fontWeight: '600',
+    fontWeight: '700',
     color: COLORS.white,
+    letterSpacing: 0.3,
   },
   // Position wrapper for the draggable composer FAB. Holds only the
   // initial right anchor; bottom is set inline so we can pick up the
@@ -2228,8 +1849,8 @@ const styles = StyleSheet.create({
     borderRadius: 10,
   },
   myConfessionAuthorName: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: '600',
+    fontSize: moderateScale(16, 0.4),
+    fontWeight: '700',
     color: COLORS.textLight,
     flexShrink: 1,
     minWidth: 0,
@@ -2240,8 +1861,8 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
   myConfessionAuthorAge: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: '600',
+    fontSize: moderateScale(16, 0.4),
+    fontWeight: '700',
     color: COLORS.text,
     flexShrink: 0,
   },
@@ -2253,7 +1874,7 @@ const styles = StyleSheet.create({
   myConfessionText: {
     fontSize: moderateScale(15, 0.4),
     lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
-    fontWeight: '500',
+    fontWeight: '400',
     color: COLORS.text,
     marginBottom: SPACING.sm,
   },
@@ -2318,260 +1939,6 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'flex-end',
     backgroundColor: 'rgba(0,0,0,0.4)',
-  },
-  sheet: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: '88%',
-  },
-  sheetHandle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginTop: SPACING.sm,
-    marginBottom: SPACING.xs,
-    backgroundColor: COLORS.border,
-  },
-  sheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: SPACING.base,
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  sheetTitle: {
-    fontSize: moderateScale(17, 0.4),
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  postButton: {
-    borderRadius: 18,
-    paddingHorizontal: SPACING.base,
-    paddingVertical: SPACING.sm,
-    backgroundColor: COLORS.primary,
-  },
-  postButtonDisabled: {
-    backgroundColor: COLORS.border,
-  },
-  postButtonText: {
-    fontSize: FONT_SIZE.md,
-    fontWeight: '700',
-    color: COLORS.white,
-  },
-  postButtonTextDisabled: {
-    color: COLORS.textMuted,
-  },
-  sheetBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.xs,
-    paddingHorizontal: SPACING.base,
-    paddingVertical: SPACING.sm,
-    backgroundColor: 'rgba(255,107,107,0.06)',
-  },
-  sheetBannerText: {
-    fontSize: FONT_SIZE.caption,
-    color: COLORS.textMuted,
-    fontWeight: '500',
-  },
-  composerInput: {
-    minHeight: 110,
-    maxHeight: 180,
-    paddingHorizontal: SPACING.base,
-    paddingTop: SPACING.md,
-    fontSize: FONT_SIZE.lg,
-    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
-    color: COLORS.text,
-  },
-  composerToolbar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.base,
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  toolbarEmoji: {
-    fontSize: FONT_SIZE.xxl,
-  },
-  charCount: {
-    fontSize: FONT_SIZE.caption,
-    color: COLORS.textMuted,
-  },
-  tagSection: {
-    paddingHorizontal: SPACING.base,
-    paddingVertical: SPACING.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  tagHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    marginBottom: SPACING.sm,
-  },
-  tagTitle: {
-    fontSize: FONT_SIZE.md,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  tagInput: {
-    fontSize: FONT_SIZE.md,
-    color: COLORS.text,
-    borderRadius: 10,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  tagHint: {
-    fontSize: FONT_SIZE.caption,
-    color: COLORS.textMuted,
-    marginTop: SPACING.xs,
-  },
-  selectedTagRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    padding: SPACING.sm,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,107,107,0.08)',
-  },
-  tagAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-  },
-  tagAvatarFallback: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.primary,
-  },
-  tagName: {
-    fontSize: FONT_SIZE.md,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  suggestionList: {
-    marginTop: SPACING.sm,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.white,
-    overflow: 'hidden',
-  },
-  suggestionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
-  },
-  suggestionAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.primary,
-  },
-  suggestionName: {
-    fontSize: FONT_SIZE.md,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  suggestionHint: {
-    fontSize: FONT_SIZE.sm,
-    color: COLORS.textMuted,
-  },
-  visibilityRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: SPACING.base,
-    paddingVertical: SPACING.md,
-  },
-  visibilityInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.md,
-    flex: 1,
-  },
-  visibilityTitle: {
-    fontSize: moderateScale(15, 0.4),
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  visibilitySubtitle: {
-    fontSize: FONT_SIZE.caption,
-    color: COLORS.textMuted,
-    marginTop: SPACING.xxs,
-  },
-  duplicateOverlay: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.xl,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-  },
-  duplicateSheet: {
-    width: '100%',
-    maxWidth: 340,
-    borderRadius: 16,
-    padding: SPACING.lg,
-    backgroundColor: COLORS.white,
-  },
-  duplicateTitle: {
-    fontSize: moderateScale(17, 0.4),
-    fontWeight: '700',
-    color: COLORS.text,
-    textAlign: 'center',
-    marginBottom: SPACING.xs,
-  },
-  duplicateSubtitle: {
-    fontSize: FONT_SIZE.body2,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    marginBottom: SPACING.base,
-  },
-  duplicateRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.md,
-    paddingVertical: SPACING.md,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: COLORS.border,
-  },
-  duplicateAvatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-  },
-  duplicateAvatarFallback: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.primary,
-  },
-  duplicateName: {
-    fontSize: moderateScale(15, 0.4),
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  duplicateHint: {
-    fontSize: FONT_SIZE.caption,
-    color: COLORS.textMuted,
-    marginTop: SPACING.xxs,
   },
   taggedSheet: {
     flex: 1,

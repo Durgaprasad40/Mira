@@ -1040,6 +1040,8 @@ export default defineSchema({
       // Phase-1 confession surface: tagged-confession bell item that deep-links
       // to /(main)/confession-thread. Payload uses data.confessionId.
       v.literal('tagged_confession'),
+      v.literal('confession_reply'),
+      v.literal('confession_reaction'),
       v.literal('confession_connect_requested'),
       v.literal('confession_connect_accepted'),
       v.literal('confession_connect_rejected'),
@@ -2158,6 +2160,15 @@ export default defineSchema({
     confessionId: v.id('confessions'),
     reporterId: v.id('users'),
     reportedUserId: v.id('users'),
+    // Moderation snapshot retained even if the source reply row is later
+    // deleted as part of confession cleanup.
+    replyContentSnapshot: v.optional(v.string()),
+    replyAuthorIdSnapshot: v.optional(v.id('users')),
+    replyTypeSnapshot: v.optional(v.union(v.literal('text'), v.literal('voice'))),
+    replyVoiceUrlSnapshot: v.optional(v.string()),
+    replyVoiceDurationSecSnapshot: v.optional(v.number()),
+    parentReplyIdSnapshot: v.optional(v.id('confessionReplies')),
+    replyCreatedAtSnapshot: v.optional(v.number()),
     reason: v.union(
       v.literal('sexual_content'),
       v.literal('threats_violence'),
@@ -2211,16 +2222,25 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_confession_user', ['confessionId', 'userId']),
 
-  // Confession Reactions table (free emoji — one emoji per user per confession)
+  // Confession Reactions table (Phase-1 Confess allowed emoji only — one emoji per user per confession)
   confessionReactions: defineTable({
     confessionId: v.id('confessions'),
     userId: v.id('users'),
-    type: v.string(), // any emoji string
+    type: v.string(), // validated by convex/confessions.ts allow-list
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId'])
     .index('by_confession_user', ['confessionId', 'userId']),
+
+  // Confession reaction toggle rate-limit events
+  confessionReactionRateEvents: defineTable({
+    confessionId: v.id('confessions'),
+    userId: v.id('users'),
+    createdAt: v.number(),
+  })
+    .index('by_confession_user_created', ['confessionId', 'userId', 'createdAt'])
+    .index('by_confession', ['confessionId']),
 
   // Confession Notifications table (for tagged confessions)
   confessionNotifications: defineTable({

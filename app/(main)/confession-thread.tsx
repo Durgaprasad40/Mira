@@ -24,6 +24,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   StyleSheet,
   Text,
   TextInput,
@@ -38,6 +39,8 @@ import { Image } from 'expo-image';
 
 import { api } from '@/convex/_generated/api';
 import { COLORS, FONT_SIZE, SPACING, lineHeight, moderateScale } from '@/lib/constants';
+import { CONFESSION_BLUR_PHOTO_RADIUS } from '@/lib/confessionBlur';
+import { pickHeroPhoto } from '@/lib/confessionPhoto';
 import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
 import { safePush } from '@/lib/safeRouter';
@@ -47,6 +50,7 @@ import {
   ReportConfessionSheet,
   ReportReasonKey,
 } from '@/components/confessions/ReportConfessionSheet';
+import { ConfessionMenuSheet } from '@/components/confessions/ConfessionMenuSheet';
 
 type IdentityMode = 'anonymous' | 'blur_photo' | 'open';
 
@@ -151,7 +155,6 @@ type ConfessionConnectMutationResult = {
 // Match homepage avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
 const REPLY_AVATAR_SIZE = moderateScale(22, 0.3);
-const BLUR_PHOTO_RADIUS = 20;
 
 // Destructive action color for the Delete button in the comment action modal.
 // Distinct from COLORS.primary (brand coral) so Edit and Delete read as
@@ -232,32 +235,34 @@ export default function ConfessionThreadScreen() {
   const demoReplies = useConfessionStore((s) => s.replies);
   const demoAddReply = useConfessionStore((s) => s.addReply);
   const demoDeleteReply = useConfessionStore((s) => s.deleteReply);
+  const demoDeleteConfession = useConfessionStore((s) => s.deleteConfession);
+  const demoReportConfession = useConfessionStore((s) => s.reportConfession);
 
   // Convex queries - only run in non-demo mode
   const convexConfession = useQuery(
     api.confessions.getConfession,
-    !isDemoMode && confessionId
+    !isDemoMode && confessionId && token
       ? {
           confessionId: confessionId as any,
-          ...(token ? { token } : {}),
+          token,
         }
       : 'skip'
   );
   const convexReplies = useQuery(
     api.confessions.getReplies,
-    !isDemoMode && confessionId
+    !isDemoMode && confessionId && token
       ? {
           confessionId: confessionId as any,
-          ...(token ? { token } : {}),
+          token,
         }
       : 'skip'
   );
   const convexMyReply = useQuery(
     api.confessions.getMyReplyForConfession,
-    !isDemoMode && confessionId
+    !isDemoMode && confessionId && token
       ? {
           confessionId: confessionId as any,
-          ...(token ? { token } : {}),
+          token,
         }
       : 'skip'
   );
@@ -267,15 +272,8 @@ export default function ConfessionThreadScreen() {
       ? { token }
       : 'skip'
   );
-  // Primary-display-photo source of truth.
-  //
-  // This is the SAME query the Profile tab uses (see
-  // app/(main)/(tabs)/profile.tsx `backendPhotos`). Profile treats the
-  // first element of the returned array (`effectivePhotos[0]?.url`) as the
-  // user's main display photo — no client-side filtering, re-sorting, or
-  // `isPrimary` re-selection. Confess comments must mirror that exactly so
-  // `blur_photo` and `open` render the same image the profile grid shows at
-  // index 0.
+  // Local reply previews use the same safe frontend hero photo picker as the
+  // composer. Persisted Confess payloads still come from server-owned snapshots.
   const primaryPhotos = useQuery(
     api.photos.getUserPhotos,
     !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
@@ -284,6 +282,8 @@ export default function ConfessionThreadScreen() {
   const updateReplyMutation = useMutation(api.confessions.updateReply);
   const deleteReplyMutation = useMutation(api.confessions.deleteReply);
   const reportReplyMutation = useMutation(api.confessions.reportReply);
+  const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
+  const reportConfessionMutation = useMutation(api.confessions.reportConfession);
   const consumeTagProfileViewGrantMutation = useMutation(
     api.confessions.consumeConfessionTagProfileViewGrant
   );
@@ -307,10 +307,17 @@ export default function ConfessionThreadScreen() {
   const [connectAction, setConnectAction] = useState<'request' | 'cancel' | 'connect' | 'reject' | null>(null);
   const [connectDismissed, setConnectDismissed] = useState(false);
   const inputRef = useRef<TextInput>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Long-press menu state (viewer's own comment).
   const [menuReplyId, setMenuReplyId] = useState<string | null>(null);
   const [reportingReplyId, setReportingReplyId] = useState<string | null>(null);
+  // Long-press menu state for the hero confession (Edit/Delete owner,
+  // Report non-owner). Mirrors the homepage feed plumbing so the same
+  // ConfessionMenuSheet drives both surfaces.
+  const [showConfessionMenu, setShowConfessionMenu] = useState(false);
+  const [reportingMainConfessionId, setReportingMainConfessionId] = useState<string | null>(null);
   const menuVisible = !!menuReplyId;
   const menuOpacity = useRef(new Animated.Value(0)).current;
   const menuScale = useRef(new Animated.Value(0.92)).current;
@@ -335,6 +342,24 @@ export default function ConfessionThreadScreen() {
       ]).start();
     }
   }, [menuVisible, menuOpacity, menuScale]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
+    refreshTimeoutRef.current = setTimeout(() => {
+      setRefreshing(false);
+    }, 450);
+  }, []);
 
   // Get confession data
   const confession: Confession | null = isDemoMode
@@ -556,35 +581,15 @@ export default function ConfessionThreadScreen() {
     token,
   ]);
 
-  // Snapshot author info.
-  //
-  // Single source of truth for the primary display photo:
-  // Use `primaryPhotos[0]` directly from `api.photos.getUserPhotos` — the
-  // EXACT same query and EXACT same index the Profile tab uses to pick its
-  // main display photo. No filtering, no re-sorting, no `isPrimary`
-  // re-selection. Whatever the profile grid renders at index 0, Confess
-  // comments must store for `blur_photo` / `open` rendering.
+  // Snapshot author info. The backend still owns persisted Confess snapshots;
+  // this frontend helper only keeps local optimistic/demo previews consistent.
   const getAuthorInfo = useCallback(
     (mode: IdentityMode) => {
       if (mode === 'anonymous') return {};
       if (!isDemoMode && convexCurrentUser) {
-        const mainPhoto = primaryPhotos?.[0];
-        const photoUrl = (mainPhoto as any)?.url as string | undefined;
-
-        if (__DEV__) {
-          console.log('[CONFESS_PHOTO_DEBUG]', {
-            selectedPhotoId: (mainPhoto as any)?._id ?? null,
-            selectedPhotoUrl: photoUrl ? photoUrl.slice(-30) : null,
-            sourceUsed: 'api.photos.getUserPhotos[0]',
-            indexUsed: 0,
-            totalPhotos: primaryPhotos?.length ?? 0,
-            identityMode: mode,
-          });
-        }
-
         return {
           authorName: (convexCurrentUser as any).name as string | undefined,
-          authorPhotoUrl: photoUrl,
+          authorPhotoUrl: pickHeroPhoto(primaryPhotos as any),
           authorAge: computeAge((convexCurrentUser as any).dateOfBirth),
           authorGender: (convexCurrentUser as any).gender as string | undefined,
         };
@@ -635,6 +640,7 @@ export default function ConfessionThreadScreen() {
           const authorInfo = getAuthorInfo(identityMode);
           await updateReplyMutation({
             replyId: editingReplyId as any,
+            token: token ?? '',
             userId: currentUserId,
             text: trimmed,
             identityMode,
@@ -660,6 +666,7 @@ export default function ConfessionThreadScreen() {
         } else {
           await createReplyMutation({
             confessionId: confessionId as any,
+            token: token ?? '',
             userId: currentUserId,
             text: trimmed,
             isAnonymous: identityMode === 'anonymous',
@@ -696,6 +703,7 @@ export default function ConfessionThreadScreen() {
     replyingToReplyId,
     resetComposer,
     submitting,
+    token,
     updateReplyMutation,
   ]);
 
@@ -758,6 +766,7 @@ export default function ConfessionThreadScreen() {
               } else {
                 await deleteReplyMutation({
                   replyId: targetId as any,
+                  token: token ?? '',
                   userId: currentUserId,
                 });
               }
@@ -785,6 +794,7 @@ export default function ConfessionThreadScreen() {
     isThreadClosed,
     menuTargetReply,
     resetComposer,
+    token,
   ]);
 
   const handleReport = useCallback(() => {
@@ -805,6 +815,7 @@ export default function ConfessionThreadScreen() {
       }
       await reportReplyMutation({
         replyId: targetId as any,
+        token: token ?? '',
         reporterId: currentUserId,
         reason,
       });
@@ -812,7 +823,92 @@ export default function ConfessionThreadScreen() {
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'Failed to report comment');
     }
-  }, [currentUserId, isDemoMode, isThreadClosed, reportReplyMutation, reportingReplyId]);
+  }, [currentUserId, isDemoMode, isThreadClosed, reportReplyMutation, reportingReplyId, token]);
+
+  // ────────────────────────────────────────────────────────────
+  // Hero-confession long-press menu (mirrors the homepage menu sheet)
+  // ────────────────────────────────────────────────────────────
+  const handleOpenConfessionMenu = useCallback(() => {
+    if (!confession) return;
+    setShowConfessionMenu(true);
+  }, [confession]);
+
+  const handleCloseConfessionMenu = useCallback(() => {
+    setShowConfessionMenu(false);
+  }, []);
+
+  const handleConfessionMenuEdit = useCallback(() => {
+    if (!confession) return;
+    safePush(
+      router,
+      {
+        pathname: '/(main)/compose-confession',
+        params: {
+          editId: String(confession._id),
+          mode: 'edit',
+        },
+      } as any,
+      'confession-thread->editConfession'
+    );
+  }, [confession, router]);
+
+  const handleConfessionMenuDelete = useCallback(() => {
+    if (!confession || !currentUserId) return;
+    const targetId = String(confession._id);
+    if (confession.userId !== currentUserId) return;
+    Alert.alert('Delete Confession', 'This action cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            if (isDemoMode) {
+              demoDeleteConfession(targetId);
+            } else {
+              await deleteConfessionMutation({
+                confessionId: targetId as any,
+                token: token ?? '',
+                userId: currentUserId,
+              });
+            }
+            // Leave the thread — the confession no longer exists.
+            if (router.canGoBack?.()) router.back();
+          } catch (error: any) {
+            Alert.alert('Error', error?.message || 'Unable to delete right now');
+          }
+        },
+      },
+    ]);
+  }, [confession, currentUserId, deleteConfessionMutation, demoDeleteConfession, isDemoMode, router, token]);
+
+  const handleConfessionMenuReport = useCallback(() => {
+    if (!confession) return;
+    setReportingMainConfessionId(String(confession._id));
+  }, [confession]);
+
+  const handleSubmitMainConfessionReport = useCallback(async (reason: ReportReasonKey) => {
+    const targetId = reportingMainConfessionId;
+    if (!targetId) return;
+    setReportingMainConfessionId(null);
+    try {
+      if (isDemoMode) {
+        demoReportConfession(targetId);
+        Alert.alert('Reported', "Thanks. We'll review this confession.");
+        return;
+      }
+      if (!currentUserId) return;
+      await reportConfessionMutation({
+        confessionId: targetId as any,
+        token: token ?? '',
+        reporterId: currentUserId,
+        reason,
+      });
+      Alert.alert('Reported', "Thanks. We'll review this confession.");
+    } catch (error: any) {
+      Alert.alert('Error', error?.message || 'Unable to report right now');
+    }
+  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation, reportingMainConfessionId, token]);
 
   const handleBeginOwnerReply = useCallback(
     (parentReply: Reply) => {
@@ -859,7 +955,7 @@ export default function ConfessionThreadScreen() {
           source={{ uri: photoUrl }}
           style={styles.replyAvatarImage}
           contentFit="cover"
-          blurRadius={BLUR_PHOTO_RADIUS}
+          blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
         />
       );
     }
@@ -1380,7 +1476,13 @@ export default function ConfessionThreadScreen() {
 
     return (
       <View style={styles.headerSection}>
-        <View style={styles.confessionCard}>
+        <Pressable
+          style={styles.confessionCard}
+          onLongPress={handleOpenConfessionMenu}
+          delayLongPress={300}
+          accessibilityRole="button"
+          accessibilityLabel="Long-press for confession options"
+        >
           <View style={styles.authorRow}>
             <View style={styles.authorIdentityCluster}>
               {isFullyAnonymous ? (
@@ -1392,7 +1494,7 @@ export default function ConfessionThreadScreen() {
                   source={{ uri: confession.authorPhotoUrl }}
                   style={styles.avatarImage}
                   contentFit="cover"
-                  blurRadius={BLUR_PHOTO_RADIUS}
+                  blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
                 />
               ) : confession.authorPhotoUrl ? (
                 <Image
@@ -1458,7 +1560,7 @@ export default function ConfessionThreadScreen() {
               </Text>
             </View>
           </View>
-        </View>
+        </Pressable>
 
         {isThreadClosed ? (
           <View style={styles.closedBanner}>
@@ -1481,7 +1583,7 @@ export default function ConfessionThreadScreen() {
         ) : null}
       </View>
     );
-  }, [closedThreadMessage, confession, convexCurrentUser, currentUserId, handleTagPress, isDemoMode, isThreadClosed, renderConnectPanel, topLevelReplies.length]);
+  }, [closedThreadMessage, confession, convexCurrentUser, currentUserId, handleOpenConfessionMenu, handleTagPress, isDemoMode, isThreadClosed, renderConnectPanel, topLevelReplies.length]);
 
   const renderEmpty = useCallback(() => {
     if (isLoading) return null;
@@ -1537,9 +1639,11 @@ export default function ConfessionThreadScreen() {
           <View style={styles.errorIconWrap}>
             <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
           </View>
-          <Text maxFontSizeMultiplier={1.2} style={styles.errorTitle}>Not Found</Text>
+          <Text maxFontSizeMultiplier={1.2} style={styles.errorTitle}>
+            This confession is no longer available.
+          </Text>
           <Text maxFontSizeMultiplier={1.2} style={styles.errorSubtitle}>
-            This confession may have expired or been removed.
+            It may have expired, been deleted, or become unavailable.
           </Text>
           <TouchableOpacity style={styles.errorButton} onPress={handleBack}>
             <Text maxFontSizeMultiplier={1.2} style={styles.errorButtonText}>Go Back</Text>
@@ -1759,6 +1863,14 @@ export default function ConfessionThreadScreen() {
           ]}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              tintColor={COLORS.primary}
+              colors={[COLORS.primary]}
+            />
+          }
         />
 
         {footer}
@@ -1845,6 +1957,23 @@ export default function ConfessionThreadScreen() {
         mode="reply"
         onClose={() => setReportingReplyId(null)}
         onSubmit={handleSubmitReplyReport}
+      />
+
+      {/* Hero-confession menu (Edit/Delete owner, Report non-owner) */}
+      <ConfessionMenuSheet
+        visible={showConfessionMenu}
+        isOwner={!!confession && confession.userId === currentUserId}
+        onClose={handleCloseConfessionMenu}
+        onEdit={handleConfessionMenuEdit}
+        onDelete={handleConfessionMenuDelete}
+        onReport={handleConfessionMenuReport}
+      />
+
+      <ReportConfessionSheet
+        visible={reportingMainConfessionId !== null}
+        mode="confession"
+        onClose={() => setReportingMainConfessionId(null)}
+        onSubmit={handleSubmitMainConfessionReport}
       />
     </SafeAreaView>
   );

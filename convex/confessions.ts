@@ -20,6 +20,35 @@ const CONFESSION_CONNECT_EXPIRY_CLEANUP_BATCH = 100;
 // P1-01: Server-side rate limit (5 confessions per 24 hours)
 const CONFESSION_RATE_LIMIT = 5;
 
+// Phase-1 Confess length rules.
+// Keep these in sync with lib/confessionLimits.ts on the client so frontend
+// and backend agree on validation.
+const MIN_CONFESSION_LENGTH = 20;
+const MAX_CONFESSION_LENGTH = 800;
+const MAX_CONFESSION_REPLY_LENGTH = 500;
+const MIN_CONFESSION_VOICE_REPLY_DURATION_SEC = 1;
+const MAX_CONFESSION_VOICE_REPLY_DURATION_SEC = 120;
+const MAX_CONFESSION_VOICE_URL_LENGTH = 2048;
+const CONFESSION_MIN_LENGTH_MESSAGE =
+  `Write at least ${MIN_CONFESSION_LENGTH} characters to post.`;
+const CONFESSION_MAX_LENGTH_MESSAGE =
+  `Confession must be ${MAX_CONFESSION_LENGTH} characters or less.`;
+const CONFESSION_REPLY_MAX_LENGTH_MESSAGE =
+  `Reply must be ${MAX_CONFESSION_REPLY_LENGTH} characters or less.`;
+const CONFESSION_REACTION_TYPES = ['👍', '❤️', '😂', '😮', '😢'] as const;
+const CONFESSION_ALLOWED_REACTIONS = new Set<string>(CONFESSION_REACTION_TYPES);
+const CONFESSION_REACTION_RATE_LIMIT_MAX = 30;
+const CONFESSION_REACTION_RATE_WINDOW_MS = 60 * 1000;
+const CONFESSION_REACTION_RATE_CLEANUP_BATCH = 50;
+const CONFESSION_UNAVAILABLE = 'This confession is no longer available.';
+const INVALID_REACTION = 'INVALID_REACTION';
+const REACTION_RATE_LIMITED = 'REACTION_RATE_LIMITED';
+const CONFESSION_FEED_CANDIDATE_LIMIT = 100;
+const CONFESSION_FEED_RETURN_LIMIT = 50;
+const CONFESSION_TRENDING_CANDIDATE_LIMIT = 120;
+const CONFESSION_REPLY_PREVIEW_SCAN_LIMIT = 12;
+const CONFESSION_REACTION_PREVIEW_SCAN_LIMIT = 100;
+
 type SerializedConfession = {
   _id: Id<'confessions'>;
   _creationTime: number;
@@ -62,6 +91,9 @@ type ConfessionConnectNotificationType =
   | 'confession_connect_requested'
   | 'confession_connect_accepted'
   | 'confession_connect_rejected';
+type ConfessionEngagementNotificationType =
+  | 'confession_reply'
+  | 'confession_reaction';
 type ConfessionConnectIneligibleReason =
   | 'self'
   | 'user_ineligible'
@@ -81,6 +113,12 @@ type ConfessionConnectEligibility =
 // Canonical reply identity mode used by the current product contract.
 // Legacy 'blur' literal maps to 'blur_photo'; unknown/missing maps using isAnonymous.
 type ReplyIdentityMode = 'anonymous' | 'blur_photo' | 'open';
+type ConfessionAuthorSnapshot = {
+  authorName?: string;
+  authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
+};
 
 function effectiveConfessionAuthorVisibility(
   raw: Doc<'confessions'>['authorVisibility'] | undefined,
@@ -116,17 +154,72 @@ function canonicalIdentityMode(
   }
 }
 
-// Build a map of userId → current primary profile photo URL from the users
-// table source of truth. `users.primaryPhotoUrl` is kept in sync with the
-// `photos` table by `setPrimaryPhoto` / `reorderPhotos` / photo upload &
-// delete flows, and excludes verification reference photos.
-//
-// Confess surfaces use this to resolve the *current* author photo at read
-// time instead of the stale snapshot persisted on the confession / reply
-// row at create time. When the user changes their main photo in Edit
-// Profile, the Convex reactive query re-runs (because it now reads the
-// users table) and Confess feed / thread / my-confessions / replies all
-// pick up the new photo automatically.
+function calculateConfessionAuthorAge(dateOfBirth: string | undefined): number | undefined {
+  if (!dateOfBirth) return undefined;
+  const birthDate = new Date(dateOfBirth);
+  if (Number.isNaN(birthDate.getTime())) return undefined;
+
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDelta = today.getMonth() - birthDate.getMonth();
+  if (monthDelta < 0 || (monthDelta === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+
+  return Number.isFinite(age) && age >= 18 && age < 120 ? age : undefined;
+}
+
+async function pickConfessionAuthorPhoto(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  user: Doc<'users'>
+): Promise<string | undefined> {
+  const photos = await ctx.db
+    .query('photos')
+    .withIndex('by_user', (q) => q.eq('userId', user._id))
+    .collect();
+
+  const safePhotos = photos
+    .filter((photo) =>
+      photo.photoType !== 'verification_reference' &&
+      photo.isNsfw !== true &&
+      photo.moderationStatus !== 'flagged'
+    )
+    .sort((a, b) => {
+      if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+      if (a.order !== b.order) return a.order - b.order;
+      return a.createdAt - b.createdAt;
+    });
+
+  const photoFromTable = safePhotos[0]?.url;
+  return photoFromTable;
+}
+
+async function buildConfessionAuthorSnapshot(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  userId: Id<'users'>,
+  visibility: ConfessionAuthorVisibility | ReplyIdentityMode
+): Promise<ConfessionAuthorSnapshot> {
+  if (visibility === 'anonymous') return {};
+
+  const user = await ctx.db.get(userId);
+  if (!user) {
+    throw new Error(CONFESSION_UNAUTHORIZED);
+  }
+
+  return {
+    authorName: user.name.trim().slice(0, 64),
+    authorPhotoUrl: await pickConfessionAuthorPhoto(ctx, user),
+    authorAge: user.hideAge === true
+      ? undefined
+      : calculateConfessionAuthorAge(user.dateOfBirth),
+    authorGender: user.gender,
+  };
+}
+
+// Build a map of userId -> current safe Confess author photo. This deliberately
+// uses the same picker as write-time snapshots rather than trusting
+// users.primaryPhotoUrl, because Confess must never surface verification,
+// flagged, or NSFW photos.
 async function buildLivePrimaryPhotoMapForUserIds(
   ctx: Parameters<typeof validateSessionToken>[0],
   userIds: Iterable<Id<'users'>>
@@ -136,7 +229,7 @@ async function buildLivePrimaryPhotoMapForUserIds(
     const key = String(id);
     if (map.has(key)) continue;
     const userDoc = await ctx.db.get(id);
-    map.set(key, userDoc?.primaryPhotoUrl);
+    map.set(key, userDoc ? await pickConfessionAuthorPhoto(ctx, userDoc) : undefined);
   }
   return map;
 }
@@ -189,14 +282,10 @@ function serializeReply(
   // Gate author display fields by identity mode. Anonymous must never leak identity.
   if (identityMode !== 'anonymous') {
     base.authorName = reply.authorName;
-    // Photo: prefer the live primary photo from `users.primaryPhotoUrl`
-    // when the caller pre-fetched the lookup map, so reorder/main-photo
-    // changes propagate automatically. Fall back to the legacy snapshot
-    // only if no override was supplied (defensive — every current call
-    // site provides the map).
-    base.authorPhotoUrl = options?.livePhotoUrlByUserId
-      ? options.livePhotoUrlByUserId.get(String(reply.userId))
-      : reply.authorPhotoUrl;
+    // Photo: only use the live safe Confess photo map. Historical stored
+    // snapshots may predate the safe picker, so they are never a display
+    // fallback.
+    base.authorPhotoUrl = options?.livePhotoUrlByUserId?.get(String(reply.userId));
     base.authorAge = reply.authorAge;
     base.authorGender = reply.authorGender;
   }
@@ -232,17 +321,14 @@ function serializeConfession(
 
   // Resolve the author photo URL.
   //   anonymous (effective mode) → never leak a photo.
-  //   open / blur_photo → return the live primary photo from the users
-  //                       table when the caller pre-fetched the map. The
-  //                       client decides whether to blur it based on
-  //                       `authorVisibility`.
-  // Falls back to the persisted snapshot only if the caller did not supply
-  // the override map (defensive — every current call site does).
+  //   open / blur_photo -> return the live safe Confess photo when the caller
+  //                       pre-fetched the map. The client decides whether to
+  //                       blur it based on `authorVisibility`.
+  // Historical stored snapshots may predate the safe picker, so the serializer
+  // never falls back to persisted authorPhotoUrl.
   const resolvedAuthorPhotoUrl: string | undefined = isAnonymousMode
     ? undefined
-    : options?.livePhotoUrlByUserId
-      ? options.livePhotoUrlByUserId.get(String(confession.userId))
-      : confession.authorPhotoUrl;
+    : options?.livePhotoUrlByUserId?.get(String(confession.userId));
 
   const result: SerializedConfession = {
     _id: confession._id,
@@ -319,6 +405,275 @@ function isHiddenByReports(confession: Doc<'confessions'>): boolean {
   return getConfessionModerationStatus(confession) === 'hidden_by_reports';
 }
 
+function isAllowedConfessionReaction(type: string): boolean {
+  return CONFESSION_ALLOWED_REACTIONS.has(type);
+}
+
+function validateConfessionReplyText(trimmed: string): void {
+  if (trimmed.length < 1) {
+    throw new Error('Reply cannot be empty.');
+  }
+  if (trimmed.length > MAX_CONFESSION_REPLY_LENGTH) {
+    throw new Error(CONFESSION_REPLY_MAX_LENGTH_MESSAGE);
+  }
+  if (PHONE_PATTERN.test(trimmed)) {
+    throw new Error('Do not include phone numbers.');
+  }
+  if (EMAIL_PATTERN.test(trimmed)) {
+    throw new Error('Do not include email addresses.');
+  }
+}
+
+function validateOptionalConfessionReplyCaption(trimmed: string): void {
+  if (trimmed.length > MAX_CONFESSION_REPLY_LENGTH) {
+    throw new Error(CONFESSION_REPLY_MAX_LENGTH_MESSAGE);
+  }
+  if (trimmed.length > 0 && PHONE_PATTERN.test(trimmed)) {
+    throw new Error('Do not include phone numbers.');
+  }
+  if (trimmed.length > 0 && EMAIL_PATTERN.test(trimmed)) {
+    throw new Error('Do not include email addresses.');
+  }
+}
+
+function normalizeConfessionVoiceUrl(voiceUrl: string | undefined): string {
+  const trimmed = voiceUrl?.trim() ?? '';
+  if (
+    trimmed.length < 1 ||
+    trimmed.length > MAX_CONFESSION_VOICE_URL_LENGTH ||
+    !trimmed.startsWith('https://') ||
+    /\s/.test(trimmed)
+  ) {
+    throw new Error('Invalid voice reply URL.');
+  }
+  return trimmed;
+}
+
+function normalizeConfessionVoiceDuration(durationSec: number | undefined): number {
+  if (
+    typeof durationSec !== 'number' ||
+    !Number.isFinite(durationSec) ||
+    durationSec < MIN_CONFESSION_VOICE_REPLY_DURATION_SEC ||
+    durationSec > MAX_CONFESSION_VOICE_REPLY_DURATION_SEC
+  ) {
+    throw new Error(
+      `Voice reply duration must be between ${MIN_CONFESSION_VOICE_REPLY_DURATION_SEC} and ${MAX_CONFESSION_VOICE_REPLY_DURATION_SEC} seconds.`
+    );
+  }
+  return durationSec;
+}
+
+function normalizeConfessionReplyPayload(args: {
+  type?: 'text' | 'voice';
+  text: string;
+  voiceUrl?: string;
+  voiceDurationSec?: number;
+}): {
+  replyType: 'text' | 'voice';
+  text: string;
+  voiceUrl?: string;
+  voiceDurationSec?: number;
+} {
+  const replyType = args.type || 'text';
+  const trimmed = args.text.trim();
+
+  if (replyType === 'text') {
+    if (args.voiceUrl !== undefined || args.voiceDurationSec !== undefined) {
+      throw new Error('Voice fields are only allowed for voice replies.');
+    }
+    validateConfessionReplyText(trimmed);
+    return { replyType, text: trimmed };
+  }
+
+  validateOptionalConfessionReplyCaption(trimmed);
+  return {
+    replyType,
+    text: trimmed || 'Voice reply',
+    voiceUrl: normalizeConfessionVoiceUrl(args.voiceUrl),
+    voiceDurationSec: normalizeConfessionVoiceDuration(args.voiceDurationSec),
+  };
+}
+
+function isConfessVisibleUser(user: Doc<'users'> | null | undefined): user is Doc<'users'> {
+  return !!user && user.isActive === true && user.isBanned !== true && !user.deletedAt;
+}
+
+function isConfessionActive(
+  confession: Doc<'confessions'> | null | undefined,
+  now: number
+): confession is Doc<'confessions'> {
+  return (
+    !!confession &&
+    confession.isDeleted !== true &&
+    !confession.deletedAt &&
+    (confession.expiresAt === undefined || confession.expiresAt > now)
+  );
+}
+
+async function resolveConfessionReadViewer(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  token?: string,
+  claimedViewerId?: Id<'users'> | string
+): Promise<Id<'users'> | null> {
+  const viewerId = await getValidatedViewerFromToken(ctx, token);
+  if (!viewerId) return null;
+
+  if (claimedViewerId) {
+    const claimedUserId = await resolveUserIdByAuthId(ctx, claimedViewerId as string);
+    if (!claimedUserId || claimedUserId !== viewerId) {
+      return null;
+    }
+  }
+
+  return viewerId;
+}
+
+async function canViewerSeeConfession(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'> | null,
+  confession: Doc<'confessions'> | null | undefined,
+  options?: {
+    now?: number;
+    reportedConfessionIds?: Set<string>;
+    requireNormalModeration?: boolean;
+  }
+): Promise<boolean> {
+  const now = options?.now ?? Date.now();
+  if (!isConfessionActive(confession, now)) return false;
+
+  const author = await ctx.db.get(confession.userId);
+  if (!isConfessVisibleUser(author)) return false;
+
+  const viewerIsOwner = !!viewerId && viewerId === confession.userId;
+  const moderationStatus = getConfessionModerationStatus(confession);
+  if (options?.requireNormalModeration && moderationStatus !== 'normal') {
+    return false;
+  }
+  if (moderationStatus === 'hidden_by_reports' && !viewerIsOwner) {
+    return false;
+  }
+
+  if (!viewerId) return false;
+
+  const viewer = viewerIsOwner ? author : await ctx.db.get(viewerId);
+  if (!isConfessVisibleUser(viewer)) return false;
+
+  if (!viewerIsOwner) {
+    if (options?.reportedConfessionIds?.has(String(confession._id))) {
+      return false;
+    }
+    if (
+      !options?.reportedConfessionIds &&
+      (await hasViewerReportedConfession(ctx, viewerId, confession._id))
+    ) {
+      return false;
+    }
+    if (await hasBlockBetweenUsers(ctx, viewerId, confession.userId)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function requireConfessionMutationParent(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  actorId: Id<'users'>,
+  confessionId: Id<'confessions'>,
+  now: number
+): Promise<Doc<'confessions'>> {
+  const confession = await ctx.db.get(confessionId);
+  if (!confession) {
+    throw new Error(CONFESSION_UNAVAILABLE);
+  }
+  if (
+    !(await canViewerSeeConfession(ctx, actorId, confession, {
+      now,
+      requireNormalModeration: true,
+    }))
+  ) {
+    throw new Error(CONFESSION_UNAVAILABLE);
+  }
+  return confession;
+}
+
+async function reserveConfessionReactionToggle(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>,
+  userId: Id<'users'>,
+  now: number
+): Promise<void> {
+  const windowStart = now - CONFESSION_REACTION_RATE_WINDOW_MS;
+  const staleEvents = await ctx.db
+    .query('confessionReactionRateEvents')
+    .withIndex('by_confession_user_created', (q) =>
+      q.eq('confessionId', confessionId).eq('userId', userId).lt('createdAt', windowStart)
+    )
+    .take(CONFESSION_REACTION_RATE_CLEANUP_BATCH);
+
+  for (const event of staleEvents) {
+    await ctx.db.delete(event._id);
+  }
+
+  const recentEvents = await ctx.db
+    .query('confessionReactionRateEvents')
+    .withIndex('by_confession_user_created', (q) =>
+      q.eq('confessionId', confessionId).eq('userId', userId).gte('createdAt', windowStart)
+    )
+    .take(CONFESSION_REACTION_RATE_LIMIT_MAX);
+
+  if (recentEvents.length >= CONFESSION_REACTION_RATE_LIMIT_MAX) {
+    throw new Error(REACTION_RATE_LIMITED);
+  }
+
+  await ctx.db.insert('confessionReactionRateEvents', {
+    confessionId,
+    userId,
+    createdAt: now,
+  });
+}
+
+async function filterVisibleConfessions(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'> | null,
+  rows: Doc<'confessions'>[],
+  options?: {
+    now?: number;
+    reportedConfessionIds?: Set<string>;
+    requireNormalModeration?: boolean;
+  }
+): Promise<Doc<'confessions'>[]> {
+  const visible: Doc<'confessions'>[] = [];
+  for (const confession of rows) {
+    if (await canViewerSeeConfession(ctx, viewerId, confession, options)) {
+      visible.push(confession);
+    }
+  }
+  return visible;
+}
+
+async function filterVisibleReplies(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'> | null,
+  rows: Doc<'confessionReplies'>[]
+): Promise<Doc<'confessionReplies'>[]> {
+  if (!viewerId) return [];
+
+  const viewer = await ctx.db.get(viewerId);
+  if (!isConfessVisibleUser(viewer)) return [];
+
+  const visible: Doc<'confessionReplies'>[] = [];
+  for (const reply of rows) {
+    const author = await ctx.db.get(reply.userId);
+    if (!isConfessVisibleUser(author)) continue;
+    if (viewerId !== reply.userId && (await hasBlockBetweenUsers(ctx, viewerId, reply.userId))) {
+      continue;
+    }
+    visible.push(reply);
+  }
+  return visible;
+}
+
 async function hasViewerReportedConfession(
   ctx: Parameters<typeof validateSessionToken>[0],
   viewerId: Id<'users'>,
@@ -367,6 +722,54 @@ function emptyConfessionConnectStatus() {
     existingConversationId: undefined as Id<'conversations'> | undefined,
     existingMatchId: undefined as Id<'matches'> | undefined,
   };
+}
+
+const CONFESSION_UNAUTHORIZED = 'UNAUTHORIZED';
+
+async function requireConfessionMutationActor(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  token: string,
+  claimedActorId: Id<'users'> | string
+): Promise<Id<'users'>> {
+  const sessionToken = token.trim();
+  if (!sessionToken) {
+    throw new Error(CONFESSION_UNAUTHORIZED);
+  }
+
+  const authenticatedUserId = await validateSessionToken(ctx, sessionToken);
+  if (!authenticatedUserId) {
+    throw new Error(CONFESSION_UNAUTHORIZED);
+  }
+
+  const claimedUserId = await resolveUserIdByAuthId(ctx, claimedActorId as string);
+  if (!claimedUserId || claimedUserId !== authenticatedUserId) {
+    throw new Error(CONFESSION_UNAUTHORIZED);
+  }
+
+  return authenticatedUserId;
+}
+
+async function requireConfessionReadViewer(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  token: string,
+  claimedViewerId: Id<'users'> | string
+): Promise<Id<'users'>> {
+  const sessionToken = token.trim();
+  if (!sessionToken) {
+    throw new Error(CONFESSION_UNAUTHORIZED);
+  }
+
+  const authenticatedUserId = await validateSessionToken(ctx, sessionToken);
+  if (!authenticatedUserId) {
+    throw new Error(CONFESSION_UNAUTHORIZED);
+  }
+
+  const claimedUserId = await resolveUserIdByAuthId(ctx, claimedViewerId as string);
+  if (!claimedUserId || claimedUserId !== authenticatedUserId) {
+    throw new Error(CONFESSION_UNAUTHORIZED);
+  }
+
+  return authenticatedUserId;
 }
 
 function getEffectiveConnectStatus(
@@ -446,7 +849,7 @@ async function getExistingConfessionConnect(
 }
 
 function userIsConnectEligible(user: Doc<'users'> | null): boolean {
-  return !!user && user.isActive !== false && !user.deletedAt && !user.isBanned;
+  return isConfessVisibleUser(user);
 }
 
 async function findActivePhase1MatchForPair(
@@ -596,11 +999,7 @@ async function hasReportBetweenUsers(
 }
 
 function confessionIsConnectable(confession: Doc<'confessions'>, now: number): boolean {
-  return (
-    !confession.isDeleted &&
-    (confession.expiresAt === undefined || confession.expiresAt > now) &&
-    !isHiddenByReports(confession)
-  );
+  return isConfessionActive(confession, now) && !isHiddenByReports(confession);
 }
 
 async function evaluateConfessionConnectEligibility(
@@ -681,15 +1080,74 @@ async function pairCanUseConfessionConnect(
   return eligibility.ok;
 }
 
+async function canViewerUseConfessionTaggedProfile(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  viewerId: Id<'users'>,
+  confession: Doc<'confessions'> | null,
+  profileUserId: Id<'users'>,
+  options?: {
+    now?: number;
+    requireTaggedRecipient?: boolean;
+    disallowAuthor?: boolean;
+  }
+): Promise<boolean> {
+  const now = options?.now ?? Date.now();
+  if (
+    !(await canViewerSeeConfession(ctx, viewerId, confession, {
+      now,
+      requireNormalModeration: true,
+    }))
+  ) {
+    return false;
+  }
+
+  if (!confession?.taggedUserId || confession.taggedUserId !== profileUserId) {
+    return false;
+  }
+
+  if (options?.requireTaggedRecipient === true && confession.taggedUserId !== viewerId) {
+    return false;
+  }
+
+  if (options?.disallowAuthor === true && confession.userId === viewerId) {
+    return false;
+  }
+
+  const target = await ctx.db.get(profileUserId);
+  if (!isConfessVisibleUser(target)) return false;
+
+  if (viewerId !== profileUserId) {
+    if (await hasBlockBetweenUsers(ctx, viewerId, profileUserId)) return false;
+    if (await hasReportBetweenUsers(ctx, viewerId, profileUserId)) return false;
+  }
+
+  return true;
+}
+
 async function countTaggedConfessionBadgeForViewer(
   ctx: Parameters<typeof validateSessionToken>[0],
   viewerId: Id<'users'>
 ): Promise<number> {
+  const now = Date.now();
+  const reportedIds = await getReportedConfessionIdsForViewer(ctx, viewerId);
   const notifications = await ctx.db
     .query('confessionNotifications')
     .withIndex('by_user_seen', (q) => q.eq('userId', viewerId).eq('seen', false))
     .collect();
-  return notifications.length;
+
+  let count = 0;
+  for (const notification of notifications) {
+    const confession = await ctx.db.get(notification.confessionId);
+    if (
+      await canViewerSeeConfession(ctx, viewerId, confession, {
+        now,
+        reportedConfessionIds: reportedIds,
+      })
+    ) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 async function countPendingConfessionConnectRequestsForViewer(
@@ -790,6 +1248,175 @@ async function upsertConfessionConnectNotification(
     data: args.data,
     type: args.type,
   });
+}
+
+async function upsertConfessionEngagementNotification(
+  ctx: MutationCtx,
+  args: {
+    confession: Doc<'confessions'>;
+    actorId: Id<'users'>;
+    type: ConfessionEngagementNotificationType;
+    now: number;
+  }
+): Promise<void> {
+  if (args.confession.userId === args.actorId) return;
+
+  if (
+    !(await canViewerSeeConfession(ctx, args.actorId, args.confession, {
+      now: args.now,
+      requireNormalModeration: true,
+    }))
+  ) {
+    return;
+  }
+
+  const [author, actor] = await Promise.all([
+    ctx.db.get(args.confession.userId),
+    ctx.db.get(args.actorId),
+  ]);
+  if (!isConfessVisibleUser(author) || !isConfessVisibleUser(actor)) return;
+  if (author.notificationsEnabled === false) return;
+
+  const title = 'Confess';
+  const body =
+    args.type === 'confession_reply'
+      ? 'Someone replied to your confession.'
+      : 'Someone reacted to your confession.';
+  const data = {
+    confessionId: String(args.confession._id),
+    fromUserId: String(args.actorId),
+    source: 'confession',
+  };
+  const dedupeBucket = Math.floor(args.now / (60 * 1000));
+  const dedupeKey = `${args.type}:${args.confession._id}:${args.actorId}:${dedupeBucket}`;
+  const expiresAt = args.now + 24 * 60 * 60 * 1000;
+
+  const existing = await ctx.db
+    .query('notifications')
+    .withIndex('by_user_dedupe', (q) =>
+      q.eq('userId', args.confession.userId).eq('dedupeKey', dedupeKey)
+    )
+    .first();
+
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      type: args.type,
+      title,
+      body,
+      data,
+      phase: 'phase1',
+      createdAt: args.now,
+      expiresAt,
+      readAt: undefined,
+    });
+    return;
+  }
+
+  await ctx.db.insert('notifications', {
+    userId: args.confession.userId,
+    type: args.type,
+    title,
+    body,
+    data,
+    phase: 'phase1',
+    dedupeKey,
+    createdAt: args.now,
+    expiresAt,
+  });
+}
+
+async function deletePhase1NotificationsForConfession(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>,
+  recipientIds: Set<string>
+): Promise<void> {
+  const confessionIdString = String(confessionId);
+  for (const recipientId of recipientIds) {
+    const notifications = await ctx.db
+      .query('notifications')
+      .withIndex('by_user', (q) => q.eq('userId', recipientId as Id<'users'>))
+      .collect();
+
+    for (const notification of notifications) {
+      const isConfessRow =
+        notification.phase === 'phase1' ||
+        notification.type === 'tagged_confession' ||
+        notification.type.startsWith('confession_');
+      if (isConfessRow && notification.data?.confessionId === confessionIdString) {
+        await ctx.db.delete(notification._id);
+      }
+    }
+  }
+}
+
+async function cleanupDeletedConfessionChildren(
+  ctx: MutationCtx,
+  confession: Doc<'confessions'>,
+  now: number
+): Promise<void> {
+  const recipientIds = new Set<string>([String(confession.userId)]);
+  if (confession.taggedUserId) {
+    recipientIds.add(String(confession.taggedUserId));
+  }
+
+  const connects = await ctx.db
+    .query('confessionConnects')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
+    .collect();
+  for (const connect of connects) {
+    recipientIds.add(String(connect.fromUserId));
+    recipientIds.add(String(connect.toUserId));
+    if (connect.status === 'pending') {
+      await ctx.db.patch(connect._id, {
+        status: 'expired',
+        updatedAt: now,
+        respondedAt: now,
+      });
+    }
+  }
+
+  const taggedNotifications = await ctx.db
+    .query('confessionNotifications')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
+    .collect();
+  for (const notification of taggedNotifications) {
+    recipientIds.add(String(notification.userId));
+    await ctx.db.delete(notification._id);
+  }
+
+  const replies = await ctx.db
+    .query('confessionReplies')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
+    .collect();
+  for (const reply of replies) {
+    await ctx.db.delete(reply._id);
+  }
+
+  const reactions = await ctx.db
+    .query('confessionReactions')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
+    .collect();
+  for (const reaction of reactions) {
+    await ctx.db.delete(reaction._id);
+  }
+
+  const rateEvents = await ctx.db
+    .query('confessionReactionRateEvents')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
+    .collect();
+  for (const event of rateEvents) {
+    await ctx.db.delete(event._id);
+  }
+
+  const profileViewGrants = await ctx.db
+    .query('confessionTagProfileViews')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confession._id))
+    .collect();
+  for (const grant of profileViewGrants) {
+    await ctx.db.delete(grant._id);
+  }
+
+  await deletePhase1NotificationsForConfession(ctx, confession._id, recipientIds);
 }
 
 async function markConfessionConnectRequestNotificationRead(
@@ -933,7 +1560,7 @@ function confessionAllowsConnectPromotion(
   now: number,
   beingMarkedMutual: boolean
 ): boolean {
-  if (confession.isDeleted || isHiddenByReports(confession)) return false;
+  if (confession.isDeleted || confession.deletedAt || isHiddenByReports(confession)) return false;
 
   if (confession.expiresAt === undefined || confession.expiresAt > now) {
     return true;
@@ -1086,6 +1713,7 @@ async function ensureMutualConfessionConversation(
 // Create a new confession
 export const createConfession = mutation({
   args: {
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
@@ -1093,6 +1721,8 @@ export const createConfession = mutation({
     visibility: v.literal('global'),
     authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur_photo'))),
     imageUrl: v.optional(v.string()),
+    // Legacy compatibility: accepted but ignored. Author snapshots are
+    // server-derived from the token-bound actor.
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
     authorAge: v.optional(v.number()),
@@ -1104,8 +1734,7 @@ export const createConfession = mutation({
     taggedUserName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
 
     // P1-01: Server-side rate limiting - count confessions in last 24 hours
     const now = Date.now();
@@ -1127,12 +1756,12 @@ export const createConfession = mutation({
     }
 
     const trimmed = args.text.trim();
-    if (trimmed.length < 10) {
-      throw new Error('Confession must be at least 10 characters.');
+    if (trimmed.length < MIN_CONFESSION_LENGTH) {
+      throw new Error(CONFESSION_MIN_LENGTH_MESSAGE);
     }
     // P2-1 FIX: Add max length validation to prevent DoS/database bloat
-    if (trimmed.length > 5000) {
-      throw new Error('Confession must be 5000 characters or less.');
+    if (trimmed.length > MAX_CONFESSION_LENGTH) {
+      throw new Error(CONFESSION_MAX_LENGTH_MESSAGE);
     }
     if (PHONE_PATTERN.test(trimmed)) {
       throw new Error('Do not include phone numbers in confessions.');
@@ -1178,18 +1807,28 @@ export const createConfession = mutation({
       }
     }
 
+    const effectiveVisibility = effectiveConfessionAuthorVisibility(
+      args.authorVisibility,
+      args.isAnonymous
+    );
+    const authorSnapshot = await buildConfessionAuthorSnapshot(
+      ctx,
+      userId,
+      effectiveVisibility
+    );
+
     const confessionId = await ctx.db.insert('confessions', {
       userId: userId,
       text: trimmed,
-      isAnonymous: args.isAnonymous,
-      authorVisibility: args.authorVisibility,
+      isAnonymous: effectiveVisibility === 'anonymous',
+      authorVisibility: effectiveVisibility,
       mood: args.mood,
       visibility: args.visibility,
       imageUrl: args.imageUrl,
-      authorName: args.isAnonymous ? undefined : args.authorName,
-      authorPhotoUrl: args.isAnonymous ? undefined : args.authorPhotoUrl,
-      authorAge: args.isAnonymous ? undefined : args.authorAge,
-      authorGender: args.isAnonymous ? undefined : args.authorGender,
+      authorName: authorSnapshot.authorName,
+      authorPhotoUrl: authorSnapshot.authorPhotoUrl,
+      authorAge: authorSnapshot.authorAge,
+      authorGender: authorSnapshot.authorGender,
       replyCount: 0,
       reactionCount: 0,
       voiceReplyCount: 0,
@@ -1278,67 +1917,67 @@ export const createConfession = mutation({
 export const listConfessions = query({
   args: {
     sortBy: v.union(v.literal('trending'), v.literal('latest')),
+    token: v.optional(v.string()),
     viewerId: v.optional(v.union(v.id('users'), v.string())),
   },
-  handler: async (ctx, { sortBy, viewerId }) => {
+  handler: async (ctx, { sortBy, token, viewerId }) => {
     const now = Date.now();
-    const allConfessions = await ctx.db
+    const resolvedViewerId = await resolveConfessionReadViewer(ctx, token, viewerId);
+    if (!resolvedViewerId) return [];
+
+    const candidateConfessions = await ctx.db
       .query('confessions')
       .withIndex('by_created')
       .order('desc')
-      .collect();
+      .take(CONFESSION_FEED_CANDIDATE_LIMIT);
 
-    // P0-3: Build set of confession IDs the viewer has reported (server-side filter)
-    let reportedIds: Set<string> = new Set();
-    let resolvedViewerId: Id<'users'> | null = null;
-    if (viewerId) {
-      resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
-      if (resolvedViewerId) {
-        reportedIds = await getReportedConfessionIdsForViewer(ctx, resolvedViewerId);
-      }
+    const reportedIds = await getReportedConfessionIdsForViewer(ctx, resolvedViewerId);
+    let confessions = await filterVisibleConfessions(ctx, resolvedViewerId, candidateConfessions, {
+      now,
+      reportedConfessionIds: reportedIds,
+      requireNormalModeration: sortBy === 'trending',
+    });
+
+    if (sortBy === 'trending') {
+      // Improved trending scoring with time decay.
+      // Replies are strongest signal (weight 5), reactions medium (weight 2).
+      confessions = [...confessions].sort((a, b) => {
+        const hoursSinceA = (now - a.createdAt) / (1000 * 60 * 60);
+        const hoursSinceB = (now - b.createdAt) / (1000 * 60 * 60);
+        const scoreA = (a.replyCount * 5 + a.reactionCount * 2) / (hoursSinceA + 2);
+        const scoreB = (b.replyCount * 5 + b.reactionCount * 2) / (hoursSinceB + 2);
+        return scoreB - scoreA;
+      });
     }
 
-    // Filter out expired, deleted, viewer-reported, and non-owner hidden confessions.
-    const confessions = allConfessions.filter(
-      (c) => {
-        const viewerIsOwner = !!resolvedViewerId && c.userId === resolvedViewerId;
-        const moderationStatus = getConfessionModerationStatus(c);
-        return (
-          (c.expiresAt === undefined || c.expiresAt > now) &&
-          !c.isDeleted &&
-          !reportedIds.has(String(c._id)) &&
-          (moderationStatus !== 'hidden_by_reports' || viewerIsOwner) &&
-          (sortBy !== 'trending' || moderationStatus === 'normal')
-        );
-      }
-    );
+    const visibleConfessions = confessions.slice(0, CONFESSION_FEED_RETURN_LIMIT);
 
-    // Pre-fetch live primary photos for all unique authors so the feed
-    // reflects the current `users.primaryPhotoUrl` instead of the stale
-    // snapshot stored on each confession at create time.
+    // Pre-fetch live safe Confess photos for all unique authors so the feed
+    // reflects current profile ordering without trusting raw user photo URLs.
     const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
       ctx,
-      confessions.map((c) => c.userId)
+      visibleConfessions.map((c) => c.userId)
     );
 
     // Attach 2 reply previews per confession
     const withPreviews = await Promise.all(
-      confessions.map(async (c) => {
+      visibleConfessions.map(async (c) => {
         const replies = await ctx.db
           .query('confessionReplies')
           .withIndex('by_confession', (q) => q.eq('confessionId', c._id))
           .order('asc')
-          .take(2);
+          .take(CONFESSION_REPLY_PREVIEW_SCAN_LIMIT);
+        const visibleReplies = await filterVisibleReplies(ctx, resolvedViewerId, replies);
 
         // Get top 3 emoji reactions for display
         const allReactions = await ctx.db
           .query('confessionReactions')
           .withIndex('by_confession', (q) => q.eq('confessionId', c._id))
-          .collect();
+          .take(CONFESSION_REACTION_PREVIEW_SCAN_LIMIT);
         const emojiCounts: Record<string, number> = {};
         for (const r of allReactions) {
-          // Skip old string-based reaction keys (e.g. "relatable", "bold")
-          if (/^[a-zA-Z0-9_\s]+$/.test(r.type)) continue;
+          // Skip legacy/non-Confess reaction keys.
+          if (!isAllowedConfessionReaction(r.type)) continue;
           emojiCounts[r.type] = (emojiCounts[r.type] || 0) + 1;
         }
         const topEmojis = Object.entries(emojiCounts)
@@ -1352,7 +1991,7 @@ export const listConfessions = query({
             viewerIsOwner: !!resolvedViewerId && c.userId === resolvedViewerId,
             livePhotoUrlByUserId,
           }),
-          replyPreviews: replies.map((r) => ({
+          replyPreviews: visibleReplies.slice(0, 2).map((r) => ({
             _id: r._id,
             text: r.text,
             isAnonymous: r.isAnonymous,
@@ -1364,22 +2003,6 @@ export const listConfessions = query({
       })
     );
 
-    if (sortBy === 'trending') {
-      // Improved trending scoring with time decay
-      // Replies are strongest signal (weight 5), reactions medium (weight 2)
-      // Time decay reduces score for older confessions
-      withPreviews.sort((a, b) => {
-        const hoursSinceA = (now - a.createdAt) / (1000 * 60 * 60);
-        const hoursSinceB = (now - b.createdAt) / (1000 * 60 * 60);
-
-        // Score formula: (replies * 5 + reactions * 2) / (hours + 2)
-        // The +2 prevents division by zero and gives new posts a baseline
-        const scoreA = (a.replyCount * 5 + a.reactionCount * 2) / (hoursSinceA + 2);
-        const scoreB = (b.replyCount * 5 + b.reactionCount * 2) / (hoursSinceB + 2);
-        return scoreB - scoreA;
-      });
-    }
-
     return withPreviews;
   },
 });
@@ -1389,40 +2012,36 @@ export const listConfessions = query({
 // P0-3: Viewer-aware — excludes confessions reported by viewer
 export const getTrendingConfessions = query({
   args: {
+    token: v.optional(v.string()),
     viewerId: v.optional(v.union(v.id('users'), v.string())),
   },
-  handler: async (ctx, { viewerId }) => {
+  handler: async (ctx, { token, viewerId }) => {
     const now = Date.now();
     const cutoff = now - 48 * 60 * 60 * 1000; // 48 hours ago
+
+    const resolvedViewerId = await resolveConfessionReadViewer(ctx, token, viewerId);
+    if (!resolvedViewerId) return [];
 
     const confessions = await ctx.db
       .query('confessions')
       .withIndex('by_created')
       .order('desc')
-      .collect();
+      .take(CONFESSION_TRENDING_CANDIDATE_LIMIT);
 
-    // P0-3: Build set of confession IDs the viewer has reported (server-side filter)
-    let reportedIds: Set<string> = new Set();
-    if (viewerId) {
-      const resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
-      if (resolvedViewerId) {
-        reportedIds = await getReportedConfessionIdsForViewer(ctx, resolvedViewerId);
-      }
-    }
+    const reportedIds = await getReportedConfessionIdsForViewer(ctx, resolvedViewerId);
 
     // Filter to last 48h AND not expired AND not deleted AND not viewer-reported.
     // Trending excludes all moderated rows above normal visibility.
-    const recent = confessions.filter(
-      (c) =>
-        c.createdAt > cutoff &&
-        (c.expiresAt === undefined || c.expiresAt > now) &&
-        !c.isDeleted &&
-        !reportedIds.has(String(c._id)) &&
-        getConfessionModerationStatus(c) === 'normal'
-    );
+    const recent = (
+      await filterVisibleConfessions(ctx, resolvedViewerId, confessions, {
+        now,
+        reportedConfessionIds: reportedIds,
+        requireNormalModeration: true,
+      })
+    ).filter((c) => c.createdAt > cutoff);
 
-    // Pre-fetch live primary photos so trending cards reflect the author's
-    // current main profile photo, not the create-time snapshot.
+    // Pre-fetch live safe Confess photos so trending cards reflect the
+    // author's current safe profile photo, not a raw user photo URL.
     const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
       ctx,
       recent.map((c) => c.userId)
@@ -1452,8 +2071,9 @@ export const getTrendingConfessions = query({
 });
 
 // Get a single confession by ID
-// P0-2: Fail closed — returns null if missing, deleted, or expired.
-// Expired rows remain readable only by their owner for My Confessions history.
+// Fail closed for normal thread reads: missing, deleted, expired, blocked,
+// reported, or unavailable-author rows return null. Owner archive reads use
+// getMyConfessions instead.
 export const getConfession = query({
   args: {
     confessionId: v.id('confessions'),
@@ -1462,10 +2082,12 @@ export const getConfession = query({
   handler: async (ctx, { confessionId, token }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession) return null;
-    if (confession.isDeleted) return null;
     const now = Date.now();
-    const isExpired = confession.expiresAt !== undefined && confession.expiresAt <= now;
-    const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
+    const validatedViewerId = await resolveConfessionReadViewer(ctx, token);
+    if (!(await canViewerSeeConfession(ctx, validatedViewerId, confession, { now }))) {
+      return null;
+    }
+
     const viewerIsOwner = !!validatedViewerId && validatedViewerId === confession.userId;
     // P1-1: Identify the tagged recipient so the serializer can carve out
     // taggedUserId/taggedUserName for them even when the confession is
@@ -1475,24 +2097,8 @@ export const getConfession = query({
       !!confession.taggedUserId &&
       validatedViewerId === confession.taggedUserId;
 
-    if (isExpired) {
-      if (!viewerIsOwner) return null;
-    }
-
-    if (isHiddenByReports(confession) && !viewerIsOwner) {
-      return null;
-    }
-
-    if (
-      validatedViewerId &&
-      !viewerIsOwner &&
-      (await hasViewerReportedConfession(ctx, validatedViewerId, confessionId))
-    ) {
-      return null;
-    }
-
-    // Resolve the live primary photo for the author so the thread hero
-    // reflects the current main photo, not the create-time snapshot.
+    // Resolve the live safe Confess photo for the author so the thread hero
+    // reflects current profile ordering without unsafe photo fallbacks.
     const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
       ctx,
       [confession.userId]
@@ -1500,7 +2106,7 @@ export const getConfession = query({
 
     return serializeConfession(confession, {
       includeTaggedUserId: true,
-      isExpired,
+      isExpired: false,
       viewerIsOwner,
       viewerIsTaggedRecipient,
       livePhotoUrlByUserId,
@@ -1518,6 +2124,7 @@ export const getConfession = query({
 export const createReply = mutation({
   args: {
     confessionId: v.id('confessions'),
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
@@ -1530,36 +2137,24 @@ export const createReply = mutation({
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
     parentReplyId: v.optional(v.id('confessionReplies')), // OP-only reply to a comment
-    // Author display snapshot (ignored for anonymous mode).
+    // Legacy compatibility: accepted but ignored. Author snapshots are
+    // server-derived from the token-bound actor.
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
     authorAge: v.optional(v.number()),
     authorGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
 
-    // P0-2: Fail closed — refuse replies on missing/deleted/expired parent
-    const parent = await ctx.db.get(args.confessionId);
-    if (!parent) {
-      throw new Error('Confession not found.');
-    }
-    if (parent.isDeleted) {
-      throw new Error('This confession is no longer available.');
-    }
     const nowMs = Date.now();
-    if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
-      throw new Error('This confession has expired.');
-    }
-    if (isHiddenByReports(parent) && parent.userId !== userId) {
-      throw new Error('This confession is no longer accepting interactions.');
-    }
+    const parent = await requireConfessionMutationParent(ctx, userId, args.confessionId, nowMs);
 
     // Normalize identity mode. The request-provided value wins; otherwise derive
     // from the legacy isAnonymous boolean for backward compatibility with older clients.
     const identityMode = canonicalIdentityMode(args.identityMode, args.isAnonymous);
     const effectiveIsAnonymous = identityMode === 'anonymous';
+    const authorSnapshot = await buildConfessionAuthorSnapshot(ctx, userId, identityMode);
 
     // Threaded reply rules (OP-only).
     if (args.parentReplyId !== undefined) {
@@ -1591,36 +2186,23 @@ export const createReply = mutation({
       }
     }
 
-    const replyType = args.type || 'text';
-
-    if (replyType === 'text') {
-      const trimmed = args.text.trim();
-      if (trimmed.length < 1) {
-        throw new Error('Reply cannot be empty.');
-      }
-      if (PHONE_PATTERN.test(trimmed)) {
-        throw new Error('Do not include phone numbers.');
-      }
-      if (EMAIL_PATTERN.test(trimmed)) {
-        throw new Error('Do not include email addresses.');
-      }
-    }
+    const replyPayload = normalizeConfessionReplyPayload(args);
+    const replyType = replyPayload.replyType;
 
     const replyId = await ctx.db.insert('confessionReplies', {
       confessionId: args.confessionId,
       userId: userId,
-      text: args.text.trim(),
+      text: replyPayload.text,
       isAnonymous: effectiveIsAnonymous,
       identityMode,
       type: replyType,
-      voiceUrl: args.voiceUrl,
-      voiceDurationSec: args.voiceDurationSec,
+      voiceUrl: replyPayload.voiceUrl,
+      voiceDurationSec: replyPayload.voiceDurationSec,
       parentReplyId: args.parentReplyId,
-      // Snapshot author display fields only when the mode may reveal them.
-      authorName: effectiveIsAnonymous ? undefined : args.authorName,
-      authorPhotoUrl: effectiveIsAnonymous ? undefined : args.authorPhotoUrl,
-      authorAge: effectiveIsAnonymous ? undefined : args.authorAge,
-      authorGender: effectiveIsAnonymous ? undefined : args.authorGender,
+      authorName: authorSnapshot.authorName,
+      authorPhotoUrl: authorSnapshot.authorPhotoUrl,
+      authorAge: authorSnapshot.authorAge,
+      authorGender: authorSnapshot.authorGender,
       createdAt: nowMs,
     });
 
@@ -1640,17 +2222,25 @@ export const createReply = mutation({
       await ctx.db.patch(args.confessionId, patch);
     }
 
+    await upsertConfessionEngagementNotification(ctx, {
+      confession: parent,
+      actorId: userId,
+      type: 'confession_reply',
+      now: nowMs,
+    });
+
     return replyId;
   },
 });
 
 // Update own reply. Owner-only. Allows editing text and/or identityMode.
 // When switching to anonymous, author snapshot fields are cleared.
-// When switching to a non-anonymous mode, the caller may pass fresh snapshot fields
-// so display stays consistent with the new mode.
+// When switching to a non-anonymous mode, display snapshots are refreshed from
+// the token-bound server user; legacy client snapshot args are accepted but ignored.
 export const updateReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
     text: v.optional(v.string()),
     identityMode: v.optional(v.union(
@@ -1658,27 +2248,22 @@ export const updateReply = mutation({
       v.literal('open'),
       v.literal('blur_photo')
     )),
+    // Legacy compatibility: accepted but ignored. Author snapshots are
+    // server-derived from the token-bound actor when identity mode changes.
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
     authorAge: v.optional(v.number()),
     authorGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
 
     const reply = await ctx.db.get(args.replyId);
     if (!reply) throw new Error('Reply not found.');
     if (reply.userId !== userId) throw new Error('You can only edit your own replies.');
 
-    // Refuse edits on replies whose parent confession is gone/expired.
-    const parent = await ctx.db.get(reply.confessionId);
-    if (!parent || parent.isDeleted) {
-      throw new Error('This confession is no longer available.');
-    }
     const nowMs = Date.now();
-    if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
-      throw new Error('This confession has expired.');
-    }
+    await requireConfessionMutationParent(ctx, userId, reply.confessionId, nowMs);
 
     const patch: Partial<Doc<'confessionReplies'>> = {};
 
@@ -1688,15 +2273,7 @@ export const updateReply = mutation({
         throw new Error('Voice replies cannot be edited.');
       }
       const trimmed = args.text.trim();
-      if (trimmed.length < 1) {
-        throw new Error('Reply cannot be empty.');
-      }
-      if (PHONE_PATTERN.test(trimmed)) {
-        throw new Error('Do not include phone numbers.');
-      }
-      if (EMAIL_PATTERN.test(trimmed)) {
-        throw new Error('Do not include email addresses.');
-      }
+      validateConfessionReplyText(trimmed);
       patch.text = trimmed;
     }
 
@@ -1712,11 +2289,11 @@ export const updateReply = mutation({
         patch.authorAge = undefined;
         patch.authorGender = undefined;
       } else {
-        // Accept fresh snapshot if caller provided one; otherwise keep existing.
-        if (args.authorName !== undefined) patch.authorName = args.authorName;
-        if (args.authorPhotoUrl !== undefined) patch.authorPhotoUrl = args.authorPhotoUrl;
-        if (args.authorAge !== undefined) patch.authorAge = args.authorAge;
-        if (args.authorGender !== undefined) patch.authorGender = args.authorGender;
+        const authorSnapshot = await buildConfessionAuthorSnapshot(ctx, userId, nextMode);
+        patch.authorName = authorSnapshot.authorName;
+        patch.authorPhotoUrl = authorSnapshot.authorPhotoUrl;
+        patch.authorAge = authorSnapshot.authorAge;
+        patch.authorGender = authorSnapshot.authorGender;
       }
     }
 
@@ -1738,24 +2315,30 @@ export const updateReply = mutation({
 export const deleteReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
 
     const reply = await ctx.db.get(args.replyId);
     if (!reply) throw new Error('Reply not found.');
     if (reply.userId !== userId) throw new Error('You can only delete your own replies.');
 
-    // Fail closed — no comment action should succeed on a dead/expired confession.
-    const parent = await ctx.db.get(reply.confessionId);
-    if (!parent || parent.isDeleted) {
-      throw new Error('This confession is no longer available.');
-    }
     const nowMs = Date.now();
-    if (parent.expiresAt !== undefined && parent.expiresAt <= nowMs) {
-      throw new Error('This confession has expired.');
+    const parent = await requireConfessionMutationParent(ctx, userId, reply.confessionId, nowMs);
+
+    let deletedChildCount = 0;
+    if (reply.parentReplyId === undefined) {
+      const childReplies = await ctx.db
+        .query('confessionReplies')
+        .withIndex('by_confession', (q) => q.eq('confessionId', reply.confessionId))
+        .filter((q) => q.eq(q.field('parentReplyId'), args.replyId))
+        .collect();
+      for (const child of childReplies) {
+        await ctx.db.delete(child._id);
+        deletedChildCount += 1;
+      }
     }
 
     await ctx.db.delete(args.replyId);
@@ -1776,12 +2359,12 @@ export const deleteReply = mutation({
       await ctx.db.patch(reply.confessionId, patch);
     }
 
-    return { success: true };
+    return { success: true, deletedChildCount };
   },
 });
 
 // Get replies for a confession
-// P0-2: Fail closed — returns [] if parent missing, deleted, or expired
+// Fail closed — returns [] if parent missing, deleted, expired, blocked, or unavailable.
 // If viewerId is supplied, each reply carries isOwnReply for convenient client gating.
 // Author identity fields are only returned for non-anonymous rows.
 export const getReplies = query({
@@ -1793,32 +2376,10 @@ export const getReplies = query({
   handler: async (ctx, { confessionId, viewerId, token }) => {
     const parent = await ctx.db.get(confessionId);
     if (!parent) return [];
-    if (parent.isDeleted) return [];
 
-    const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
-    const viewerIsValidatedOwner = !!validatedViewerId && validatedViewerId === parent.userId;
+    const resolvedViewerId = await resolveConfessionReadViewer(ctx, token, viewerId);
     const now = Date.now();
-    const isExpired = parent.expiresAt !== undefined && parent.expiresAt <= now;
-    if (isExpired) {
-      if (!viewerIsValidatedOwner) return [];
-    }
-
-    if (isHiddenByReports(parent) && !viewerIsValidatedOwner) {
-      return [];
-    }
-
-    // Resolve viewer for display-only isOwnReply. Expired access never relies on
-    // client-provided viewerId; when expired, use the validated token owner.
-    let resolvedViewerId: Id<'users'> | null = validatedViewerId;
-    if (!resolvedViewerId && !isExpired && viewerId) {
-      resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
-    }
-
-    if (
-      resolvedViewerId &&
-      resolvedViewerId !== parent.userId &&
-      (await hasViewerReportedConfession(ctx, resolvedViewerId, confessionId))
-    ) {
+    if (!(await canViewerSeeConfession(ctx, resolvedViewerId, parent, { now }))) {
       return [];
     }
 
@@ -1827,16 +2388,26 @@ export const getReplies = query({
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .order('asc')
       .collect();
-
-    // Pre-fetch live primary photos for every replier so comment avatars
-    // reflect the current `users.primaryPhotoUrl` source of truth instead
-    // of the snapshot stored on the reply at create time.
-    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
-      ctx,
-      replies.map((r) => r.userId)
+    const visibleReplies = await filterVisibleReplies(ctx, resolvedViewerId, replies);
+    const visibleTopLevelReplyIds = new Set(
+      visibleReplies
+        .filter((reply) => reply.parentReplyId === undefined)
+        .map((reply) => String(reply._id))
+    );
+    const visibleThreadReplies = visibleReplies.filter(
+      (reply) =>
+        reply.parentReplyId === undefined ||
+        visibleTopLevelReplyIds.has(String(reply.parentReplyId))
     );
 
-    return replies.map((reply) =>
+    // Pre-fetch live safe Confess photos for every replier so comment avatars
+    // reflect current profile ordering without unsafe photo fallbacks.
+    const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
+      ctx,
+      visibleThreadReplies.map((r) => r.userId)
+    );
+
+    return visibleThreadReplies.map((reply) =>
       serializeReply(reply, {
         viewerId: resolvedViewerId,
         livePhotoUrlByUserId,
@@ -1858,31 +2429,14 @@ export const getMyReplyForConfession = query({
   handler: async (ctx, { confessionId, viewerId, token }) => {
     const parent = await ctx.db.get(confessionId);
     if (!parent) return null;
-    if (parent.isDeleted) return null;
 
-    const validatedViewerId = await getValidatedViewerFromToken(ctx, token);
-    const viewerIsValidatedOwner = !!validatedViewerId && validatedViewerId === parent.userId;
+    const resolvedViewerId = await resolveConfessionReadViewer(ctx, token, viewerId);
     const now = Date.now();
-    const isExpired = parent.expiresAt !== undefined && parent.expiresAt <= now;
-    if (isExpired) {
-      if (!viewerIsValidatedOwner) return null;
-    }
-
-    if (isHiddenByReports(parent) && !viewerIsValidatedOwner) {
+    if (!(await canViewerSeeConfession(ctx, resolvedViewerId, parent, { now }))) {
       return null;
     }
 
-    let resolvedViewerId: Id<'users'> | null = validatedViewerId;
-    if (!resolvedViewerId && !isExpired && viewerId) {
-      resolvedViewerId = await resolveUserIdByAuthId(ctx, viewerId as string);
-    }
     if (!resolvedViewerId) return null;
-    if (
-      resolvedViewerId !== parent.userId &&
-      (await hasViewerReportedConfession(ctx, resolvedViewerId, confessionId))
-    ) {
-      return null;
-    }
 
     const own = await ctx.db
       .query('confessionReplies')
@@ -1908,22 +2462,20 @@ export const getMyReplyForConfession = query({
 export const toggleReaction = mutation({
   args: {
     confessionId: v.id('confessions'),
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
-    type: v.string(), // any emoji string
+    type: v.string(),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
+    const reactionType = args.type.trim();
+    if (!isAllowedConfessionReaction(reactionType)) {
+      throw new Error(INVALID_REACTION);
+    }
 
-    const confession = await ctx.db.get(args.confessionId);
-    if (!confession) return { added: false, replaced: false, chatUnlocked: false };
     const nowMs = Date.now();
-    if (confession.expiresAt !== undefined && confession.expiresAt <= nowMs) {
-      throw new Error('This confession has expired.');
-    }
-    if (isHiddenByReports(confession) && confession.userId !== userId) {
-      throw new Error('This confession is no longer accepting interactions.');
-    }
+    const confession = await requireConfessionMutationParent(ctx, userId, args.confessionId, nowMs);
+    await reserveConfessionReactionToggle(ctx, args.confessionId, userId, nowMs);
 
     // Find existing reaction from this user on this confession
     const existing = await ctx.db
@@ -1933,28 +2485,33 @@ export const toggleReaction = mutation({
       )
       .first();
 
-    // CONSISTENCY FIX B3: Helper to recompute reaction count from source of truth
-    const recomputeReactionCount = async () => {
-      const allReactions = await ctx.db
-        .query('confessionReactions')
-        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
-        .collect();
-      return allReactions.length;
+    const patchReactionCount = async (delta: number) => {
+      if (delta === 0) return;
+      await ctx.db.patch(args.confessionId, {
+        reactionCount: Math.max(0, confession.reactionCount + delta),
+      });
     };
 
     if (existing) {
-      if (existing.type === args.type) {
+      if (existing.type === reactionType) {
         // Same emoji → remove (toggle off)
         await ctx.db.delete(existing._id);
-        // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
-        const actualCount = await recomputeReactionCount();
-        await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
+        await patchReactionCount(isAllowedConfessionReaction(existing.type) ? -1 : 0);
         return { added: false, replaced: false, chatUnlocked: false };
       } else {
-        // Different emoji → replace (count stays the same)
+        // Different emoji → replace. If a legacy invalid reaction row existed,
+        // converting it to an allowed Confess reaction increases the visible count.
+        const countDelta = isAllowedConfessionReaction(existing.type) ? 0 : 1;
         await ctx.db.patch(existing._id, {
-          type: args.type,
-          createdAt: Date.now(),
+          type: reactionType,
+          createdAt: nowMs,
+        });
+        await patchReactionCount(countDelta);
+        await upsertConfessionEngagementNotification(ctx, {
+          confession,
+          actorId: userId,
+          type: 'confession_reaction',
+          now: nowMs,
         });
         return { added: false, replaced: true, chatUnlocked: false };
       }
@@ -1963,12 +2520,16 @@ export const toggleReaction = mutation({
       await ctx.db.insert('confessionReactions', {
         confessionId: args.confessionId,
         userId: userId,
-        type: args.type,
-        createdAt: Date.now(),
+        type: reactionType,
+        createdAt: nowMs,
       });
-      // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
-      const actualCount = await recomputeReactionCount();
-      await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
+      await patchReactionCount(1);
+      await upsertConfessionEngagementNotification(ctx, {
+        confession,
+        actorId: userId,
+        type: 'confession_reaction',
+        now: nowMs,
+      });
 
       return { added: true, replaced: false, chatUnlocked: false };
     }
@@ -1977,16 +2538,25 @@ export const toggleReaction = mutation({
 
 // Get all reactions for a confession (grouped by emoji)
 export const getReactionCounts = query({
-  args: { confessionId: v.id('confessions') },
-  handler: async (ctx, { confessionId }) => {
+  args: {
+    confessionId: v.id('confessions'),
+    token: v.optional(v.string()),
+  },
+  handler: async (ctx, { confessionId, token }) => {
+    const viewerId = await resolveConfessionReadViewer(ctx, token);
+    const confession = await ctx.db.get(confessionId);
+    if (!(await canViewerSeeConfession(ctx, viewerId, confession, { now: Date.now() }))) {
+      return [];
+    }
+
     const reactions = await ctx.db
       .query('confessionReactions')
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .collect();
     const emojiCounts: Record<string, number> = {};
     for (const r of reactions) {
-      // Skip old string-based reaction keys (e.g. "relatable", "bold")
-      if (/^[a-zA-Z0-9_\s]+$/.test(r.type)) continue;
+      // Skip legacy/non-Confess reaction keys.
+      if (!isAllowedConfessionReaction(r.type)) continue;
       emojiCounts[r.type] = (emojiCounts[r.type] || 0) + 1;
     }
     // Return top emojis sorted by count
@@ -2001,13 +2571,17 @@ export const getReactionCounts = query({
 export const getUserReaction = query({
   args: {
     confessionId: v.id('confessions'),
+    token: v.optional(v.string()),
     userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveConfessionReadViewer(ctx, args.token, args.userId);
     if (!userId) {
-      console.log('[getUserReaction] User not found for authUserId:', args.userId);
+      return null;
+    }
+
+    const confession = await ctx.db.get(args.confessionId);
+    if (!(await canViewerSeeConfession(ctx, userId, confession, { now: Date.now() }))) {
       return null;
     }
 
@@ -2017,20 +2591,18 @@ export const getUserReaction = query({
         q.eq('confessionId', args.confessionId).eq('userId', userId)
       )
       .first();
-    return existing ? existing.type : null;
+    return existing && isAllowedConfessionReaction(existing.type) ? existing.type : null;
   },
 });
 
 // Get user's own confessions (all, including expired, with isExpired flag)
 export const getMyConfessions = query({
-  args: { userId: v.union(v.id('users'), v.string()) },
+  args: {
+    token: v.string(),
+    userId: v.union(v.id('users'), v.string()),
+  },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
-    if (!userId) {
-      console.log('[getMyConfessions] User not found for authUserId:', args.userId);
-      return [];
-    }
+    const userId = await requireConfessionReadViewer(ctx, args.token, args.userId);
 
     const now = Date.now();
     const confessions = await ctx.db
@@ -2039,9 +2611,9 @@ export const getMyConfessions = query({
       .order('desc')
       .collect();
 
-    // All rows here belong to the same user — fetch their primary photo
-    // once so My Confessions reflects the current main photo, not the
-    // create-time snapshot.
+    // All rows here belong to the same user; fetch their safe Confess photo
+    // once so My Confessions reflects current profile ordering without unsafe
+    // photo fallbacks.
     const livePhotoUrlByUserId = await buildLivePrimaryPhotoMapForUserIds(
       ctx,
       [userId]
@@ -2050,7 +2622,7 @@ export const getMyConfessions = query({
     // Filter out manually deleted confessions (isDeleted: true)
     // Expired confessions are kept but marked as expired for the owner to see
     return confessions
-      .filter((confession) => !confession.isDeleted)
+      .filter((confession) => confession.isDeleted !== true && !confession.deletedAt)
       .map((confession) =>
         serializeConfession(confession, {
           includeTaggedUserId: true,
@@ -2067,6 +2639,7 @@ export const getMyConfessions = query({
 export const reportConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
+    token: v.string(),
     reporterId: v.union(v.id('users'), v.string()),
     reason: v.union(
       v.literal('sexual_content'),
@@ -2079,8 +2652,7 @@ export const reportConfession = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
+    const reporterId = await requireConfessionMutationActor(ctx, args.token, args.reporterId);
 
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) {
@@ -2108,6 +2680,14 @@ export const reportConfession = mutation({
     }
 
     const now = Date.now();
+    if (
+      !(await canViewerSeeConfession(ctx, reporterId, confession, {
+        now,
+        reportedConfessionIds: new Set(),
+      }))
+    ) {
+      throw new Error(CONFESSION_UNAVAILABLE);
+    }
 
     // Create report record
     await ctx.db.insert('confessionReports', {
@@ -2153,6 +2733,7 @@ export const reportConfession = mutation({
 export const reportReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
+    token: v.string(),
     reporterId: v.union(v.id('users'), v.string()),
     reason: v.union(
       v.literal('sexual_content'),
@@ -2165,12 +2746,14 @@ export const reportReply = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
+    const reporterId = await requireConfessionMutationActor(ctx, args.token, args.reporterId);
 
     const reply = await ctx.db.get(args.replyId);
     if (!reply) {
       throw new Error('Comment not found.');
     }
+
+    await requireConfessionMutationParent(ctx, reporterId, reply.confessionId, Date.now());
 
     // Users cannot report their own comments.
     if (reply.userId === reporterId) {
@@ -2193,6 +2776,13 @@ export const reportReply = mutation({
       confessionId: reply.confessionId,
       reporterId,
       reportedUserId: reply.userId,
+      replyContentSnapshot: reply.text,
+      replyAuthorIdSnapshot: reply.userId,
+      replyTypeSnapshot: reply.type ?? 'text',
+      replyVoiceUrlSnapshot: reply.voiceUrl,
+      replyVoiceDurationSecSnapshot: reply.voiceDurationSec,
+      parentReplyIdSnapshot: reply.parentReplyId,
+      replyCreatedAtSnapshot: reply.createdAt,
       reason: args.reason,
       description: args.description,
       status: 'pending',
@@ -2207,12 +2797,13 @@ export const reportReply = mutation({
 
 // Get badge count of unseen tagged confessions for a user
 export const getTaggedConfessionBadgeCount = query({
-  args: { userId: v.union(v.id('users'), v.string()) },
+  args: {
+    token: v.optional(v.string()),
+    userId: v.union(v.id('users'), v.string()),
+  },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveConfessionReadViewer(ctx, args.token, args.userId);
     if (!userId) {
-      console.log('[getTaggedConfessionBadgeCount] User not found for authUserId:', args.userId);
       return 0;
     }
 
@@ -2222,12 +2813,13 @@ export const getTaggedConfessionBadgeCount = query({
 
 // List tagged confessions for a user (privacy-safe: only for the tagged user's view)
 export const listTaggedConfessionsForUser = query({
-  args: { userId: v.union(v.id('users'), v.string()) },
+  args: {
+    token: v.optional(v.string()),
+    userId: v.union(v.id('users'), v.string()),
+  },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveConfessionReadViewer(ctx, args.token, args.userId);
     if (!userId) {
-      console.log('[listTaggedConfessionsForUser] User not found for authUserId:', args.userId);
       return [];
     }
 
@@ -2247,9 +2839,14 @@ export const listTaggedConfessionsForUser = query({
     for (const notif of notifications) {
       const confession = await ctx.db.get(notif.confessionId);
       if (!confession) continue;
-      if (confession.isDeleted) continue;
-      if (isHiddenByReports(confession)) continue;
-      if (reportedIds.has(String(confession._id))) continue;
+      if (
+        !(await canViewerSeeConfession(ctx, userId, confession, {
+          now,
+          reportedConfessionIds: reportedIds,
+        }))
+      ) {
+        continue;
+      }
 
       // Identity exposure rule for the "Tagged for you" sheet:
       //   anonymous   → leak nothing (matches feed behaviour for anonymous mode)
@@ -2261,14 +2858,16 @@ export const listTaggedConfessionsForUser = query({
       );
       const allowIdentity = effectiveVisibility !== 'anonymous';
 
-      // Resolve the live primary photo from `users.primaryPhotoUrl` so the
-      // sheet reflects the author's current main photo, not the snapshot
-      // captured at create time. For blur_photo rows, the client applies the
-      // blur; anonymous rows never fetch or return author identity.
+      // Resolve the live safe Confess photo so the sheet reflects current
+      // profile ordering without ever surfacing verification, flagged, or NSFW
+      // photos. For blur_photo rows, the client applies the blur; anonymous rows
+      // never fetch or return author identity.
       let liveAuthorPhotoUrl: string | undefined;
       if (allowIdentity) {
         const authorDoc = await ctx.db.get(confession.userId);
-        liveAuthorPhotoUrl = authorDoc?.primaryPhotoUrl;
+        liveAuthorPhotoUrl = authorDoc
+          ? await pickConfessionAuthorPhoto(ctx, authorDoc)
+          : undefined;
       }
 
       result.push({
@@ -2302,12 +2901,12 @@ export const listTaggedConfessionsForUser = query({
 // Mark tagged confession notifications as seen
 export const markTaggedConfessionsSeen = mutation({
   args: {
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
     notificationIds: v.optional(v.array(v.id('confessionNotifications'))),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
     const { notificationIds } = args;
 
     if (notificationIds && notificationIds.length > 0) {
@@ -2347,15 +2946,10 @@ export const markTaggedConfessionsSeen = mutation({
 // "Profile unavailable" copy on the client side — we never disclose the
 // reason to avoid leaking block/report status):
 //   1. Viewer resolved server-side from session token (no client viewerId).
-//   2. Confession exists, not deleted, not expired (or viewer is the owner —
-//      owners can re-open their own thread's mention even after expiry).
-//   3. Confession is not hidden by reports for the viewer.
-//   4. Viewer has not reported the confession.
-//   5. confession.taggedUserId === args.profileUserId (mention-id match —
+//   2. Shared Confess visibility passes for this viewer.
+//   3. confession.taggedUserId === args.profileUserId (mention-id match —
 //      prevents using a benign confession id to open an unrelated profile).
-//   6. Target user exists.
-//   7. Bidirectional block check between viewer and target.
-//   8. Viewer has not reported the target.
+//   4. Target user is active, not banned/deleted, and safe for this viewer.
 //
 // Self-tap is permitted (viewer === profileUserId): no grant row is written
 // because no bypass is needed — opening your own profile is always allowed
@@ -2382,76 +2976,23 @@ export const canUseConfessTagActions = query({
       return { allowed: false };
     }
 
-    if (!confession || confession.isDeleted) {
-      return { allowed: false };
-    }
-
     const now = Date.now();
-    if (confession.expiresAt !== undefined && confession.expiresAt <= now) {
-      return { allowed: false };
-    }
-
-    if (isHiddenByReports(confession)) {
-      return { allowed: false };
-    }
-
-    if (await hasViewerReportedConfession(ctx, viewerId, confession._id)) {
-      return { allowed: false };
-    }
-
-    // Confess-tag dating actions are only for the tagged recipient. The
-    // confession author and unrelated viewers always get profile-only context.
-    if (
-      !confession.taggedUserId ||
-      confession.taggedUserId !== viewerId ||
-      confession.userId === viewerId
-    ) {
-      return { allowed: false };
-    }
-
     const resolvedTaggedUserId = await resolveUserIdByAuthId(ctx, taggedUserId as string);
-    if (!resolvedTaggedUserId || resolvedTaggedUserId !== confession.taggedUserId) {
-      return { allowed: false };
-    }
+    if (!resolvedTaggedUserId) return { allowed: false };
 
-    const target = await ctx.db.get(resolvedTaggedUserId);
-    if (!target || !target.isActive || target.deletedAt || target.isBanned) {
-      return { allowed: false };
-    }
-
-    if (viewerId !== resolvedTaggedUserId) {
-      const blockedByViewer = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) =>
-          q.eq('blockerId', viewerId).eq('blockedUserId', resolvedTaggedUserId)
-        )
-        .first();
-      if (blockedByViewer) {
-        return { allowed: false };
+    const allowed = await canViewerUseConfessionTaggedProfile(
+      ctx,
+      viewerId,
+      confession,
+      resolvedTaggedUserId,
+      {
+        now,
+        requireTaggedRecipient: true,
+        disallowAuthor: true,
       }
+    );
 
-      const blockedByTarget = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) =>
-          q.eq('blockerId', resolvedTaggedUserId).eq('blockedUserId', viewerId)
-        )
-        .first();
-      if (blockedByTarget) {
-        return { allowed: false };
-      }
-
-      const reportedByViewer = await ctx.db
-        .query('reports')
-        .withIndex('by_reporter_reported_created', (q) =>
-          q.eq('reporterId', viewerId).eq('reportedUserId', resolvedTaggedUserId)
-        )
-        .first();
-      if (reportedByViewer) {
-        return { allowed: false };
-      }
-    }
-
-    return { allowed: true };
+    return { allowed };
   },
 });
 
@@ -2469,45 +3010,19 @@ export const consumeConfessionTagProfileViewGrant = mutation({
       throw new Error('Profile unavailable');
     }
 
-    // 2. Confession existence + lifecycle.
+    // 2. Shared confession + tagged-profile visibility. This mirrors the
+    // feed/thread gates so deleted, expired, hidden, blocked, or unavailable
+    // users cannot mint profile grants from stale Confess rows.
     const confession = await ctx.db.get(confessionId);
-    if (!confession || confession.isDeleted) {
-      throw new Error('Profile unavailable');
-    }
     const now = Date.now();
-    const viewerIsOwner = confession.userId === viewerId;
     if (
-      confession.expiresAt !== undefined &&
-      confession.expiresAt <= now &&
-      !viewerIsOwner
+      !(await canViewerUseConfessionTaggedProfile(ctx, viewerId, confession, profileUserId, {
+        now,
+      }))
     ) {
       throw new Error('Profile unavailable');
     }
-
-    // 3. Hidden-by-reports gate (consistent with getConfession).
-    if (isHiddenByReports(confession) && !viewerIsOwner) {
-      throw new Error('Profile unavailable');
-    }
-
-    // 4. Viewer-reported-confession gate.
-    if (
-      !viewerIsOwner &&
-      (await hasViewerReportedConfession(ctx, viewerId, confessionId))
-    ) {
-      throw new Error('Profile unavailable');
-    }
-
-    // 5. Mention-id match — the cornerstone of the grant. The viewer can
-    //    only open the *tagged* user, never an arbitrary user. This is what
-    //    prevents the chip endpoint from being abused as a generic profile
-    //    opener.
-    if (!confession.taggedUserId || confession.taggedUserId !== profileUserId) {
-      throw new Error('Profile unavailable');
-    }
-
-    // 6. Target existence.
-    const target = await ctx.db.get(profileUserId);
-    if (!target) {
+    if (!confession) {
       throw new Error('Profile unavailable');
     }
 
@@ -2523,42 +3038,10 @@ export const consumeConfessionTagProfileViewGrant = mutation({
       };
     }
 
-    // 7. Bidirectional block check.
-    const blockedByViewer = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', viewerId).eq('blockedUserId', profileUserId)
-      )
-      .first();
-    if (blockedByViewer) {
-      throw new Error('Profile unavailable');
-    }
-    const blockedByTarget = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', profileUserId).eq('blockedUserId', viewerId)
-      )
-      .first();
-    if (blockedByTarget) {
-      throw new Error('Profile unavailable');
-    }
-
-    // 8. Viewer-reported-target gate. Mirror of the report check used by
-    //    other profile-opening flows (e.g. privateDiscover.getProfileByUserId).
-    const reportedByViewer = await ctx.db
-      .query('reports')
-      .withIndex('by_reporter_reported_created', (q) =>
-        q.eq('reporterId', viewerId).eq('reportedUserId', profileUserId)
-      )
-      .first();
-    if (reportedByViewer) {
-      throw new Error('Profile unavailable');
-    }
-
     // Idempotent upsert. We key on (viewer, confession) — the same chip can
     // be tapped multiple times during the 24h grant window without spamming
-    // grant rows. profileUserId is locked because step 5 already pinned it
-    // to the confession's taggedUserId.
+    // grant rows. profileUserId is locked by the shared helper to the
+    // confession's taggedUserId.
     const expiresAt = now + TAG_PROFILE_VIEW_GRANT_TTL_MS;
     const existing = await ctx.db
       .query('confessionTagProfileViews')
@@ -2615,15 +3098,17 @@ export const requestConfessionConnect = mutation({
 
     const confession = await ctx.db.get(confessionId);
     const now = Date.now();
-    if (!confession || !confessionIsConnectable(confession, now)) {
+    if (
+      !confession ||
+      !(await canViewerSeeConfession(ctx, viewerId, confession, {
+        now,
+        requireNormalModeration: true,
+      }))
+    ) {
       throw new Error('Connect unavailable');
     }
 
     if (!confession.taggedUserId || confession.taggedUserId !== viewerId) {
-      throw new Error('Connect unavailable');
-    }
-
-    if (await hasViewerReportedConfession(ctx, viewerId, confessionId)) {
       throw new Error('Connect unavailable');
     }
 
@@ -3071,6 +3556,16 @@ export const getConfessionConnectStatus = query({
       return emptyConfessionConnectStatus();
     }
 
+    const now = Date.now();
+    if (
+      !(await canViewerSeeConfession(ctx, viewerId, confession, {
+        now,
+        requireNormalModeration: true,
+      }))
+    ) {
+      return emptyConfessionConnectStatus();
+    }
+
     const viewerRole: ConfessionConnectViewerRole | null =
       confession.taggedUserId === viewerId
         ? 'requester'
@@ -3082,7 +3577,6 @@ export const getConfessionConnectStatus = query({
       return emptyConfessionConnectStatus();
     }
 
-    const now = Date.now();
     const existing = await getExistingConfessionConnect(ctx, confessionId);
     const effectiveStatus = existing
       ? getEffectiveConnectStatus(existing, now)
@@ -3266,16 +3760,25 @@ export const cleanupExpiredConfessionConnects = internalMutation({
 export const getOrCreateForConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
 
     // Get the confession to find the author
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) {
       throw new Error('Confession not found');
+    }
+    const now = Date.now();
+    if (
+      !(await canViewerSeeConfession(ctx, userId, confession, {
+        now,
+        requireNormalModeration: true,
+      }))
+    ) {
+      throw new Error(CONFESSION_UNAVAILABLE);
     }
 
     const authorId = confession.userId;
@@ -3301,7 +3804,6 @@ export const getOrCreateForConfession = mutation({
     }
 
     // Create new conversation
-    const now = Date.now();
     const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
     const conversationId = await ctx.db.insert('conversations', {
       confessionId: args.confessionId,
@@ -3336,11 +3838,11 @@ export const getOrCreateForConfession = mutation({
 export const deleteConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
 
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) {
@@ -3350,11 +3852,18 @@ export const deleteConfession = mutation({
       throw new Error('You can only delete your own confessions.');
     }
 
-    // Soft delete: mark as deleted rather than hard delete
-    // This preserves referential integrity with replies, reactions, conversations
+    const now = Date.now();
+    await cleanupDeletedConfessionChildren(ctx, confession, now);
+
+    // Soft delete the parent row for moderation/audit continuity. User-visible
+    // child rows are removed above so replies/reactions/notifications cannot
+    // orphan into active surfaces.
     await ctx.db.patch(args.confessionId, {
       isDeleted: true,
-      deletedAt: Date.now(),
+      deletedAt: now,
+      replyCount: 0,
+      reactionCount: 0,
+      voiceReplyCount: 0,
     });
 
     return { success: true };
@@ -3366,13 +3875,13 @@ export const deleteConfession = mutation({
 export const updateConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const userId = await requireConfessionMutationActor(ctx, args.token, args.userId);
 
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) {
@@ -3381,17 +3890,17 @@ export const updateConfession = mutation({
     if (confession.userId !== userId) {
       throw new Error('You can only edit your own confessions.');
     }
-    if (confession.isDeleted) {
+    if (confession.isDeleted || confession.deletedAt) {
       throw new Error('Cannot edit a deleted confession.');
     }
 
     // Validate text
     const trimmedText = args.text.trim();
-    if (trimmedText.length < 1) {
-      throw new Error('Confession cannot be empty.');
+    if (trimmedText.length < MIN_CONFESSION_LENGTH) {
+      throw new Error(CONFESSION_MIN_LENGTH_MESSAGE);
     }
-    if (trimmedText.length > 500) {
-      throw new Error('Confession exceeds 500 character limit.');
+    if (trimmedText.length > MAX_CONFESSION_LENGTH) {
+      throw new Error(CONFESSION_MAX_LENGTH_MESSAGE);
     }
     if (PHONE_PATTERN.test(trimmedText)) {
       throw new Error('Do not include phone numbers.');
@@ -3400,10 +3909,22 @@ export const updateConfession = mutation({
       throw new Error('Do not include email addresses.');
     }
 
-    // Update only text and mood (preserves original author info, anonymity, etc.)
+    const effectiveVisibility = effectiveConfessionAuthorVisibility(
+      confession.authorVisibility,
+      confession.isAnonymous
+    );
+    const authorSnapshot = await buildConfessionAuthorSnapshot(ctx, userId, effectiveVisibility);
+
+    // Update text/mood and refresh server-owned identity snapshot at edit time.
     await ctx.db.patch(args.confessionId, {
       text: trimmedText,
       mood: args.mood,
+      isAnonymous: effectiveVisibility === 'anonymous',
+      authorVisibility: effectiveVisibility,
+      authorName: authorSnapshot.authorName,
+      authorPhotoUrl: authorSnapshot.authorPhotoUrl,
+      authorAge: authorSnapshot.authorAge,
+      authorGender: authorSnapshot.authorGender,
     });
 
     return { success: true };

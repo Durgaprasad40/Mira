@@ -24,6 +24,13 @@ import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { asUserId } from '@/convex/id';
 import { COLORS } from '@/lib/constants';
+import {
+  MIN_CONFESSION_LENGTH,
+  MAX_CONFESSION_LENGTH,
+  CONFESSION_MIN_LENGTH_MESSAGE,
+  CONFESSION_MAX_LENGTH_MESSAGE,
+} from '@/lib/confessionLimits';
+import { pickHeroPhotoFromProfile } from '@/lib/confessionPhoto';
 import { isContentClean } from '@/lib/contentFilter';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
@@ -110,7 +117,7 @@ export default function ComposeConfessionScreen() {
   // Fetch existing confession when in edit mode (live mode only)
   const existingConfessionQuery = useQuery(
     api.confessions.getConfession,
-    !isDemoMode && editId ? { confessionId: editId } : 'skip'
+    !isDemoMode && editId && token ? { confessionId: editId, token } : 'skip'
   );
 
   // Get existing confession from appropriate source (demo store or Convex)
@@ -191,17 +198,16 @@ export default function ComposeConfessionScreen() {
     if (isDemoMode && demoCurrentUser) {
       return {
         authorName: demoCurrentUser.name,
-        authorPhotoUrl: demoCurrentUser.photos?.[0]?.url,
+        authorPhotoUrl: pickHeroPhotoFromProfile(demoCurrentUser),
         authorAge: (demoCurrentUser as any).age,
         authorGender: (demoCurrentUser as any).gender,
       };
     }
 
     if (!isDemoMode && convexCurrentUser) {
-      const primaryPhoto = convexCurrentUser.photos?.find((photo: any) => photo.isPrimary) ?? convexCurrentUser.photos?.[0];
       return {
         authorName: (convexCurrentUser as any).name,
-        authorPhotoUrl: primaryPhoto?.url,
+        authorPhotoUrl: pickHeroPhotoFromProfile(convexCurrentUser),
         authorAge: computeAge((convexCurrentUser as any).dateOfBirth),
         authorGender: (convexCurrentUser as any).gender,
       };
@@ -221,54 +227,12 @@ export default function ComposeConfessionScreen() {
     //   * Prefix match against candidate name (startsWith).
     //   * DO NOT filter by candidate name length (legacy bug).
     //   * DO NOT re-sort — preserve server-provided matchType order.
-    if (!tagInput) {
-      if (__DEV__) {
-        console.log('[CONFESS_SEARCH][input] empty', { tagInput, taggedUserId: taggedUser?.id });
-      }
-      return [];
-    }
+    if (!tagInput) return [];
     const normalized = tagInput.toLowerCase().trim();
-    if (normalized.length < 3 || taggedUser) {
-      if (__DEV__) {
-        console.log('[CONFESS_SEARCH][dropdown] hidden', {
-          reason: taggedUser ? 'already_tagged' : 'below_min_length',
-          tagInput,
-          normalized,
-          normalizedLength: normalized.length,
-        });
-      }
-      return [];
-    }
-    const sourceCount = likedUsers.length;
-    const mutualCount = likedUsers.filter((u) => u.matchType === 'mutual_match').length;
-    const likedOnlyCount = likedUsers.filter((u) => u.matchType === 'liked_only').length;
+    if (normalized.length < 3 || taggedUser) return [];
     const matched = likedUsers
       .filter((user) => user.name.trim().toLowerCase().startsWith(normalized))
       .slice(0, 5);
-    if (__DEV__) {
-      console.log('[MENTION_RULE][source]', {
-        sourceCount,
-        mutualCount,
-        likedOnlyCount,
-      });
-      console.log('[MENTION_RULE][search]', {
-        query: tagInput,
-        normalized,
-        matchCount: matched.length,
-        matches: matched.map((u) => ({ id: u.id, name: u.name, matchType: u.matchType })),
-      });
-      console.log('[CONFESS_SEARCH][source]', { sourceCount });
-      console.log('[CONFESS_SEARCH][filtered]', {
-        tagInput,
-        normalized,
-        matchCount: matched.length,
-        matchedNames: matched.map((u) => u.name),
-      });
-      console.log('[CONFESS_SEARCH][dropdown]', {
-        willShow: matched.length > 0 && !taggedUser,
-        shownCount: matched.length,
-      });
-    }
     return matched;
   }, [likedUsers, tagInput, taggedUser]);
 
@@ -301,8 +265,12 @@ export default function ComposeConfessionScreen() {
     if (!currentUserId || composerSubmitting) return;
 
     const trimmed = composerText.trim();
-    if (trimmed.length < 10) {
-      Alert.alert('Too Short', 'Confessions must be at least 10 characters.');
+    if (trimmed.length < MIN_CONFESSION_LENGTH) {
+      Alert.alert('Too Short', CONFESSION_MIN_LENGTH_MESSAGE);
+      return;
+    }
+    if (trimmed.length > MAX_CONFESSION_LENGTH) {
+      Alert.alert('Too Long', CONFESSION_MAX_LENGTH_MESSAGE);
       return;
     }
 
@@ -378,6 +346,7 @@ export default function ComposeConfessionScreen() {
         // Live mode edit: update existing confession (text and mood only)
         await updateConfessionMutation({
           confessionId: editId,
+          token: token ?? '',
           userId: currentUserId,
           text: trimmed,
           mood: selectedMood,
@@ -389,6 +358,7 @@ export default function ComposeConfessionScreen() {
           : identityMode === 'blur_photo' ? 'blur_photo'
           : 'open';
         await createConfessionMutation({
+          token: token ?? '',
           userId: currentUserId,
           text: trimmed,
           isAnonymous,
@@ -428,6 +398,7 @@ export default function ComposeConfessionScreen() {
     taggedUser,
     isEditMode,
     editId,
+    token,
     selectedMood,
   ]);
 
@@ -445,23 +416,19 @@ export default function ComposeConfessionScreen() {
           </TouchableOpacity>
           <View style={styles.headerCenter}>
             <Text style={styles.headerTitle}>{isEditMode ? 'Edit Confession' : 'New Confession'}</Text>
-            <View style={styles.inlineWarning}>
-              <Ionicons name="shield-checkmark" size={10} color={COLORS.primary} />
-              <Text style={styles.inlineWarningText}>No phone numbers or personal details</Text>
-            </View>
           </View>
           <TouchableOpacity
             onPress={handleSubmit}
-            disabled={composerSubmitting || composerText.trim().length < 10}
+            disabled={composerSubmitting || composerText.trim().length < MIN_CONFESSION_LENGTH}
             style={[
               styles.postButton,
-              (composerSubmitting || composerText.trim().length < 10) && styles.postButtonDisabled,
+              (composerSubmitting || composerText.trim().length < MIN_CONFESSION_LENGTH) && styles.postButtonDisabled,
             ]}
           >
             <Text
               style={[
                 styles.postButtonText,
-                (composerSubmitting || composerText.trim().length < 10) && styles.postButtonTextDisabled,
+                (composerSubmitting || composerText.trim().length < MIN_CONFESSION_LENGTH) && styles.postButtonTextDisabled,
               ]}
             >
               {composerSubmitting ? (isEditMode ? 'Saving...' : 'Posting...') : (isEditMode ? 'Save' : 'Post')}
@@ -491,7 +458,7 @@ export default function ComposeConfessionScreen() {
                 placeholder="What's on your mind? Share your confession..."
                 placeholderTextColor={COLORS.textMuted}
                 multiline
-                maxLength={500}
+                maxLength={MAX_CONFESSION_LENGTH}
                 textAlignVertical="top"
                 scrollEnabled
                 value={composerText}
@@ -504,7 +471,7 @@ export default function ComposeConfessionScreen() {
                   <Text style={styles.toolbarEmoji}>🙂</Text>
                 </TouchableOpacity>
                 <View style={{ flex: 1 }} />
-                <Text style={styles.charCount}>{composerText.length}/500</Text>
+                <Text style={styles.charCount}>{composerText.length}/{MAX_CONFESSION_LENGTH}</Text>
               </View>
 
               {/* Mention username section - compact (hidden in edit mode) */}
@@ -558,13 +525,6 @@ export default function ComposeConfessionScreen() {
                         style={styles.suggestionRow}
                         activeOpacity={0.7}
                         onPress={() => {
-                          if (__DEV__) {
-                            console.log('[MENTION_RULE][selected]', {
-                              id: user.id,
-                              name: user.name,
-                              matchType: user.matchType,
-                            });
-                          }
                           setTaggedUser(user);
                           setTagInput(user.name);
                         }}
@@ -633,6 +593,50 @@ export default function ComposeConfessionScreen() {
                 {/* Dynamic description below buttons */}
                 <Text style={styles.identityDescription}>{currentDescription}</Text>
               </View>}
+
+              {/* Compact "How Confess works" helper card (UI only) */}
+              {!isEditMode && (
+                <View style={styles.helperCard}>
+                  <View style={styles.helperHeader}>
+                    <Ionicons name="information-circle-outline" size={14} color={COLORS.primary} />
+                    <Text style={styles.helperHeaderText}>How Confess works</Text>
+                  </View>
+
+                  <View style={styles.helperRow}>
+                    <View style={styles.helperIconChip}>
+                      <Ionicons name="chatbubble-ellipses-outline" size={12} color={COLORS.primary} />
+                    </View>
+                    <Text style={styles.helperRowText}>
+                      <Text style={styles.helperRowBold}>Share anything</Text>
+                      <Text> — a feeling, crush, funny thought, secret, or campus moment.</Text>
+                    </Text>
+                  </View>
+
+                  <View style={styles.helperRow}>
+                    <View style={styles.helperIconChip}>
+                      <Ionicons name="at-outline" size={12} color={COLORS.primary} />
+                    </View>
+                    <Text style={styles.helperRowText}>
+                      <Text style={styles.helperRowBold}>Mention optional</Text>
+                      <Text> — like someone first to mention them, or post without mentioning anyone.</Text>
+                    </Text>
+                  </View>
+
+                  <View style={styles.helperRow}>
+                    <View style={styles.helperIconChip}>
+                      <Ionicons name="eye-off-outline" size={12} color={COLORS.primary} />
+                    </View>
+                    <Text style={styles.helperRowText}>
+                      <Text style={styles.helperRowBold}>Stay in control</Text>
+                      <Text> — choose Anonymous, Blur Photo, or Open to All. People can react or reply.</Text>
+                    </Text>
+                  </View>
+
+                  <Text style={styles.helperFootnote}>
+                    Be respectful. No phone numbers, personal details, or harassment.
+                  </Text>
+                </View>
+              )}
             </View>
           </TouchableWithoutFeedback>
         </ScrollView>
@@ -656,14 +660,6 @@ export default function ComposeConfessionScreen() {
                     key={user.id}
                     style={styles.duplicateRow}
                     onPress={() => {
-                      if (__DEV__) {
-                        console.log('[MENTION_RULE][selected]', {
-                          id: user.id,
-                          name: user.name,
-                          matchType: user.matchType,
-                          via: 'duplicate_picker',
-                        });
-                      }
                       setTaggedUser(user);
                       setTagInput(user.name);
                       setShowDuplicatePicker(false);
@@ -725,32 +721,21 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   headerTitle: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: '700',
     color: COLORS.text,
   },
-  inlineWarning: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginTop: 2,
-  },
-  inlineWarningText: {
-    fontSize: 10,
-    color: COLORS.textMuted,
-    fontWeight: '500',
-  },
   postButton: {
     borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 7,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
     backgroundColor: COLORS.primary,
   },
   postButtonDisabled: {
     backgroundColor: COLORS.border,
   },
   postButtonText: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
     color: COLORS.white,
   },
@@ -941,6 +926,64 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 10,
     fontWeight: '500',
+  },
+  // Compact "How Confess works" helper card (UI/UX only)
+  helperCard: {
+    marginTop: 14,
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 10,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 107, 107, 0.05)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 107, 107, 0.18)',
+  },
+  helperHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  helperHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.text,
+    letterSpacing: 0.2,
+  },
+  helperRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginTop: 6,
+  },
+  helperIconChip: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 107, 107, 0.10)',
+    marginTop: 1,
+  },
+  helperRowText: {
+    flex: 1,
+    flexShrink: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    color: COLORS.textLight,
+  },
+  helperRowBold: {
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  helperFootnote: {
+    marginTop: 10,
+    paddingTop: 8,
+    fontSize: 11,
+    lineHeight: 15,
+    color: COLORS.textMuted,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255, 107, 107, 0.18)',
   },
   // Duplicate picker modal
   duplicateOverlay: {

@@ -293,6 +293,8 @@ export const createNotification = internalMutation({
       v.literal('profile_nudge'),
       // Phase-1 confession surface — tagged-confession bell item.
       v.literal('tagged_confession'),
+      v.literal('confession_reply'),
+      v.literal('confession_reaction'),
       v.literal('confession_connect_requested'),
       v.literal('confession_connect_accepted'),
       v.literal('confession_connect_rejected')

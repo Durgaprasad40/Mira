@@ -78,6 +78,9 @@ function AnimatedChip({ emoji, count, isSelected, onPress, size }: AnimatedChipP
         animatedStyle,
       ]}
       onPress={handlePress}
+      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      accessibilityRole="button"
+      accessibilityLabel={`React with ${emoji}`}
     >
       <Text style={[styles.chipEmoji, s?.chipEmoji]}>{emoji}</Text>
       <Text
@@ -134,7 +137,9 @@ function AnimatedAddButton({ userEmoji, onPress, size }: AnimatedAddButtonProps)
       onPress={handlePress}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
-      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      accessibilityRole="button"
+      accessibilityLabel={userEmoji ? `Current reaction ${userEmoji}` : 'Add reaction'}
     >
       {userEmoji ? (
         <Text style={[styles.addButtonEmoji, s?.addButtonEmoji]}>
@@ -267,6 +272,9 @@ function QuickPickerEmoji({ emoji, isSelected, onPress }: QuickPickerEmojiProps)
       onPress={onPress}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
+      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      accessibilityRole="button"
+      accessibilityLabel={`React with ${emoji}`}
     >
       <Text style={styles.quickPickerEmojiText}>{emoji}</Text>
     </AnimatedPressable>
@@ -320,7 +328,7 @@ const styles = StyleSheet.create({
   },
 
   // ── Add / user-reaction button ──
-  // 36px visible, hitSlop extends to 44px+
+  // 36px visible, hitSlop extends beyond the 44px mobile touch target.
   addButton: {
     width: 36,
     height: 36,

@@ -244,6 +244,8 @@ export function NotificationPopover({
         }
         break;
       case 'confession_connect_rejected':
+      case 'confession_reaction':
+      case 'confession_reply':
       case 'tagged_confession':
         if (notification.data?.confessionId) {
           router.push({

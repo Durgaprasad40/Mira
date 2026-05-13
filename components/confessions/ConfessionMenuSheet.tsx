@@ -95,8 +95,12 @@ export function ConfessionMenuSheet({
             style={[styles.card, { width: cardWidth }]}
           >
             <View style={styles.header}>
-              <Text maxFontSizeMultiplier={1.2} style={styles.title}>
-                {title}
+              <Text
+                maxFontSizeMultiplier={1.2}
+                style={isOwner ? styles.ownerLabel : styles.title}
+                accessibilityRole={isOwner ? 'header' : undefined}
+              >
+                {isOwner ? title.toUpperCase() : title}
               </Text>
               {subtitle ? (
                 <Text maxFontSizeMultiplier={1.2} style={styles.subtitle}>
@@ -106,58 +110,64 @@ export function ConfessionMenuSheet({
             </View>
 
             {isOwner ? (
-              <>
-                <View style={styles.optionGroup}>
-                  <TouchableOpacity
-                    style={styles.optionRow}
-                    onPress={handleEdit}
-                    activeOpacity={0.78}
-                    accessibilityRole="button"
-                    accessibilityLabel="Edit confession"
+              <View style={styles.ownerOptionGroup}>
+                <TouchableOpacity
+                  style={styles.ownerOptionCard}
+                  onPress={handleEdit}
+                  activeOpacity={0.78}
+                  accessibilityRole="button"
+                  accessibilityLabel="Edit your confession"
+                >
+                  <View
+                    style={[styles.iconWrap, { backgroundColor: `${COLORS.primary}14` }]}
                   >
-                    <View
-                      style={[styles.iconWrap, { backgroundColor: `${COLORS.primary}14` }]}
-                    >
-                      <Ionicons name="pencil" size={18} color={COLORS.primary} />
-                    </View>
-                    <Text maxFontSizeMultiplier={1.2} style={styles.optionText}>
-                      Edit
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.optionRow, styles.optionRowLast]}
-                    onPress={handleDelete}
-                    activeOpacity={0.78}
-                    accessibilityRole="button"
-                    accessibilityLabel="Delete confession"
-                  >
-                    <View
-                      style={[styles.iconWrap, { backgroundColor: `${COLORS.error}14` }]}
-                    >
-                      <Ionicons name="trash-outline" size={18} color={COLORS.error} />
-                    </View>
-                    <Text
-                      maxFontSizeMultiplier={1.2}
-                      style={[styles.optionText, styles.optionTextDestructive]}
-                    >
-                      Delete
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+                    <Ionicons name="pencil" size={18} color={COLORS.primary} />
+                  </View>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.ownerOptionText}>
+                    Edit
+                  </Text>
+                </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={styles.cancelRow}
+                  style={styles.ownerOptionCard}
+                  onPress={handleDelete}
+                  activeOpacity={0.78}
+                  accessibilityRole="button"
+                  accessibilityLabel="Delete your confession"
+                >
+                  <View
+                    style={[styles.iconWrap, { backgroundColor: `${COLORS.error}14` }]}
+                  >
+                    <Ionicons name="trash-outline" size={18} color={COLORS.error} />
+                  </View>
+                  <Text
+                    maxFontSizeMultiplier={1.2}
+                    style={[styles.ownerOptionText, styles.optionTextDestructive]}
+                  >
+                    Delete
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.ownerOptionCard, styles.ownerOptionCardCancel]}
                   onPress={onClose}
-                  activeOpacity={0.8}
+                  activeOpacity={0.78}
                   accessibilityRole="button"
                   accessibilityLabel="Cancel"
                 >
-                  <Text maxFontSizeMultiplier={1.2} style={styles.cancelText}>
+                  <View
+                    style={[styles.iconWrap, { backgroundColor: COLORS.backgroundDark }]}
+                  >
+                    <Ionicons name="close" size={18} color={COLORS.textLight} />
+                  </View>
+                  <Text
+                    maxFontSizeMultiplier={1.2}
+                    style={[styles.ownerOptionText, styles.ownerOptionTextNeutral]}
+                  >
                     Cancel
                   </Text>
                 </TouchableOpacity>
-              </>
+              </View>
             ) : (
               <View style={styles.buttonRow}>
                 <TouchableOpacity
@@ -231,6 +241,16 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: lineHeight(FONT_SIZE.md, 1.2),
   },
+  // Owner-mode label header — small, quiet, premium uppercase tag instead
+  // of a bold heavy title above the action group.
+  ownerLabel: {
+    fontSize: FONT_SIZE.caption,
+    fontWeight: '700',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    letterSpacing: 0.6,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.3),
+  },
   subtitle: {
     marginTop: 2,
     fontSize: FONT_SIZE.caption,
@@ -238,23 +258,35 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: lineHeight(FONT_SIZE.caption, 1.3),
   },
-  optionGroup: {
-    borderRadius: 14,
-    backgroundColor: COLORS.backgroundDark,
-    overflow: 'hidden',
-    marginBottom: SPACING.sm,
-  },
-  optionRow: {
-    minHeight: 48,
+  // Owner-mode horizontal Edit / Delete / Cancel row.
+  ownerOptionGroup: {
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.md,
-    gap: SPACING.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: COLORS.border,
+    gap: 10,
+    backgroundColor: 'transparent',
+    marginTop: SPACING.xxs,
   },
-  optionRowLast: {
-    borderBottomWidth: 0,
+  ownerOptionCard: {
+    flex: 1,
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.background,
+  },
+  ownerOptionText: {
+    fontSize: FONT_SIZE.body2,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.text,
+  },
+  ownerOptionTextNeutral: {
+    color: COLORS.textLight,
+  },
+  ownerOptionCardCancel: {
+    backgroundColor: COLORS.backgroundDark,
   },
   iconWrap: {
     width: 30,
@@ -263,25 +295,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  optionText: {
-    flex: 1,
-    fontSize: FONT_SIZE.body2,
-    fontWeight: FONT_WEIGHT.semibold,
-    color: COLORS.text,
-  },
   optionTextDestructive: {
     color: COLORS.error,
-  },
-  cancelRow: {
-    minHeight: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cancelText: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: FONT_WEIGHT.semibold,
-    color: COLORS.textLight,
   },
   buttonRow: {
     flexDirection: 'row',

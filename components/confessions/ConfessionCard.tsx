@@ -21,11 +21,8 @@ import {
   lineHeight,
 } from '@/lib/constants';
 import { ConfessionMood, ConfessionAuthorVisibility } from '@/types';
+import { CONFESSION_BLUR_PHOTO_RADIUS } from '@/lib/confessionBlur';
 import ReactionBar, { EmojiCount } from './ReactionBar';
-
-// Blur radius for blur_photo mode (matches T/D blurred-identity strength so
-// blurred photos read with the same intensity across both surfaces).
-const BLUR_PHOTO_RADIUS = 24;
 
 // Responsive avatar size
 const AVATAR_SIZE = moderateScale(22, 0.3);
@@ -166,10 +163,6 @@ export default function ConfessionCard({
   isSaving = false,
   id,
 }: ConfessionCardProps) {
-  // DEBUG: Log edit mode state
-  if (isEditing) {
-    console.log('[EDIT_RENDER] Card in edit mode:', { id, isEditing, editTextLength: editText?.length });
-  }
   // Resolve handlers (new props take precedence over legacy)
   const tapHandler = onCardPress || onPress;
   const longPressHandler = onCardLongPress || onLongPress;
@@ -178,7 +171,6 @@ export default function ConfessionCard({
 
   // CRITICAL: Track if long-press fired to block tap navigation
   const longPressTriggeredRef = useRef(false);
-  const isOwner = authorId === viewerId;
 
   const handleCardPress = useCallback(() => {
     if (longPressTriggeredRef.current) {
@@ -194,9 +186,6 @@ export default function ConfessionCard({
       }
       return;
     }
-    if (__DEV__) {
-      console.log('[CONFESS_CARD_PRESS]', { screen: screenContext, hasId: true });
-    }
     tapHandler?.();
   }, [id, screenContext, tapEnabled, tapHandler]);
 
@@ -209,10 +198,6 @@ export default function ConfessionCard({
       longPressTriggeredRef.current = false;
     }, 1000);
 
-    if (__DEV__) {
-      console.log(`[CONFESS_LONG_PRESS] triggered screen=${screenContext} owner=${isOwner}`);
-    }
-
     // Haptic feedback
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -221,9 +206,8 @@ export default function ConfessionCard({
     // Call menu handler
     if (longPressHandler) {
       longPressHandler();
-      if (__DEV__) console.log(`[CONFESS_LONG_PRESS] menu opened`);
     }
-  }, [isOwner, longPressEnabled, longPressHandler, screenContext]);
+  }, [longPressEnabled, longPressHandler]);
 
   // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
   const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
@@ -265,7 +249,7 @@ export default function ConfessionCard({
           source={{ uri: authorPhotoUrl }}
           style={styles.avatarImage}
           contentFit="cover"
-          blurRadius={BLUR_PHOTO_RADIUS}
+          blurRadius={CONFESSION_BLUR_PHOTO_RADIUS}
         />
       ) : authorPhotoUrl ? (
         // Open: show clear photo
@@ -623,8 +607,8 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   authorName: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: '600',
+    fontSize: moderateScale(16, 0.4),
+    fontWeight: '700',
     color: COLORS.textLight,
     flexShrink: 1,
     minWidth: 0,
@@ -635,13 +619,13 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
   authorAge: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: '600',
+    fontSize: moderateScale(16, 0.4),
+    fontWeight: '700',
     color: COLORS.text,
     flexShrink: 0,
   },
   authorGenderSymbol: {
-    fontSize: FONT_SIZE.body2,
+    fontSize: moderateScale(16, 0.4),
     fontWeight: '700',
     marginLeft: SPACING.xxs,
     flexShrink: 0,
@@ -671,9 +655,9 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   confessionText: {
-    fontSize: FONT_SIZE.lg,
-    fontWeight: '500',
-    lineHeight: lineHeight(FONT_SIZE.lg, 1.35),
+    fontSize: moderateScale(15, 0.4),
+    fontWeight: '400',
+    lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     color: COLORS.text,
     marginBottom: SPACING.md,
     letterSpacing: 0.1,

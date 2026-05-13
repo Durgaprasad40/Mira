@@ -79,7 +79,7 @@ export default function MyConfessionsScreen() {
 
   const liveMyConfessions = useQuery(
     api.confessions.getMyConfessions,
-    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+    !isDemoMode && currentUserId && token ? { token, userId: currentUserId } : 'skip'
   );
 
   const myConfessions = useMemo(() => {
@@ -235,6 +235,7 @@ export default function MyConfessionsScreen() {
               } else {
                 await deleteConfessionMutation({
                   confessionId: menuTargetConfession.id as any,
+                  token: token ?? '',
                   userId: currentUserId!,
                 });
               }
@@ -245,7 +246,7 @@ export default function MyConfessionsScreen() {
         },
       ]
     );
-  }, [menuTargetConfession, currentUserId, deleteConfessionMutation, demoDeleteConfession]);
+  }, [menuTargetConfession, currentUserId, deleteConfessionMutation, demoDeleteConfession, token]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -273,7 +274,7 @@ export default function MyConfessionsScreen() {
           const reviewStatus = getReviewBadgeStatus(item);
 
           return (
-            <View>
+            <View style={item.isExpired ? styles.expiredCardWrap : undefined}>
               {reviewStatus ? (
                 <View style={styles.reviewBadgeWrap}>
                   <ConfessionUnderReviewBadge status={reviewStatus} />
@@ -305,9 +306,9 @@ export default function MyConfessionsScreen() {
                 // EXPLICIT INTERACTION CONTRACT for My Confessions
                 // Owner can tap to view thread and long-press to edit/delete
                 screenContext="my-confessions"
-                enableTapToOpenThread={true}
+                enableTapToOpenThread={!item.isExpired}
                 enableLongPressMenu={true}
-                onCardPress={() => handleOpenThread(item.id)}
+                onCardPress={item.isExpired ? undefined : () => handleOpenThread(item.id)}
                 onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
                 onReact={() => {}}
                 onTagPress={
@@ -390,6 +391,9 @@ const styles = StyleSheet.create({
     marginTop: 6,
     marginBottom: -2,
     alignItems: 'flex-start',
+  },
+  expiredCardWrap: {
+    opacity: 0.72,
   },
   loadingState: {
     alignItems: 'center',

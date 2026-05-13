@@ -18,6 +18,7 @@ import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { api } from '@/convex/_generated/api';
 import { log } from '@/utils/logger';
+import { useAuthStore } from '@/stores/authStore';
 
 interface NotificationSection {
   title: string;
@@ -31,6 +32,7 @@ export default function NotificationsScreen() {
   const router = useRouter();
   const convex = useConvex();
   const insets = useSafeAreaInsets();
+  const token = useAuthStore((s) => s.token);
   const [refreshing, setRefreshing] = useState(false);
   // STABILITY: Track refresh timeout for cleanup on unmount
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -274,9 +276,18 @@ export default function NotificationsScreen() {
             break;
           }
 
+          if (!token) {
+            Alert.alert(
+              'Unable to open confession',
+              'Please try again in a moment.'
+            );
+            return;
+          }
+
           try {
             const confession = await convex.query(api.confessions.getConfession, {
               confessionId: notification.data.confessionId as any,
+              token,
             });
 
             if (!confession || (confession.expiresAt !== undefined && confession.expiresAt <= Date.now())) {

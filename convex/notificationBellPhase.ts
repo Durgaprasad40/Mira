@@ -9,6 +9,8 @@ export const PHASE1_ONLY_TYPES = new Set<string>([
   'crossed_paths',
   'nearby',
   'tagged_confession',
+  'confession_reply',
+  'confession_reaction',
   'confession_connect_requested',
   'confession_connect_accepted',
   'confession_connect_rejected',

@@ -24,6 +24,8 @@ const PHASE1_DEMO_TYPES = new Set([
   'crossed_paths',
   'nearby',
   'tagged_confession',
+  'confession_reply',
+  'confession_reaction',
   'confession_connect_requested',
   'confession_connect_accepted',
   'confession_connect_rejected',
