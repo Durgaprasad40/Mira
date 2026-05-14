@@ -130,21 +130,6 @@ const ROOM_FALLBACK_COLORS: Record<string, string> = {
   urdu: '#607D8B',
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FALLBACK PUBLIC ROOMS - Always available even if backend returns empty
-// Used as safety net for fresh deployments or when backend is seeding
-// ─────────────────────────────────────────────────────────────────────────────
-const FALLBACK_PUBLIC_ROOMS = [
-  { id: 'fallback_global', name: 'Global', slug: 'global', category: 'general' as const, activeUserCount: 0 },
-  { id: 'fallback_hindi', name: 'Hindi', slug: 'hindi', category: 'language' as const, activeUserCount: 0 },
-  { id: 'fallback_telugu', name: 'Telugu', slug: 'telugu', category: 'language' as const, activeUserCount: 0 },
-  { id: 'fallback_tamil', name: 'Tamil', slug: 'tamil', category: 'language' as const, activeUserCount: 0 },
-  { id: 'fallback_malayalam', name: 'Malayalam', slug: 'malayalam', category: 'language' as const, activeUserCount: 0 },
-  { id: 'fallback_bengali', name: 'Bengali', slug: 'bengali', category: 'language' as const, activeUserCount: 0 },
-  { id: 'fallback_gujarati', name: 'Gujarati', slug: 'gujarati', category: 'language' as const, activeUserCount: 0 },
-  { id: 'fallback_marathi', name: 'Marathi', slug: 'marathi', category: 'language' as const, activeUserCount: 0 },
-];
-
 // Unified room type for Convex backend
 // LIVE PRESENCE: Uses activeUserCount (real-time presence) instead of memberCount for display
 interface ChatRoom {
@@ -188,17 +173,21 @@ interface ConvexPrivateRoom extends ConvexListedRoom {
   hasPassword?: boolean;
 }
 
-function AccessPrefetcher({ roomId, authUserId }: { roomId: string; authUserId: string | null }) {
-  const access = useQuery(
+function AccessPrefetcher({
+  roomId,
+  authUserId,
+  sessionToken,
+}: {
+  roomId: string;
+  authUserId: string | null;
+  sessionToken: string | null;
+}) {
+  useQuery(
     api.chatRooms.checkRoomAccess,
-    authUserId ? { roomId: roomId as Id<'chatRooms'>, authUserId } : 'skip'
+    authUserId && sessionToken
+      ? { roomId: roomId as Id<'chatRooms'>, authUserId, sessionToken }
+      : 'skip'
   );
-
-  useEffect(() => {
-    if (!authUserId) return;
-    if (access === undefined) return;
-    console.log('CHATROOM_ACCESS_PREFETCH_USED', { roomId, status: (access as any)?.status ?? null });
-  }, [access, authUserId, roomId]);
 
   return null;
 }
@@ -266,16 +255,13 @@ export default function ChatRoomsScreen() {
   // P2-AUD-005: Ref for refresh timeout cleanup
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // BUG FIX: Auto-seeding state for empty backend rooms
-  const [isSeedingRooms, setIsSeedingRooms] = useState(false);
-  const seedingAttemptedRef = useRef(false);
-
   // Session store for lastVisitedAt tracking
   const lastVisitedAt = useChatRoomSessionStore((s) => s.lastVisitedAt);
   const markRoomVisited = useChatRoomSessionStore((s) => s.markRoomVisited);
 
   // Current user ID for filtering out own messages
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const currentRoomId = usePreferredChatRoomStore((s) => s.currentRoomId);
   const leaveRoomMutation = useMutation(api.chatRooms.leaveRoom);
 
@@ -286,7 +272,7 @@ export default function ChatRoomsScreen() {
   // ─────────────────────────────────────────────────────────────────────────────
   const chatRoomProfile = useQuery(
     api.chatRooms.getChatRoomProfile,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { authUserId: userId, sessionToken: token } : 'skip'
   );
   const [profileSetupComplete, setProfileSetupComplete] = useState(false);
 
@@ -323,8 +309,8 @@ export default function ChatRoomsScreen() {
   // Uses checkRoomAccess which returns status object without throwing (unlike getRoom)
   const preferredRoomAccess = useQuery(
     api.chatRooms.checkRoomAccess,
-    effectivePreferredRoomId && userId
-      ? { roomId: effectivePreferredRoomId as Id<'chatRooms'>, authUserId: userId }
+    effectivePreferredRoomId && userId && token
+      ? { roomId: effectivePreferredRoomId as Id<'chatRooms'>, authUserId: userId, sessionToken: token }
       : 'skip'
   );
 
@@ -375,10 +361,6 @@ export default function ChatRoomsScreen() {
     }
     smoothingTimerRef.current = setTimeout(() => {
       if (!mountedRef.current) return;
-      console.log('CHATROOM_UI_SMOOTHING_EXPIRED', {
-        fromRoomId: countSmoothing.fromRoomId,
-        toRoomId: countSmoothing.toRoomId,
-      });
       setCountSmoothing(null);
     }, ms);
     return () => {
@@ -467,56 +449,27 @@ export default function ChatRoomsScreen() {
   );
 
   // Convex query for public rooms
-  const convexRooms = useQuery(api.chatRooms.listRooms, {}) as ConvexListedRoom[] | undefined;
+  const convexRooms = useQuery(
+    api.chatRooms.listRooms,
+    userId && token ? { authUserId: userId, sessionToken: token } : 'skip'
+  ) as ConvexListedRoom[] | undefined;
 
   // Phase-2: Query for user's private rooms
   // AUTH FIX: Pass authUserId so query can authenticate in real mode
   const myPrivateRooms = useQuery(
     api.chatRooms.getMyPrivateRooms,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { authUserId: userId, sessionToken: token } : 'skip'
   ) as ConvexPrivateRoom[] | undefined;
 
   const discoverablePrivateRoomsRaw = useQuery(
     api.chatRooms.getDiscoverablePrivateRooms,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { authUserId: userId, sessionToken: token } : 'skip'
   ) as ConvexPrivateRoom[] | undefined;
 
   // Phase-2: Mutations for private rooms
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
   const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
-
-  // BUG FIX: Mutation to seed default public rooms
-  const ensureDefaultRoomsMut = useMutation(api.chatRooms.ensureDefaultRooms);
-
-  // Auto-seed default public rooms if backend returns empty
-  // This ensures rooms always exist and have real Convex IDs (prevents fallback_* navigation crash)
-  useEffect(() => {
-    // Skip if already seeding, already attempted, or still loading
-    if (isSeedingRooms || seedingAttemptedRef.current || convexRooms === undefined) {
-      return;
-    }
-
-    // If backend returns empty array, seed default rooms
-    if (Array.isArray(convexRooms) && convexRooms.length === 0) {
-      seedingAttemptedRef.current = true;
-      setIsSeedingRooms(true);
-
-      ensureDefaultRoomsMut({})
-        .then(() => {
-          // Convex will auto-refresh the query, no manual refetch needed
-          if (mountedRef.current) {
-            setIsSeedingRooms(false);
-          }
-        })
-        .catch((error) => {
-          console.error('[CHAT_ROOMS] Auto-seed failed:', error);
-          if (mountedRef.current) {
-            setIsSeedingRooms(false);
-          }
-        });
-    }
-  }, [convexRooms, isSeedingRooms, ensureDefaultRoomsMut]);
 
   // Filter private rooms into ChatRoom format
   // ISSUE 2 FIX: Mark as private so renderRoom skips message preview
@@ -559,14 +512,6 @@ export default function ChatRoomsScreen() {
     }));
   }, [discoverablePrivateRoomsRaw, getSmoothedCount]);
 
-  useEffect(() => {
-    if (myPrivateRooms === undefined || discoverablePrivateRoomsRaw === undefined) return;
-    console.log('[P2_PRIVATE_ROOMS_UI]', {
-      myCount: myPrivateRooms.length,
-      discoverableCount: discoverablePrivateRoomsRaw.length,
-    });
-  }, [myPrivateRooms, discoverablePrivateRoomsRaw]);
-
   // Track loading state for Convex queries
   const isConvexLoading = convexRooms === undefined;
 
@@ -575,11 +520,11 @@ export default function ChatRoomsScreen() {
   // UNREAD-BADGE-FIX: Query unread counts from backend
   const unreadDmsByRoom = useQuery(
     api.chatRooms.getUnreadDmCountsByRoom,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { authUserId: userId, sessionToken: token } : 'skip'
   );
   const unreadMentionsByRoom = useQuery(
     api.chatRooms.getUnreadMentionCount,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { authUserId: userId, sessionToken: token } : 'skip'
   );
 
   // Use backend counts, or empty object if not available
@@ -589,7 +534,6 @@ export default function ChatRoomsScreen() {
   // Rooms list from Convex backend
   // Filter out "English" room - users can chat in English inside Global
   // P2-AUD-006: Memoize to prevent re-computation on every render
-  // Use fallback if backend returns empty (ensures public rooms always show while seeding)
   // LIVE PRESENCE: Use activeUserCount for display (real-time presence count)
   const rooms: ChatRoom[] = useMemo(() => {
     // Always use backend rooms
@@ -603,14 +547,8 @@ export default function ChatRoomsScreen() {
       iconKey: r.slug,
     })).filter((r: ChatRoom) => r.name.toLowerCase() !== 'english');
 
-    // If backend returns empty, use fallback to ensure UI never shows empty
-    // Fallback rooms displayed but tapping is disabled (see handleOpenRoom)
-    if (backendRooms.length === 0) {
-      return FALLBACK_PUBLIC_ROOMS;
-    }
-
     return backendRooms;
-  }, [convexRooms, getSmoothedCount, isSeedingRooms]);
+  }, [convexRooms, getSmoothedCount]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -633,17 +571,6 @@ export default function ChatRoomsScreen() {
 
       // BUG FIX: Prevent navigation with fallback IDs (not real Convex IDs)
       // Fallback IDs crash when passed to Convex mutations/queries
-      if (roomId.startsWith('fallback_')) {
-        Alert.alert(
-          'Syncing Rooms',
-          isSeedingRooms
-            ? 'Setting up chat rooms... Please wait a moment and try again.'
-            : 'Chat rooms are being set up. Please try again in a moment.',
-          [{ text: 'OK' }]
-        );
-        return;
-      }
-
       // ISSUE B: Find room to get name and private status for instant render
       // Check in rooms (general/language) first, then private room sections.
       const foundRoom = rooms.find((r) => r.id === roomId);
@@ -674,11 +601,6 @@ export default function ChatRoomsScreen() {
       // This does NOT modify backend counts and cannot drift (auto-expires, never accumulates).
       const SMOOTHING_MS = 400;
       if (userId) {
-        console.log('CHATROOM_UI_SMOOTHING_APPLIED', {
-          fromRoomId: currentRoomId,
-          toRoomId: roomId,
-          durationMs: SMOOTHING_MS,
-        });
         setCountSmoothing({
           fromRoomId: currentRoomId,
           toRoomId: roomId,
@@ -687,27 +609,10 @@ export default function ChatRoomsScreen() {
       }
 
       // BACKEND COUNT ONLY: Explicitly leave the previous room before switching.
-      if (userId && currentRoomId && currentRoomId !== roomId) {
-        console.log('CHATROOM_LEAVE_SENT', { roomId: currentRoomId, nextRoomId: roomId });
-        leaveRoomMutation({ roomId: currentRoomId as Id<'chatRooms'>, authUserId: userId }).catch(() => {
+      if (userId && token && currentRoomId && currentRoomId !== roomId) {
+        leaveRoomMutation({ roomId: currentRoomId as Id<'chatRooms'>, authUserId: userId, sessionToken: token }).catch(() => {
           // Best-effort; backend expiry still cleans up eventually.
         });
-      }
-
-      // Existing joined/created private rooms can re-enter directly.
-      // Visible non-member private rooms return above into password/code entry.
-      if (foundPrivateRoom) {
-        const isOwner = foundPrivateRoom.role === 'owner';
-        const isApprovedMember = foundPrivateRoom.isMember;
-
-        if (isOwner) {
-          console.log('PRIVATE_ROOM_OWNER_BYPASS', { roomId, role: 'owner' });
-        } else if (isApprovedMember) {
-          console.log('PRIVATE_ROOM_APPROVED_MEMBER_REENTRY', { roomId, isMember: true });
-        } else {
-          // Should only happen for already-approved entries; non-members are gated above.
-          console.log('PRIVATE_ROOM_FIRST_TIME_PASSWORD_REQUIRED', { roomId, isMember: false, isOwner: false });
-        }
       }
 
       // NAV-RACE FIX: Set synchronous lock before navigation
@@ -729,7 +634,7 @@ export default function ChatRoomsScreen() {
         isNavigatingToRoomRef.current = false;
       }, NAV_SETTLE_DELAY_MS);
     },
-    [router, markRoomVisited, rooms, privateRooms, discoverablePrivateRooms, isSeedingRooms, userId, currentRoomId, leaveRoomMutation]
+    [router, markRoomVisited, rooms, privateRooms, discoverablePrivateRooms, userId, token, currentRoomId, leaveRoomMutation]
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -739,6 +644,10 @@ export default function ChatRoomsScreen() {
   // Phase-2: Handle create private room
   const handleCreatePrivateRoom = useCallback(async () => {
     if (!newRoomName.trim() || isCreating) return;
+    if (!userId || !token) {
+      Alert.alert('Sign in required', 'Please sign in to create a private room.');
+      return;
+    }
 
     // Validate password if provided (min 4 chars)
     const pwd = newRoomPassword.trim();
@@ -750,9 +659,10 @@ export default function ChatRoomsScreen() {
     setIsCreating(true);
     try {
       // Only send password if provided
-      const args: { name: string; password?: string; authUserId: string } = {
+      const args: { name: string; password?: string; authUserId: string; sessionToken: string } = {
         name: newRoomName.trim(),
-        authUserId: userId!,
+        authUserId: userId,
+        sessionToken: token,
       };
       if (pwd.length > 0) {
         args.password = pwd;
@@ -799,7 +709,7 @@ export default function ChatRoomsScreen() {
         setIsCreating(false);
       }
     }
-  }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router, routeToPolicyConsent]);
+  }, [newRoomName, newRoomPassword, isCreating, userId, token, createPrivateRoomMut, router, routeToPolicyConsent]);
 
   // LOCKED-ROOM-FIX: Handle successful password entry
   const handlePasswordSuccess = useCallback(() => {
@@ -844,7 +754,7 @@ export default function ChatRoomsScreen() {
   }, []);
 
   const handleJoinCodeSubmit = useCallback(async () => {
-    if (!joinCodeModalRoom || !userId || isJoiningByCode) return;
+    if (!joinCodeModalRoom || !userId || !token || isJoiningByCode) return;
     const code = joinCodeValue.trim();
     if (!code) {
       Alert.alert('Room Code Required', 'Enter the room code to join this private room.');
@@ -857,6 +767,7 @@ export default function ChatRoomsScreen() {
         roomId: joinCodeModalRoom.id as Id<'chatRooms'>,
         joinCode: code,
         authUserId: userId,
+        sessionToken: token,
       });
       const joinedRoomId = result.roomId as string;
       const roomName = joinCodeModalRoom.name;
@@ -886,7 +797,7 @@ export default function ChatRoomsScreen() {
         setIsJoiningByCode(false);
       }
     }
-  }, [isJoiningByCode, joinCodeModalRoom, joinCodeValue, joinRoomByCodeMut, markRoomVisited, routeToPolicyConsent, router, userId]);
+  }, [isJoiningByCode, joinCodeModalRoom, joinCodeValue, joinRoomByCodeMut, markRoomVisited, routeToPolicyConsent, router, userId, token]);
 
   // Room Card component with simple opacity press feedback
   const RoomCard = useCallback(
@@ -1203,7 +1114,7 @@ export default function ChatRoomsScreen() {
                 </View>
                 {generalRooms.map((room) => (
                   <React.Fragment key={room.id}>
-                    <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                    <AccessPrefetcher roomId={room.id} authUserId={userId} sessionToken={token} />
                     <RoomCard item={room} isGeneral={true} />
                   </React.Fragment>
                 ))}
@@ -1221,7 +1132,7 @@ export default function ChatRoomsScreen() {
                 </View>
                 {languageRooms.map((room) => (
                   <React.Fragment key={room.id}>
-                    <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                    <AccessPrefetcher roomId={room.id} authUserId={userId} sessionToken={token} />
                     <RoomCard item={room} isGeneral={false} />
                   </React.Fragment>
                 ))}
@@ -1267,7 +1178,7 @@ export default function ChatRoomsScreen() {
                 </View>
                 {filteredPrivateRooms.map((room) => (
                   <React.Fragment key={room.id}>
-                    <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                    <AccessPrefetcher roomId={room.id} authUserId={userId} sessionToken={token} />
                     <RoomCard item={room} />
                   </React.Fragment>
                 ))}
@@ -1286,7 +1197,7 @@ export default function ChatRoomsScreen() {
                 {filteredDiscoverablePrivateRooms.length > 0 ? (
                   filteredDiscoverablePrivateRooms.map((room) => (
                     <React.Fragment key={room.id}>
-                      <AccessPrefetcher roomId={room.id} authUserId={userId} />
+                      <AccessPrefetcher roomId={room.id} authUserId={userId} sessionToken={token} />
                       <RoomCard item={room} />
                     </React.Fragment>
                   ))
@@ -1371,6 +1282,7 @@ export default function ChatRoomsScreen() {
         roomId={passwordModalRoom?.id ?? ''}
         roomName={passwordModalRoom?.name ?? ''}
         authUserId={userId ?? ''}
+        sessionToken={token ?? ''}
         onSuccess={handlePasswordSuccess}
         onCancel={handlePasswordCancel}
         onTermsRequired={routeToPolicyConsent}

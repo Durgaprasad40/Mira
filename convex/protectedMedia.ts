@@ -6,7 +6,6 @@ import {
   isChatRoomPrivateDmConversation,
   isChatRoomPrivateDmExpired,
 } from './chatRoomDmRetention';
-import { requireChatRoomTermsAccepted } from './lib/userPolicyGates';
 
 /**
  * Legacy compatibility layer.
@@ -48,16 +47,16 @@ async function hasReportBetween(
     .withIndex('by_reporter_reported_created', (q) =>
       q.eq('reporterId', userId1).eq('reportedUserId', userId2)
     )
-    .first();
-  if (report1) return true;
+    .collect();
+  if (report1.some((report) => !report.roomId)) return true;
 
   const report2 = await ctx.db
     .query('reports')
     .withIndex('by_reporter_reported_created', (q) =>
       q.eq('reporterId', userId2).eq('reportedUserId', userId1)
     )
-    .first();
-  return !!report2;
+    .collect();
+  return report2.some((report) => !report.roomId);
 }
 
 function isUnavailableDmUser(user: Doc<'users'> | null): boolean {
@@ -73,18 +72,6 @@ function hasActiveLinkedMatch(
 
   const participantIds = new Set(conversation.participants.map((id) => id as string));
   return participantIds.has(match.user1Id as string) && participantIds.has(match.user2Id as string);
-}
-
-async function hasActiveChatRoomPenalty(
-  ctx: MutationCtx,
-  userId: Id<'users'>
-): Promise<boolean> {
-  const now = Date.now();
-  const penalties = await ctx.db
-    .query('chatRoomPenalties')
-    .withIndex('by_user', (q) => q.eq('userId', userId))
-    .collect();
-  return penalties.some((p) => p.expiresAt > now);
 }
 
 async function revokeMediaPermissionsForMedia(
@@ -140,16 +127,12 @@ async function assertCanSendProtectedMedia(
   sender: Doc<'users'>;
   recipientId: Id<'users'> | undefined;
 }> {
-  if (await hasActiveChatRoomPenalty(ctx, senderId)) {
-    throw new Error('You are in read-only mode (24h)');
-  }
-
   const conversation = await ctx.db.get(conversationId);
   if (!conversation) throw new Error('Conversation not found');
 
   const isChatRoomDm = isChatRoomPrivateDmConversation(conversation);
   if (isChatRoomDm) {
-    await requireChatRoomTermsAccepted(ctx, senderId);
+    throw new Error('Use Chat Room DM APIs for room-scoped media');
   }
 
   if (!conversation.participants.includes(senderId)) {

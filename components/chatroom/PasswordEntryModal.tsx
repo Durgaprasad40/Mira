@@ -39,6 +39,7 @@ interface PasswordEntryModalProps {
   roomId: string;
   roomName: string;
   authUserId: string;
+  sessionToken: string;
   onSuccess: () => void;
   onCancel: () => void;
   onTermsRequired?: () => void;
@@ -49,6 +50,7 @@ export default function PasswordEntryModal({
   roomId,
   roomName,
   authUserId,
+  sessionToken,
   onSuccess,
   onCancel,
   onTermsRequired,
@@ -69,8 +71,8 @@ export default function PasswordEntryModal({
   // Query current attempt state when modal opens
   const attemptState = useQuery(
     api.chatRooms.getPasswordAttemptState,
-    visible && roomId && authUserId
-      ? { roomId: roomId as Id<'chatRooms'>, authUserId }
+    visible && roomId && authUserId && sessionToken
+      ? { roomId: roomId as Id<'chatRooms'>, authUserId, sessionToken }
       : 'skip'
   );
 
@@ -155,6 +157,7 @@ export default function PasswordEntryModal({
         roomId: roomId as Id<'chatRooms'>,
         password: password.trim(),
         authUserId,
+        sessionToken,
       });
 
       setIsLoading(false);
@@ -212,7 +215,7 @@ export default function PasswordEntryModal({
         setError(message);
       }
     }
-  }, [password, isLoading, isBlocked, cooldownMs, roomId, authUserId, joinRoomWithPasswordMut, onSuccess, onTermsRequired, stage]);
+  }, [password, isLoading, isBlocked, cooldownMs, roomId, authUserId, sessionToken, joinRoomWithPasswordMut, onSuccess, onTermsRequired, stage]);
 
   const handleCancel = useCallback(() => {
     if (isLoading) return;

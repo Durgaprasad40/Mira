@@ -66,7 +66,6 @@ export default function UserProfilePopup({
   // Log once when popup opens (not on every render)
   useEffect(() => {
     if (visible && user) {
-      if (__DEV__) console.log('[NAV] open_profile_popup', { userId: user.id, username: user.username });
     }
   }, [visible, user?.id]);
 
@@ -74,7 +73,6 @@ export default function UserProfilePopup({
   useEffect(() => {
     if (visible) {
       setBackdropActive(false);
-      if (__DEV__) console.log('[POPUP] opened visible=true backdropActive=false');
       Animated.spring(translateY, {
         toValue: 0,
         useNativeDriver: true,
@@ -84,7 +82,6 @@ export default function UserProfilePopup({
         // Only activate backdrop if animation finished AND popup still visible AND mounted
         if (finished && visibleRef.current && isMountedRef.current) {
           setBackdropActive(true);
-          if (__DEV__) console.log('[POPUP] backdropActive=true');
         }
       });
     } else {
@@ -113,9 +110,7 @@ export default function UserProfilePopup({
       <Pressable
         style={styles.backdrop}
         onPress={() => {
-          if (__DEV__) console.log('[POPUP] backdrop press', { backdropActive });
           if (backdropActive) {
-            if (__DEV__) console.log('[POPUP] onClose called reason=backdrop');
             onClose();
           }
         }}
@@ -167,7 +162,6 @@ export default function UserProfilePopup({
           <TouchableOpacity
             style={styles.actionButton}
             onPress={() => {
-              if (__DEV__) console.log('[POPUP] view_profile pressed', { userId: user.id });
               // Don't call onClose - parent changes overlay which hides this popup
               onViewProfile?.(user.id);
             }}
@@ -219,7 +213,6 @@ export default function UserProfilePopup({
           <TouchableOpacity
             style={styles.actionButton}
             onPress={() => {
-              if (__DEV__) console.log('[REPORT] open', { userId: user.id });
               // Don't call onClose - parent changes overlay which hides this popup
               onReport?.(user.id);
             }}
@@ -232,7 +225,6 @@ export default function UserProfilePopup({
         <TouchableOpacity
           style={styles.closeButton}
           onPress={() => {
-            if (__DEV__) console.log('[POPUP] onClose called reason=button');
             onClose();
           }}
         >

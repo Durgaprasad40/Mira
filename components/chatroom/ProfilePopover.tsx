@@ -42,7 +42,7 @@ interface ProfilePopoverProps {
   bio?: string;
   /** Called when user updates their chat room identity */
   onProfileUpdate?: (data: { username?: string; avatar?: string }) => void;
-  /** Called when user wants to leave the room completely (session cleared) */
+  /** Called when user exits the active room session */
   onLeaveRoom?: () => void;
   /** Phase-2: Is this a private room (changes menu behavior) */
   isPrivateRoom?: boolean;
@@ -94,8 +94,9 @@ export default function ProfilePopover({
   const [editName, setEditName] = useState(username);
   const [editAvatar, setEditAvatar] = useState(avatar);
   // LEAVE-ROOM-FIX: All users can leave a room (including private room owners)
-  // Leave = exit room, can re-enter later. End Room = owner-only destructive delete.
+  // Private rooms use "Exit" copy because membership is preserved for re-entry.
   const canLeaveRoom = true;
+  const leaveRoomLabel = isPrivateRoom ? 'Exit Room' : 'Leave Room';
   // AVATAR-UPLOAD-FIX: Track if avatar was changed (to trigger upload on save)
   const [pendingAvatarLocalUri, setPendingAvatarLocalUri] = useState<string | null>(null);
   // PROFILE-EDIT-FIX: Use bio prop from Convex as source of truth, not local store
@@ -242,7 +243,7 @@ export default function ProfilePopover({
         const { storageId } = uploadJson;
 
         // Step 4: Get the cloud URL for the uploaded image
-        cloudAvatarUrl = await getAvatarUrl({ storageId: storageId as Id<'_storage'> }) ?? undefined;
+        cloudAvatarUrl = await getAvatarUrl({ storageId: storageId as Id<'_storage'>, token }) ?? undefined;
       }
 
       // CHAT ROOM IDENTITY: Save to Convex backend (persistent)
@@ -251,6 +252,7 @@ export default function ProfilePopover({
 
       await updateChatRoomProfile({
         authUserId,
+        sessionToken: token,
         nickname: trimmedName,
         avatarUrl: avatarUrlToSave,
         bio: trimmedBio || undefined,
@@ -378,7 +380,7 @@ export default function ProfilePopover({
               <Ionicons name="chevron-forward" size={16} color={C.textLight} />
             </TouchableOpacity>
 
-            {/* Leave Room button */}
+            {/* Leave/exit room button */}
             {canLeaveRoom && (
               <TouchableOpacity
                 style={[styles.menuItem, styles.leaveRoomItem]}
@@ -389,7 +391,7 @@ export default function ProfilePopover({
                 }}
               >
                 <Ionicons name="log-out-outline" size={18} color="#FF4757" />
-                <Text style={[styles.menuLabel, styles.leaveRoomText]}>Leave Room</Text>
+                <Text style={[styles.menuLabel, styles.leaveRoomText]}>{leaveRoomLabel}</Text>
               </TouchableOpacity>
             )}
 

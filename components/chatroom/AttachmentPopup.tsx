@@ -115,7 +115,6 @@ export default function AttachmentPopup({
       // Open camera
       setShowCamera(true);
     } catch (error) {
-      console.error('[AttachmentPopup] Camera open error:', error);
       Alert.alert('Error', 'Could not open camera. Please try again.');
     }
   }, [onClose]);

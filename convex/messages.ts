@@ -20,19 +20,6 @@ const PHASE1_TEXT_MESSAGE_MAX_LENGTH = 400;
 const SHARED_DM_MESSAGE_MAX_LENGTH = 5000;
 const SYSTEM_MESSAGE_PREFIX = '[SYSTEM:';
 
-// Phase-2: Helper to check if user has any active chatRoom readOnly penalty
-async function hasActiveChatRoomPenalty(
-  ctx: QueryCtx | MutationCtx,
-  userId: Id<'users'>
-): Promise<boolean> {
-  const now = Date.now();
-  const penalties = await ctx.db
-    .query('chatRoomPenalties')
-    .withIndex('by_user', (q) => q.eq('userId', userId))
-    .collect();
-  return penalties.some((p) => p.expiresAt > now);
-}
-
 // D1: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
 async function isBlockedBidirectional(
@@ -69,16 +56,16 @@ async function hasReportBetween(
     .withIndex('by_reporter_reported_created', (q) =>
       q.eq('reporterId', userId1).eq('reportedUserId', userId2)
     )
-    .first();
-  if (report1) return true;
+    .collect();
+  if (report1.some((report) => !report.roomId)) return true;
 
   const report2 = await ctx.db
     .query('reports')
     .withIndex('by_reporter_reported_created', (q) =>
       q.eq('reporterId', userId2).eq('reportedUserId', userId1)
     )
-    .first();
-  return !!report2;
+    .collect();
+  return report2.some((report) => !report.roomId);
 }
 
 function isUnavailableDmUser(user: Doc<'users'> | null): boolean {
@@ -467,11 +454,6 @@ export const sendMessage = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // Phase-2: Block DMs if user has active chatRoom readOnly penalty
-    if (await hasActiveChatRoomPenalty(ctx, senderId)) {
-      throw new Error('You are in read-only mode (24h)');
-    }
-
     // BUGFIX #3: Check for duplicate message (idempotency for retries)
     if (clientMessageId) {
       const existing = await ctx.db
@@ -494,7 +476,7 @@ export const sendMessage = mutation({
     if (!conversation) throw new Error('Conversation not found');
     const isChatRoomDm = isChatRoomPrivateDmConversation(conversation);
     if (isChatRoomDm) {
-      await requireChatRoomTermsAccepted(ctx, senderId);
+      throw new Error('Use Chat Room DM APIs for room-scoped messages');
     }
 
     // Verify sender is part of conversation
@@ -812,11 +794,6 @@ export const sendPreMatchMessage = mutation({
     const fromUserId = await validateSessionToken(ctx, sessionToken);
     if (!fromUserId) {
       throw new Error('Unauthorized: user not found');
-    }
-
-    // Phase-2: Block DMs if user has active chatRoom readOnly penalty
-    if (await hasActiveChatRoomPenalty(ctx, fromUserId)) {
-      throw new Error('You are in read-only mode (24h)');
     }
 
     const fromUser = await ctx.db.get(fromUserId);
@@ -1174,6 +1151,9 @@ export const markAsRead = mutation({
     if (!conversation.participants.includes(userId)) {
       return;
     }
+    if (isChatRoomPrivateDmConversation(conversation)) {
+      return { success: true, count: 0 };
+    }
     if (isChatRoomPrivateDmExpired(conversation, now)) {
       return { success: true, count: 0, expired: true as const };
     }
@@ -1229,6 +1209,9 @@ export const getDmMessages = query({
 
       const conversation = await ctx.db.get(threadId);
       if (!conversation || !conversation.participants.includes(userId)) {
+        return { page: [], isDone: true, continueCursor: null };
+      }
+      if (isChatRoomPrivateDmConversation(conversation)) {
         return { page: [], isDone: true, continueCursor: null };
       }
       if (isChatRoomPrivateDmExpired(conversation)) {
@@ -1793,8 +1776,8 @@ export const getConversations = query({
     const blockedOrReportedUserIds = new Set([
       ...blocksOut.map((b) => b.blockedUserId as string),
       ...blocksIn.map((b) => b.blockerId as string),
-      ...reportsOut.map((r) => r.reportedUserId as string),
-      ...reportsIn.map((r) => r.reporterId as string),
+      ...reportsOut.filter((r) => !r.roomId).map((r) => r.reportedUserId as string),
+      ...reportsIn.filter((r) => !r.roomId).map((r) => r.reporterId as string),
     ]);
 
     type ConversationCandidate = {
@@ -2282,86 +2265,10 @@ export const getUnreadDmCountsByRoom = query({
   args: {
     token: v.string(),
   },
-  handler: async (ctx, { token }) => {
-    const sessionToken = token.trim();
-    const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
-    if (!userId) {
-      return {
-        byRoomId: {},
-        roomsWithUnread: 0,
-      };
-    }
-
-    const now = Date.now();
-    // C3-REPAIR: Hybrid approach - use denormalized counts where available,
-    // fall back to source-of-truth computation for conversations without participant rows.
-    // P1-FIX: Bounded fallback instead of unbounded .collect() on all conversations.
-
-    // 1. Get all participant rows for this user (fast indexed query)
-    const participantRows = await ctx.db
-      .query('conversationParticipants')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
-
-    // Build set for O(1) lookup
-    const coveredConversationIds = new Set<string>(
-      participantRows.map((row) => row.conversationId as string)
-    );
-
-    // 2. Batch-fetch referenced conversations by ID (bounded by user's conversation count)
-    const conversations = await Promise.all(
-      participantRows.map((row) => ctx.db.get(row.conversationId))
-    );
-
-    // 3. Build unread counts by room from participant rows
-    const byRoomId: Record<string, number> = {};
-
-    for (let i = 0; i < conversations.length; i++) {
-      const conversation = conversations[i];
-      if (!conversation) continue;
-      if (!conversation.sourceRoomId) continue;
-      if (isChatRoomPrivateDmExpired(conversation, now)) continue;
-
-      const roomIdStr = conversation.sourceRoomId as string;
-      const unreadCount = participantRows[i].unreadCount;
-
-      if (unreadCount > 0) {
-        byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
-      }
-    }
-
-    // 4. Bounded fallback: check recent conversations without participant rows
-    // This replaces the unbounded .collect() that loaded ALL conversations
-    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-    const thirtyDaysAgo = now - THIRTY_DAYS_MS;
-    const MAX_FALLBACK_CONVERSATIONS = 500;
-
-    const recentConversations = await ctx.db
-      .query('conversations')
-      .withIndex('by_last_message', (q) => q.gt('lastMessageAt', thirtyDaysAgo))
-      .take(MAX_FALLBACK_CONVERSATIONS);
-
-    for (const conversation of recentConversations) {
-      // Skip if not a participant
-      if (!conversation.participants.includes(userId)) continue;
-      // Skip if no sourceRoomId (not a room DM)
-      if (!conversation.sourceRoomId) continue;
-      if (isChatRoomPrivateDmExpired(conversation, now)) continue;
-      // Skip if already covered by participant row
-      if (coveredConversationIds.has(conversation._id as string)) continue;
-
-      const unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
-      if (unreadCount > 0) {
-        const roomIdStr = conversation.sourceRoomId as string;
-        byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
-      }
-    }
-
-    const roomsWithUnread = Object.keys(byRoomId).length;
-
+  handler: async () => {
     return {
-      byRoomId,
-      roomsWithUnread,
+      byRoomId: {},
+      roomsWithUnread: 0,
     };
   },
 });
@@ -2395,6 +2302,9 @@ export const markDmConversationRead = mutation({
     // Verify user is a participant
     if (!conversation.participants.includes(userId)) {
       return { success: false, count: 0 };
+    }
+    if (isChatRoomPrivateDmConversation(conversation)) {
+      return { success: true, count: 0 };
     }
     if (isChatRoomPrivateDmExpired(conversation, now)) {
       return { success: true, count: 0, expired: true as const };
@@ -2603,6 +2513,9 @@ export const setTypingStatus = mutation({
     if (!conversation || !conversation.participants.includes(userId)) {
       return;
     }
+    if (isChatRoomPrivateDmConversation(conversation)) {
+      return;
+    }
     if (isChatRoomPrivateDmExpired(conversation, now)) {
       return;
     }
@@ -2656,6 +2569,9 @@ export const getTypingStatus = query({
     // Get conversation to find the other participant
     const conversation = await ctx.db.get(conversationId);
     if (!conversation || !conversation.participants.includes(userId)) {
+      return { isTyping: false };
+    }
+    if (isChatRoomPrivateDmConversation(conversation)) {
       return { isTyping: false };
     }
     if (isChatRoomPrivateDmExpired(conversation, now)) {

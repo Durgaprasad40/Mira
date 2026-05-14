@@ -243,8 +243,7 @@ export default function ChatSheet({
   // KEYBOARD-REGRESSION-FIX: Previously this branch was gated behind
   // `Platform.OS !== 'android'`, which left the Android sheet anchored at the
   // screen bottom when the keyboard opened. Because PrivateChatView is rendered
-  // with `isModal={true}` inside this sheet (see chat-rooms/[roomId].tsx and
-  // chat-rooms/dm/[dmId].tsx), it has NO KeyboardAvoidingView in that path —
+  // with `isModal={true}` inside this sheet (see chat-rooms/[roomId].tsx), it has NO KeyboardAvoidingView in that path —
   // the sheet's own lift IS the only thing that brings the composer/messages
   // above the IME. Re-enabling the lift on Android restores Samsung/OnePlus
   // WhatsApp-style behavior without double-applying (no KAV in the modal path

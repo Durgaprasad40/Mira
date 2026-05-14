@@ -242,25 +242,20 @@ export default function ChatComposer({
   }, [value, mentionStartIndex, cursorPosition, onChangeText, onMentionsChange]);
 
   const handleSend = useCallback(async () => {
-    console.log('SEND_BUTTON_PRESSED', { hasText, isSending, valueLen: value.length, trimmedLen: value.trim().length });
     if (!hasText || isSending) {
-      console.log('SEND_BUTTON_GUARD_BLOCKED', { hasText, isSending });
       return;
     }
     // P2-013: Light haptic feedback on send for tactile confirmation
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const textBeforeSend = value;
     setIsSending(true);
-    console.log('SEND_BUTTON_CALLING_ONSEND');
     try {
       await onSend();
-      console.log('SEND_BUTTON_ONSEND_RETURNED_OK');
       setInputHeight(MIN_INPUT_HEIGHT);
       // Clear mentions after successful send
       mentionsRef.current = [];
       setMentionActive(false);
     } catch (err: any) {
-      console.log('SEND_BUTTON_ONSEND_THREW', err?.message);
       onChangeText(textBeforeSend);
       // Error haptic feedback
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);

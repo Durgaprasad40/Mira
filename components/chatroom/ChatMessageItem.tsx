@@ -189,7 +189,6 @@ function ChatMessageItem({
   // Animate highlight when isHighlighted changes
   useEffect(() => {
     if (isHighlighted) {
-      console.log('[CHAT_MENTION_HIGHLIGHT] Highlighting message:', messageId.slice(-8));
       // Flash highlight animation - now uses native driver
       Animated.sequence([
         Animated.timing(highlightAnim, {
@@ -415,10 +414,6 @@ function ChatMessageItem({
                 ]}
                 onPress={() => {
                   if (!replyTo.isDeleted) {
-                    console.log('[CHAT_REPLY_NAVIGATION] Tapped reply preview:', {
-                      fromMessageId: messageId.slice(-8),
-                      toMessageId: replyTo.messageId.slice(-8),
-                    });
                     onReplyTap?.(replyTo.messageId);
                   }
                 }}
@@ -542,10 +537,6 @@ function ChatMessageItem({
                 ]}
                 onPress={() => {
                   if (!replyTo.isDeleted) {
-                    console.log('[CHAT_REPLY_NAVIGATION] Tapped reply preview:', {
-                      fromMessageId: messageId.slice(-8),
-                      toMessageId: replyTo.messageId.slice(-8),
-                    });
                     onReplyTap?.(replyTo.messageId);
                   }
                 }}
@@ -658,10 +649,6 @@ function ChatMessageItem({
                 ]}
                 onPress={() => {
                   if (!replyTo.isDeleted) {
-                    console.log('[CHAT_REPLY_NAVIGATION] Tapped reply preview:', {
-                      fromMessageId: messageId.slice(-8),
-                      toMessageId: replyTo.messageId.slice(-8),
-                    });
                     onReplyTap?.(replyTo.messageId);
                   }
                 }}

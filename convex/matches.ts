@@ -141,8 +141,8 @@ export const getMatches = query({
     const blockedOrReportedUserIds = new Set([
       ...myBlocks.map((b) => b.blockedUserId as string),
       ...blocksOnMe.map((b) => b.blockerId as string),
-      ...myReports.map((r) => r.reportedUserId as string),
-      ...reportsOnMe.map((r) => r.reporterId as string),
+      ...myReports.filter((r) => !r.roomId).map((r) => r.reportedUserId as string),
+      ...reportsOnMe.filter((r) => !r.roomId).map((r) => r.reporterId as string),
     ]);
 
     // PERF #6: Batch-fetch all other users and conversations in parallel

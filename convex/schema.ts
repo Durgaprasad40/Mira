@@ -2316,6 +2316,7 @@ export default defineSchema({
     slug: v.string(),
     category: v.union(v.literal('language'), v.literal('general')),
     isPublic: v.boolean(),
+    discoverable: v.optional(v.boolean()),
     createdAt: v.number(),
     lastMessageAt: v.optional(v.number()),
     lastMessageText: v.optional(v.string()),
@@ -2464,6 +2465,93 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_user_conversation', ['userId', 'conversationId']),
 
+  chatRoomPrivateConversations: defineTable({
+    roomId: v.id('chatRooms'),
+    pairKey: v.string(),
+    participants: v.array(v.id('users')),
+    user1Id: v.id('users'),
+    user2Id: v.id('users'),
+    createdAt: v.number(),
+    lastMessageAt: v.optional(v.number()),
+    lastMessageText: v.optional(v.string()),
+  })
+    .index('by_room_pair', ['roomId', 'pairKey'])
+    .index('by_room', ['roomId'])
+    .index('by_user1', ['user1Id'])
+    .index('by_user2', ['user2Id'])
+    .index('by_last_message', ['lastMessageAt']),
+
+  chatRoomPrivateMessages: defineTable({
+    conversationId: v.id('chatRoomPrivateConversations'),
+    roomId: v.id('chatRooms'),
+    senderId: v.id('users'),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('voice'), v.literal('system')),
+    content: v.string(),
+    imageStorageId: v.optional(v.id('_storage')),
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
+    clientMessageId: v.optional(v.string()),
+    readAt: v.optional(v.number()),
+    deletedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index('by_conversation_created', ['conversationId', 'createdAt'])
+    .index('by_conversation_readAt', ['conversationId', 'readAt'])
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId'])
+    .index('by_room', ['roomId']),
+
+  chatRoomPrivateTyping: defineTable({
+    conversationId: v.id('chatRoomPrivateConversations'),
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    isTyping: v.boolean(),
+    updatedAt: v.number(),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId'])
+    .index('by_updatedAt', ['updatedAt']),
+
+  chatRoomPrivateConversationHides: defineTable({
+    userId: v.id('users'),
+    conversationId: v.id('chatRoomPrivateConversations'),
+    hiddenAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
+
+  chatRoomReports: defineTable({
+    reporterId: v.id('users'),
+    reportedUserId: v.id('users'),
+    roomId: v.id('chatRooms'),
+    reason: v.union(
+      v.literal('fake_profile'),
+      v.literal('inappropriate_photos'),
+      v.literal('harassment'),
+      v.literal('spam'),
+      v.literal('underage'),
+      v.literal('other'),
+      v.literal('hate_speech'),
+      v.literal('sexual_content'),
+      v.literal('nudity'),
+      v.literal('violent_threats'),
+      v.literal('impersonation'),
+      v.literal('selling')
+    ),
+    description: v.optional(v.string()),
+    status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('resolved')),
+    createdAt: v.number(),
+    messageId: v.optional(v.string()),
+    reportType: v.optional(v.union(v.literal('user'), v.literal('content'))),
+  })
+    .index('by_room', ['roomId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_reported_user', ['reportedUserId'])
+    .index('by_reporter_reported_room_created', ['reporterId', 'reportedUserId', 'roomId', 'createdAt'])
+    .index('by_message', ['messageId'])
+    .index('by_room_reporter_created', ['roomId', 'reporterId', 'createdAt'])
+    .index('by_room_reported_created', ['roomId', 'reportedUserId', 'createdAt'])
+    .index('by_message_reporter_type_created', ['messageId', 'reporterId', 'reportType', 'createdAt']),
+
   // Chat Room Penalties table (Phase-2: kicked users read-only for 24h)
   chatRoomPenalties: defineTable({
     roomId: v.id('chatRooms'),
@@ -2535,6 +2623,18 @@ export default defineSchema({
   })
     .index('by_room_user', ['roomId', 'authUserId'])
     // P2-17: Range-scan rows by lastAttemptAt for TTL cleanup.
+    .index('by_last_attempt', ['lastAttemptAt']),
+
+  // Chat Room join-code lookup throttle.
+  // Kept user-scoped so a known/guessed private room code cannot be brute-forced
+  // through the preview endpoint without a valid session.
+  chatRoomJoinCodeLookups: defineTable({
+    userId: v.id('users'),
+    windowStart: v.number(),
+    attempts: v.number(),
+    lastAttemptAt: v.number(),
+  })
+    .index('by_user_window', ['userId', 'windowStart'])
     .index('by_last_attempt', ['lastAttemptAt']),
 
   // Chat Room Profiles (separate identity for chat rooms)

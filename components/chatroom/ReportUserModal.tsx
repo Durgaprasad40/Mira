@@ -63,7 +63,6 @@ export default function ReportUserModal({
 
   const handleSubmit = () => {
     if (!selectedReason) return;
-    if (__DEV__) console.log('[REPORT] submit', { userId: reportedUserId, reason: selectedReason });
     onSubmit({
       reportedUserId,
       reason: selectedReason,

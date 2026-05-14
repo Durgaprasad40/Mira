@@ -80,7 +80,7 @@ interface DmInfo {
 interface PrivateChatViewProps {
   dm: DmInfo;
   /** Convex thread ID for backend sync */
-  threadId?: Id<'conversations'>;
+  threadId?: Id<'chatRoomPrivateConversations'>;
   onBack: () => void;
   topInset?: number;
   /** When true, rendered inside a modal/sheet - simple flex layout (no internal keyboard handling) */
@@ -262,9 +262,9 @@ export default function PrivateChatView({
   // Threshold: how close to bottom counts as "at bottom" (in pixels)
   const NEAR_BOTTOM_THRESHOLD = 50;
 
-  // DM-ID-FIX: Use Convex query for real-time messages (Phase-1 messages table)
+  // DM-ID-FIX: Use dedicated room-scoped Chat Room DM tables.
   const messagesResult = useQuery(
-    api.messages.getDmMessages,
+    api.chatRooms.getRoomDmMessages,
     threadId && token
       ? { token, threadId, paginationOpts: { numItems: DM_PAGE_SIZE, cursor: null } }
       : 'skip'
@@ -276,9 +276,8 @@ export default function PrivateChatView({
     [isExpiredThread, liveMessages, olderMessages]
   );
 
-  // DM-ID-FIX: Mutations for sending and marking read (messages module)
-  const sendConversationMessage = useMutation(api.messages.sendMessage);
-  const markConversationRead = useMutation(api.messages.markAsRead);
+  const sendConversationMessage = useMutation(api.chatRooms.sendRoomDmMessage);
+  const markConversationRead = useMutation(api.chatRooms.markRoomDmRead);
   // DM-MEDIA-FIX: Mutation for generating upload URL for media messages
   const generateUploadUrl = useMutation(api.chatRooms.generateUploadUrl);
 
@@ -295,7 +294,6 @@ export default function PrivateChatView({
   useEffect(() => {
     if (threadId && token && unreadIncomingMessageIds.length > 0) {
       markConversationRead({ token, conversationId: threadId }).catch((err) => {
-        if (__DEV__) console.warn('[DM] Failed to mark messages read:', err);
       });
     }
   }, [threadId, token, unreadIncomingMessageIds, markConversationRead]);
@@ -363,7 +361,7 @@ export default function PrivateChatView({
     setLoadOlderError(null);
 
     try {
-      const nextPage = await convex.query(api.messages.getDmMessages, {
+      const nextPage = await convex.query(api.chatRooms.getRoomDmMessages, {
         token,
         threadId,
         paginationOpts: {
@@ -685,7 +683,6 @@ export default function PrivateChatView({
         50
       );
     } catch (error) {
-      if (__DEV__) console.error('[DM] Failed to send message:', error);
       if (isChatRoomTermsRequiredError(error)) {
         routeToPolicyConsent();
         setInputText(trimmed);
@@ -756,7 +753,6 @@ export default function PrivateChatView({
         // Notify parent if needed (e.g., for ChatSheet keyboard handling)
         onSendComplete?.();
       } catch (error) {
-        if (__DEV__) console.error('[DM] Media send failed:', error);
         if (isChatRoomTermsRequiredError(error)) {
           routeToPolicyConsent();
           return;

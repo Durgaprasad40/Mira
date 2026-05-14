@@ -87,12 +87,6 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
   }, [nickname, privateProfile?.displayName]);
 
   // Log form initialization
-  if (__DEV__) {
-    console.log('[CHAT_PROFILE_FORM_INIT] ChatRoomIdentitySetup mounted', {
-      authUserId: authUserId?.slice(-8),
-      isNewUser: true,
-    });
-  }
 
   // PROFILE-SETUP-FIX: Pick avatar image
   const handlePickAvatar = useCallback(async (source: 'camera' | 'gallery') => {
@@ -206,11 +200,12 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
 
         // Step 3: Get storage ID and cloud URL
         const { storageId } = await uploadResponse.json();
-        cloudAvatarUrl = await getAvatarUrl({ storageId: storageId as Id<'_storage'> }) ?? undefined;
+        cloudAvatarUrl = await getAvatarUrl({ storageId: storageId as Id<'_storage'>, token }) ?? undefined;
       }
 
       await createOrUpdateProfile({
         authUserId,
+        sessionToken: token,
         nickname: trimmedNickname,
         avatarUrl: cloudAvatarUrl,
         bio: trimmedBio || undefined,
@@ -218,7 +213,6 @@ export default function ChatRoomIdentitySetup({ onComplete }: ChatRoomIdentitySe
 
       onComplete();
     } catch (error: any) {
-      console.error('[ChatRoomIdentitySetup] Error:', error);
       Alert.alert('Error', error.message || 'Failed to create profile. Please try again.');
     } finally {
       setIsSubmitting(false);

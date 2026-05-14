@@ -85,12 +85,6 @@ export default function ActiveUsersStrip({
           // AVATAR-BORDER-FIX: Use gender-based colors for consistency across all surfaces
           const ringColor = GENDER_COLORS[user.gender || 'default'];
           // CHATROOM_TOP_ROW_RENDER: Log what's being rendered
-          console.log('CHATROOM_TOP_ROW_RENDER', {
-            userId: user.id.slice(0, 12),
-            hasAvatar: !!user.avatar,
-            gender: user.gender || 'default',
-            isOnline: user.isOnline,
-          });
           return (
           <View key={user.id} style={styles.avatarWrapper}>
             {user.avatar ? (

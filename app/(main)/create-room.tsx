@@ -31,6 +31,7 @@ export default function CreateRoomScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
 
   const [roomName, setRoomName] = useState('');
   const [password, setPassword] = useState('');
@@ -61,7 +62,7 @@ export default function CreateRoomScreen() {
   // COIN-UX-FIX: Query user's coin balance
   const walletQuery = useQuery(
     api.chatRooms.getUserWalletCoins,
-    userId ? { authUserId: userId } : 'skip'
+    userId && token ? { authUserId: userId, sessionToken: token } : 'skip'
   );
   const currentCoins = walletQuery?.walletCoins ?? 0;
   const hasEnoughCoins = currentCoins >= ROOM_COST;
@@ -96,7 +97,7 @@ export default function CreateRoomScreen() {
       return;
     }
 
-    if (!userId) {
+    if (!userId || !token) {
       Alert.alert('Sign in required', 'Please sign in to create a private room.');
       return;
     }
@@ -106,7 +107,8 @@ export default function CreateRoomScreen() {
       const result = await createPrivateRoomMut({
         name: trimmedName,
         password: trimmedPassword,
-        authUserId: userId!,
+        authUserId: userId,
+        sessionToken: token,
       });
 
       // Dismiss keyboard before showing the premium success modal
@@ -122,7 +124,7 @@ export default function CreateRoomScreen() {
     } finally {
       setIsSubmitting(false);
     }
-  }, [roomName, password, userId, createPrivateRoomMut]);
+  }, [roomName, password, userId, token, createPrivateRoomMut]);
 
   const handleGoToRoom = useCallback(() => {
     if (!successData) return;

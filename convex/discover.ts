@@ -552,8 +552,12 @@ export const getDiscoverProfiles = query({
 
     // TRUST SIGNALS: Viewer-specific reports (hard exclusion)
     const viewerReportedIds = new Set<string>();
-    for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
-    for (const report of reportsAgainstMe) viewerReportedIds.add(report.reporterId as string);
+    for (const report of myReports) {
+      if (!report.roomId) viewerReportedIds.add(report.reportedUserId as string);
+    }
+    for (const report of reportsAgainstMe) {
+      if (!report.roomId) viewerReportedIds.add(report.reporterId as string);
+    }
 
     // CONVERSATION PARTNER EXCLUSION: Build set of users with existing message threads
     // This ensures users who already have a chat connection don't reappear in Discover
@@ -1667,8 +1671,12 @@ async function loadExploreExclusions(
   for (const block of blocksAgainstMe) blockedUserIds.add(block.blockerId as string);
 
   const viewerReportedIds = new Set<string>();
-  for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
-  for (const report of reportsAgainstMe) viewerReportedIds.add(report.reporterId as string);
+  for (const report of myReports) {
+    if (!report.roomId) viewerReportedIds.add(report.reportedUserId as string);
+  }
+  for (const report of reportsAgainstMe) {
+    if (!report.roomId) viewerReportedIds.add(report.reporterId as string);
+  }
 
   const conversationPartnerIds = new Set<string>();
   if (myConversationParticipations.length > 0) {

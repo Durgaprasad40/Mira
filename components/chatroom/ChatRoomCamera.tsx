@@ -170,7 +170,6 @@ export default function ChatRoomCamera({
         setCapturedFacing(facing);
       }
     } catch (error) {
-      console.error('[ChatRoomCamera] Photo capture error:', error);
     } finally {
       // STABILITY FIX: C-7 - Guard setState in finally block
       if (mountedRef.current) {
@@ -190,7 +189,6 @@ export default function ChatRoomCamera({
         if (mountedRef.current) {
           setMicPermissionDenied(true);
         }
-        console.warn('[ChatRoomCamera] Microphone permission denied - cannot record video');
         return; // Exit early, don't attempt recording
       } else {
         if (mountedRef.current) {
@@ -213,7 +211,6 @@ export default function ChatRoomCamera({
         setCapturedFacing(facing);
       }
     } catch (error) {
-      console.error('[ChatRoomCamera] Video recording error:', error);
     } finally {
       // STABILITY FIX: C-7 - Guard setState in finally block
       if (mountedRef.current) {
@@ -228,7 +225,6 @@ export default function ChatRoomCamera({
       setIsProcessing(true);
       await cameraRef.current.stopRecording();
     } catch (error) {
-      console.error('[ChatRoomCamera] Stop recording error:', error);
       // STABILITY FIX: C-7 - Guard setState after async operation
       if (mountedRef.current) {
         setIsRecording(false);

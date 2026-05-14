@@ -179,11 +179,11 @@ export default function PrivateTabsLayout() {
   // ═══════════════════════════════════════════════════════════════════════════
   const chatRoomUnreadDmCounts = useQuery(
     api.chatRooms.getUnreadDmCountsByRoom,
-    authUserId && !isDemoMode ? { authUserId } : 'skip'
+    authUserId && token && !isDemoMode ? { authUserId, sessionToken: token } : 'skip'
   );
   const chatRoomUnreadMentionCounts = useQuery(
     api.chatRooms.getUnreadMentionCount,
-    authUserId && !isDemoMode ? { authUserId } : 'skip'
+    authUserId && token && !isDemoMode ? { authUserId, sessionToken: token } : 'skip'
   );
   const chatRoomsBadgeCount = (chatRoomUnreadDmCounts?.totalUnread ?? 0) +
     (chatRoomUnreadMentionCounts?.totalUnread ?? 0);

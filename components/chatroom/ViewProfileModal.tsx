@@ -47,12 +47,6 @@ export default function ViewProfileModal({
   // Show "Read more" if bio exceeds ~3 lines (~120 chars)
   const needsReadMore = hasBio && bioText.length > 120;
 
-  console.log('CHATROOM_IDENTITY_CANONICAL_SURFACE_CHECK', {
-    surface: 'ViewProfileModal',
-    isCurrentUser,
-    bioSource: 'user.chatBio',
-    hasBio,
-  });
 
   return (
     <Modal

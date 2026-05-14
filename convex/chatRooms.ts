@@ -11,8 +11,7 @@ import {
   validateChatRoomMessageContent,
 } from './lib/chatRoomContentPolicy';
 import {
-  isChatRoomPrivateDmConversation,
-  isChatRoomPrivateDmExpired,
+  CHAT_ROOM_PRIVATE_DM_INACTIVITY_MS,
 } from './chatRoomDmRetention';
 import {
   isUserAdultForPrivateRooms,
@@ -54,6 +53,17 @@ const SEVERE_CHAT_ROOM_REPORT_REASONS = new Set<string>([
   'selling',
 ]);
 
+const ROOM_LIST_QUERY_LIMIT = 100;
+const PRIVATE_ROOM_LIST_QUERY_LIMIT = 200;
+const ROOM_MEMBER_LIST_LIMIT = 500;
+const ROOM_MEMBER_COUNT_RECOMPUTE_LIMIT = 5000;
+const ROOM_REPORT_LOOKUP_LIMIT = 500;
+const USER_SAFETY_LOOKUP_LIMIT = 1000;
+const USER_DM_THREAD_LOOKUP_LIMIT = 200;
+const JOIN_CODE_LOOKUP_WINDOW_MS = 5 * 60 * 1000;
+const JOIN_CODE_LOOKUP_MAX_ATTEMPTS = 12;
+const JOIN_CODE_GENERIC_ERROR = 'Unable to join with this code.';
+
 // Generate a random 6-character alphanumeric join code
 function generateJoinCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O/0, I/1 for clarity
@@ -62,6 +72,40 @@ function generateJoinCode(): string {
     code += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return code;
+}
+
+function normalizeJoinCode(value: string): string {
+  return value.toUpperCase().trim();
+}
+
+async function enforceJoinCodeLookupThrottle(
+  ctx: MutationCtx,
+  userId: Id<'users'>,
+  now = Date.now()
+): Promise<void> {
+  const windowStart = Math.floor(now / JOIN_CODE_LOOKUP_WINDOW_MS) * JOIN_CODE_LOOKUP_WINDOW_MS;
+  const existing = await ctx.db
+    .query('chatRoomJoinCodeLookups')
+    .withIndex('by_user_window', (q) => q.eq('userId', userId).eq('windowStart', windowStart))
+    .first();
+
+  if (existing) {
+    if (existing.attempts >= JOIN_CODE_LOOKUP_MAX_ATTEMPTS) {
+      throw new Error('Too many join-code attempts. Please wait before trying again.');
+    }
+    await ctx.db.patch(existing._id, {
+      attempts: existing.attempts + 1,
+      lastAttemptAt: now,
+    });
+    return;
+  }
+
+  await ctx.db.insert('chatRoomJoinCodeLookups', {
+    userId,
+    windowStart,
+    attempts: 1,
+    lastAttemptAt: now,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -94,8 +138,24 @@ export const generateUploadUrl = mutation({
 export const getStorageUrl = query({
   args: {
     storageId: v.id('_storage'),
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    authUserId: v.optional(v.string()),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { storageId }) => {
+  handler: async (ctx, { storageId, roomId, messageId, authUserId, sessionToken }) => {
+    await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
+    const message = await ctx.db.get(messageId);
+    if (!message || message.roomId !== roomId || message.deletedAt) {
+      throw new Error('Media not found');
+    }
+    const belongsToMessage =
+      message.imageStorageId === storageId ||
+      message.videoStorageId === storageId ||
+      message.audioStorageId === storageId;
+    if (!belongsToMessage) {
+      throw new Error('Media not found');
+    }
     const url = await ctx.storage.getUrl(storageId);
     return { url };
   },
@@ -131,12 +191,26 @@ import { api } from './_generated/api';
 async function recomputeMemberCount(
   ctx: MutationCtx,
   roomId: Id<'chatRooms'>
-): Promise<number> {
+): Promise<number | null> {
   const members = await ctx.db
     .query('chatRoomMembers')
     .withIndex('by_room', (q) => q.eq('roomId', roomId))
-    .collect();
+    .take(ROOM_MEMBER_COUNT_RECOMPUTE_LIMIT + 1);
+  if (members.length > ROOM_MEMBER_COUNT_RECOMPUTE_LIMIT) {
+    return null;
+  }
   return members.length;
+}
+
+async function patchMemberCountIfExact(
+  ctx: MutationCtx,
+  roomId: Id<'chatRooms'>
+): Promise<void> {
+  const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+  if (actualMemberCount === null) {
+    return;
+  }
+  await ctx.db.patch(roomId, { memberCount: actualMemberCount });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -437,7 +511,7 @@ async function cleanupChatRoomMessageRelations(
     const reactions = await ctx.db
       .query('chatRoomMessageReactions')
       .withIndex('by_room_message', (q) => q.eq('roomId', roomId).eq('messageId', messageId))
-      .collect();
+      .take(500);
 
     for (const reaction of reactions) {
       try {
@@ -454,7 +528,7 @@ async function cleanupChatRoomMessageRelations(
     const mentionNotifications = await ctx.db
       .query('chatRoomMentionNotifications')
       .withIndex('by_message', (q) => q.eq('messageId', messageId))
-      .collect();
+      .take(500);
 
     for (const notification of mentionNotifications) {
       try {
@@ -471,7 +545,7 @@ async function cleanupChatRoomMessageRelations(
     const mediaViews = await ctx.db
       .query('chatRoomMediaViews')
       .withIndex('by_message', (q) => q.eq('messageId', messageId))
-      .collect();
+      .take(500);
 
     for (const mediaView of mediaViews) {
       try {
@@ -485,29 +559,210 @@ async function cleanupChatRoomMessageRelations(
   }
 }
 
-type DemoArgs = {
-  isDemo?: boolean;
-  demoUserId?: string;
+type ChatRoomSessionAuthArgs = {
+  authUserId?: string;
+  sessionToken?: string;
 };
 
-async function resolveUserId(
+async function requireAuthenticatedUser(
   ctx: QueryCtx | MutationCtx,
-  args: DemoArgs & { authUserId?: string }
+  args: ChatRoomSessionAuthArgs
 ): Promise<Id<'users'>> {
-  // SECURITY FIX: Use app's custom session-based auth pattern
-  // Convex-native auth (ctx.auth.getUserIdentity) is not configured in this app
-  const authId = args.authUserId || args.demoUserId;
+  const sessionToken = args.sessionToken?.trim();
+  const claimedAuthUserId = args.authUserId?.trim();
 
-  if (!authId || authId.trim().length === 0) {
+  if (!sessionToken) {
     throw new Error('Unauthorized: authentication required');
   }
 
-  const userId = await resolveUserIdByAuthId(ctx, authId);
+  const userId = await validateSessionToken(ctx, sessionToken);
   if (!userId) {
-    throw new Error('Unauthorized: user not found');
+    throw new Error('Unauthorized: invalid session');
+  }
+
+  if (claimedAuthUserId) {
+    const claimedUserId = await resolveUserIdByAuthId(ctx, claimedAuthUserId);
+    if (!claimedUserId || claimedUserId !== userId) {
+      throw new Error('Unauthorized: session does not match user');
+    }
   }
 
   return userId;
+}
+
+async function getAuthenticatedUserOrNull(
+  ctx: QueryCtx | MutationCtx,
+  args: ChatRoomSessionAuthArgs
+): Promise<Id<'users'> | null> {
+  try {
+    return await requireAuthenticatedUser(ctx, args);
+  } catch {
+    return null;
+  }
+}
+
+function hasChatRoomPassword(room: Doc<'chatRooms'>): boolean {
+  return !!room.passwordHash || !!room.passwordEncrypted;
+}
+
+function sanitizeChatRoomForClient(
+  room: Doc<'chatRooms'>,
+  options: {
+    onlineCount?: number;
+    includeLastMessage?: boolean;
+    includeCreatedBy?: boolean;
+    includeJoinCode?: boolean;
+    role?: 'owner' | 'admin' | 'member';
+    isMember?: boolean;
+  } = {}
+) {
+  return {
+    _id: room._id,
+    name: room.name,
+    slug: room.slug,
+    category: room.category,
+    isPublic: room.isPublic,
+    discoverable: room.discoverable === true,
+    memberCount: room.memberCount,
+    onlineCount: options.onlineCount,
+    lastMessageAt: room.lastMessageAt,
+    ...(options.includeLastMessage ? { lastMessageText: room.lastMessageText } : {}),
+    createdAt: room.createdAt,
+    expiresAt: room.expiresAt,
+    ...(options.includeCreatedBy ? { createdBy: room.createdBy } : {}),
+    hasPassword: hasChatRoomPassword(room),
+    ...(options.includeJoinCode ? { joinCode: room.joinCode } : {}),
+    ...(options.role ? { role: options.role } : {}),
+    ...(options.isMember !== undefined ? { isMember: options.isMember } : {}),
+  };
+}
+
+type ChatRoomReadAccess = {
+  userId: Id<'users'>;
+  room: Doc<'chatRooms'>;
+  membership: Doc<'chatRoomMembers'> | null;
+};
+
+type ChatRoomSendAccess = {
+  userId: Id<'users'>;
+  room: Doc<'chatRooms'>;
+  membership: Doc<'chatRoomMembers'>;
+};
+
+async function readGuard(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>,
+  userId: Id<'users'>
+): Promise<ChatRoomReadAccess> {
+  const room = await ctx.db.get(roomId);
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  const now = Date.now();
+  if (room.expiresAt && room.expiresAt <= now) {
+    throw new Error('Room has expired');
+  }
+
+  if (!room.isPublic) {
+    await requirePrivateRoomAdult(ctx, userId);
+  }
+
+  const ban = await ctx.db
+    .query('chatRoomBans')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .first();
+  if (ban) {
+    throw new Error('Access denied: you are banned from this room');
+  }
+
+  const membership = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .first();
+  if (membership?.isBanned) {
+    throw new Error('Access denied: you are banned from this room');
+  }
+  if (!room.isPublic && !membership) {
+    throw new Error('Access denied: you must join this room first');
+  }
+
+  return { userId, room, membership };
+}
+
+async function requireRoomReadAccess(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>,
+  auth: ChatRoomSessionAuthArgs
+): Promise<ChatRoomReadAccess> {
+  const userId = await requireAuthenticatedUser(ctx, auth);
+  return readGuard(ctx, roomId, userId);
+}
+
+async function joinIfMissingPublic(
+  ctx: MutationCtx,
+  room: Doc<'chatRooms'>,
+  userId: Id<'users'>
+): Promise<Doc<'chatRoomMembers'>> {
+  if (!room.isPublic) {
+    throw new Error('Private rooms cannot be auto-joined');
+  }
+
+  const existing = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room_user', (q) => q.eq('roomId', room._id).eq('userId', userId))
+    .first();
+  if (existing) {
+    return existing;
+  }
+
+  const now = Date.now();
+  const membershipId = await ctx.db.insert('chatRoomMembers', {
+    roomId: room._id,
+    userId,
+    role: 'member',
+    joinedAt: now,
+  });
+
+  const rows = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room_user', (q) => q.eq('roomId', room._id).eq('userId', userId))
+    .take(10);
+  const sortedRows = rows.sort((a, b) => a._creationTime - b._creationTime);
+  const membership = sortedRows[0] ?? (await ctx.db.get(membershipId));
+  for (const duplicate of sortedRows.slice(1)) {
+    await ctx.db.delete(duplicate._id);
+  }
+
+  await patchMemberCountIfExact(ctx, room._id);
+
+  if (!membership) {
+    throw new Error('Failed to join public room');
+  }
+  return membership;
+}
+
+async function requireRoomSendAccess(
+  ctx: MutationCtx,
+  roomId: Id<'chatRooms'>,
+  auth: ChatRoomSessionAuthArgs
+): Promise<ChatRoomSendAccess> {
+  const access = await requireRoomReadAccess(ctx, roomId, auth);
+  let membership = access.membership;
+
+  if (!membership && access.room.isPublic) {
+    membership = await joinIfMissingPublic(ctx, access.room, access.userId);
+  }
+  if (!membership) {
+    throw new Error('Access denied: you must join this room first');
+  }
+
+  const penalty = await getActiveChatRoomReadOnlyPenalty(ctx, roomId, access.userId, Date.now());
+  if (penalty) {
+    throw new Error('You are restricted from sending messages in this room');
+  }
+
+  return { ...access, membership };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -547,6 +802,10 @@ function getRoleLevel(role: string | undefined | null): number {
   return ROLE_LEVEL[role as MemberRole] ?? ROLE_LEVEL.member;
 }
 
+function canModerate(role: string | undefined | null): boolean {
+  return getRoleLevel(role) >= ROLE_LEVEL.admin;
+}
+
 /**
  * Check if actor can kick target based on role hierarchy.
  * - Owners can kick anyone except themselves
@@ -558,7 +817,7 @@ function canKickUser(actorRole: string | undefined, targetRole: string | undefin
   const targetLevel = getRoleLevel(targetRole);
 
   // Must be at least admin to kick
-  if (actorLevel < ROLE_LEVEL.admin) return false;
+  if (!canModerate(actorRole)) return false;
 
   // Owner can kick anyone (except themselves, checked separately)
   if (actorLevel === ROLE_LEVEL.owner) return true;
@@ -656,36 +915,6 @@ function canDeleteInRoom(
   return canDeleteMessage(actorRole, messageOwnerRole, isOwnMessage);
 }
 
-/**
- * Requires authenticated user identity.
- * Uses the app's custom session-based auth pattern (resolveUserIdByAuthId).
- *
- * @param ctx - Convex query/mutation context
- * @param authUserId - Auth identifier from frontend (validated server-side)
- * @returns The resolved Convex userId
- * @throws Error if authUserId is invalid or user not found
- */
-async function requireAuthenticatedUser(
-  ctx: QueryCtx | MutationCtx,
-  authUserId: string | undefined
-): Promise<Id<'users'>> {
-  console.log('REQUIRE_AUTH_USER_START', { authUserId: authUserId?.slice(0, 20) });
-  if (!authUserId || authUserId.trim().length === 0) {
-    console.error('REQUIRE_AUTH_USER_FAIL', { reason: 'empty_authUserId' });
-    throw new Error('Unauthorized: authentication required');
-  }
-
-  // Use the app's standard auth resolution pattern
-  const userId = await resolveUserIdByAuthId(ctx, authUserId);
-  console.log('REQUIRE_AUTH_USER_RESOLVED', { authUserId: authUserId.slice(0, 20), resolvedUserId: userId?.slice?.(0, 20) ?? 'NULL' });
-  if (!userId) {
-    console.error('REQUIRE_AUTH_USER_FAIL', { reason: 'user_not_found', authUserId: authUserId.slice(0, 20) });
-    throw new Error(`Unauthorized: user not found for authId=${authUserId.slice(0, 12)}...`);
-  }
-
-  return userId;
-}
-
 /** D1: Block check for DM creation from chat rooms (same pattern as messages.ts). */
 async function isBlockedBidirectional(
   ctx: QueryCtx | MutationCtx,
@@ -717,11 +946,11 @@ async function getBidirectionalBlockedUserIds(
     ctx.db
       .query('blocks')
       .withIndex('by_blocker', (q) => q.eq('blockerId', viewerId))
-      .collect(),
+      .take(USER_SAFETY_LOOKUP_LIMIT),
     ctx.db
       .query('blocks')
       .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerId))
-      .collect(),
+      .take(USER_SAFETY_LOOKUP_LIMIT),
   ]);
 
   return new Set([
@@ -735,21 +964,53 @@ async function getRoomReportedUserHideAfterMap(
   reporterId: Id<'users'>,
   roomId: Id<'chatRooms'>
 ): Promise<Map<string, number>> {
-  const reports = await ctx.db
-    .query('reports')
-    .withIndex('by_reporter', (q) => q.eq('reporterId', reporterId))
-    .collect();
-
-  const roomIdStr = String(roomId);
   const hideAfterByUser = new Map<string, number>();
-  for (const report of reports) {
-    if (report.roomId !== roomIdStr) continue;
-    const reportedId = String(report.reportedUserId);
-    const previous = hideAfterByUser.get(reportedId);
-    if (previous === undefined || report.createdAt < previous) {
-      hideAfterByUser.set(reportedId, report.createdAt);
+  let cursor: ChatRoomReportScanCursor | null = null;
+
+  while (true) {
+    const scanCursor: ChatRoomReportScanCursor | null = cursor;
+    const reports: Doc<'chatRoomReports'>[] =
+      scanCursor === null
+        ? await ctx.db
+            .query('chatRoomReports')
+            .withIndex('by_room_reporter_created', (q) =>
+              q.eq('roomId', roomId).eq('reporterId', reporterId)
+            )
+            .take(ROOM_REPORT_LOOKUP_LIMIT)
+        : await ctx.db
+            .query('chatRoomReports')
+            .withIndex('by_room_reporter_created', (q) =>
+              q
+                .eq('roomId', roomId)
+                .eq('reporterId', reporterId)
+                .gte('createdAt', scanCursor.createdAt)
+            )
+            .filter((q) =>
+              q.or(
+                q.gt(q.field('createdAt'), scanCursor.createdAt),
+                q.and(
+                  q.eq(q.field('createdAt'), scanCursor.createdAt),
+                  q.gt(q.field('_creationTime'), scanCursor.creationTime)
+                )
+              )
+            )
+            .take(ROOM_REPORT_LOOKUP_LIMIT);
+
+    if (reports.length === 0) break;
+
+    for (const report of reports) {
+      const reportedId = String(report.reportedUserId);
+      const previous = hideAfterByUser.get(reportedId);
+      if (previous === undefined || report.createdAt < previous) {
+        hideAfterByUser.set(reportedId, report.createdAt);
+      }
     }
+
+    const lastReport = reports[reports.length - 1];
+    cursor = { createdAt: lastReport.createdAt, creationTime: lastReport._creationTime };
+    if (reports.length < ROOM_REPORT_LOOKUP_LIMIT) break;
   }
+
   return hideAfterByUser;
 }
 
@@ -757,23 +1018,23 @@ async function findRecentRoomUserReport(
   ctx: QueryCtx | MutationCtx,
   reporterId: Id<'users'>,
   reportedUserId: Id<'users'>,
-  roomId: string,
+  roomId: Id<'chatRooms'>,
   now: number
-): Promise<Doc<'reports'> | null> {
+): Promise<Doc<'chatRoomReports'> | null> {
   const cutoff = now - ROOM_REPORT_DEDUP_WINDOW_MS;
   const recentReports = await ctx.db
-    .query('reports')
-    .withIndex('by_reporter_reported_created', (q) =>
+    .query('chatRoomReports')
+    .withIndex('by_reporter_reported_room_created', (q) =>
       q
         .eq('reporterId', reporterId)
         .eq('reportedUserId', reportedUserId)
+        .eq('roomId', roomId)
         .gt('createdAt', cutoff)
     )
-    .collect();
+    .take(10);
 
   return (
     recentReports
-      .filter((report) => report.roomId === roomId)
       .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
   );
 }
@@ -783,54 +1044,87 @@ async function findRecentRoomContentReport(
   reporterId: Id<'users'>,
   messageId: string,
   now: number
-): Promise<Doc<'reports'> | null> {
+): Promise<Doc<'chatRoomReports'> | null> {
   const cutoff = now - ROOM_REPORT_DEDUP_WINDOW_MS;
-  const reports = await ctx.db
-    .query('reports')
-    .withIndex('by_message', (q) => q.eq('messageId', messageId))
-    .collect();
-
-  return (
-    reports
-      .filter(
-        (report) =>
-          String(report.reporterId) === String(reporterId) &&
-          report.reportType === 'content' &&
-          report.createdAt > cutoff
-      )
-      .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
-  );
+  return await ctx.db
+    .query('chatRoomReports')
+    .withIndex('by_message_reporter_type_created', (q) =>
+      q
+        .eq('messageId', messageId)
+        .eq('reporterId', reporterId)
+        .eq('reportType', 'content')
+        .gt('createdAt', cutoff)
+    )
+    .first();
 }
+
+type ChatRoomReportScanCursor = {
+  createdAt: number;
+  creationTime: number;
+};
 
 async function hasActiveSevereRoomReportBetweenUsers(
   ctx: QueryCtx | MutationCtx,
   userId1: Id<'users'>,
   userId2: Id<'users'>,
-  sourceRoomId: Id<'chatRooms'>,
+  roomId: Id<'chatRooms'>,
   now: number
 ): Promise<boolean> {
   const cutoff = now - SEVERE_ROOM_REPORT_DM_BLOCK_MS;
-  const roomIdStr = String(sourceRoomId);
+  const hasOneWayReport = async (
+    reporterId: Id<'users'>,
+    reportedUserId: Id<'users'>
+  ): Promise<boolean> => {
+    let cursor: ChatRoomReportScanCursor | null = null;
 
-  const [reports1, reports2] = await Promise.all([
-    ctx.db
-      .query('reports')
-      .withIndex('by_reporter_reported_created', (q) =>
-        q.eq('reporterId', userId1).eq('reportedUserId', userId2).gt('createdAt', cutoff)
-      )
-      .collect(),
-    ctx.db
-      .query('reports')
-      .withIndex('by_reporter_reported_created', (q) =>
-        q.eq('reporterId', userId2).eq('reportedUserId', userId1).gt('createdAt', cutoff)
-      )
-      .collect(),
-  ]);
+    while (true) {
+      const scanCursor: ChatRoomReportScanCursor | null = cursor;
+      const reports: Doc<'chatRoomReports'>[] =
+        scanCursor === null
+          ? await ctx.db
+              .query('chatRoomReports')
+              .withIndex('by_reporter_reported_room_created', (q) =>
+                q
+                  .eq('reporterId', reporterId)
+                  .eq('reportedUserId', reportedUserId)
+                  .eq('roomId', roomId)
+                  .gt('createdAt', cutoff)
+              )
+              .take(ROOM_REPORT_LOOKUP_LIMIT)
+          : await ctx.db
+              .query('chatRoomReports')
+              .withIndex('by_reporter_reported_room_created', (q) =>
+                q
+                  .eq('reporterId', reporterId)
+                  .eq('reportedUserId', reportedUserId)
+                  .eq('roomId', roomId)
+                  .gte('createdAt', scanCursor.createdAt)
+              )
+              .filter((q) =>
+                q.or(
+                  q.gt(q.field('createdAt'), scanCursor.createdAt),
+                  q.and(
+                    q.eq(q.field('createdAt'), scanCursor.createdAt),
+                    q.gt(q.field('_creationTime'), scanCursor.creationTime)
+                  )
+                )
+              )
+              .take(ROOM_REPORT_LOOKUP_LIMIT);
 
-  return [...reports1, ...reports2].some(
-    (report) =>
-      report.roomId === roomIdStr &&
-      SEVERE_CHAT_ROOM_REPORT_REASONS.has(String(report.reason))
+      if (reports.some((report) => SEVERE_CHAT_ROOM_REPORT_REASONS.has(String(report.reason)))) {
+        return true;
+      }
+      if (reports.length < ROOM_REPORT_LOOKUP_LIMIT) {
+        return false;
+      }
+      const lastReport = reports[reports.length - 1];
+      cursor = { createdAt: lastReport.createdAt, creationTime: lastReport._creationTime };
+    }
+  };
+
+  return (
+    (await hasOneWayReport(userId1, userId2)) ||
+    (await hasOneWayReport(userId2, userId1))
   );
 }
 
@@ -843,7 +1137,7 @@ async function getActiveChatRoomReadOnlyPenalty(
   const penalties = await ctx.db
     .query('chatRoomPenalties')
     .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-    .collect();
+    .take(20);
 
   return (
     penalties
@@ -899,45 +1193,77 @@ async function countQualifyingUniqueReporters(
 ): Promise<{
   uniqueReporterCount: number;
   weightedScore: number;
-  reportIds: Id<'reports'>[];
+  reportIds: Id<'chatRoomReports'>[];
 }> {
-  const roomIdString = String(roomId);
-  const reports = await ctx.db
-    .query('reports')
-    .withIndex('by_room', (q) => q.eq('roomId', roomIdString))
-    .collect();
-
   const qualifyingByReporter = new Map<
     string,
-    { reporterId: Id<'users'>; reportId: Id<'reports'> }
+    { reporterId: Id<'users'>; reportId: Id<'chatRoomReports'> }
   >();
+  let cursor: ChatRoomReportScanCursor | null = null;
 
-  for (const report of reports) {
-    if (report.reportedUserId !== reportedUserId) continue;
-    if (report.createdAt < windowStart) continue;
-    if (report.reporterId === reportedUserId) continue;
-    if (qualifyingByReporter.has(String(report.reporterId))) continue;
+  while (true) {
+    const scanCursor: ChatRoomReportScanCursor | null = cursor;
+    const reports: Doc<'chatRoomReports'>[] =
+      scanCursor === null
+        ? await ctx.db
+            .query('chatRoomReports')
+            .withIndex('by_room_reported_created', (q) =>
+              q
+                .eq('roomId', roomId)
+                .eq('reportedUserId', reportedUserId)
+                .gte('createdAt', windowStart)
+            )
+            .take(ROOM_REPORT_LOOKUP_LIMIT)
+        : await ctx.db
+            .query('chatRoomReports')
+            .withIndex('by_room_reported_created', (q) =>
+              q
+                .eq('roomId', roomId)
+                .eq('reportedUserId', reportedUserId)
+                .gte('createdAt', scanCursor.createdAt)
+            )
+            .filter((q) =>
+              q.or(
+                q.gt(q.field('createdAt'), scanCursor.createdAt),
+                q.and(
+                  q.eq(q.field('createdAt'), scanCursor.createdAt),
+                  q.gt(q.field('_creationTime'), scanCursor.creationTime)
+                )
+              )
+            )
+            .take(ROOM_REPORT_LOOKUP_LIMIT);
 
-    const reporterPenalty = await getActiveChatRoomReadOnlyPenalty(
-      ctx,
-      roomId,
-      report.reporterId,
-      now
-    );
-    if (reporterPenalty) continue;
+    if (reports.length === 0) break;
 
-    const hasPresenceProof = await reporterHasQualifyingChatRoomPresence(
-      ctx,
-      roomId,
-      report.reporterId,
-      report.createdAt
-    );
-    if (!hasPresenceProof) continue;
+    for (const report of reports) {
+      if (report.reporterId === reportedUserId) continue;
+      if (qualifyingByReporter.has(String(report.reporterId))) continue;
 
-    qualifyingByReporter.set(String(report.reporterId), {
-      reporterId: report.reporterId,
-      reportId: report._id,
-    });
+      const reporterPenalty = await getActiveChatRoomReadOnlyPenalty(
+        ctx,
+        roomId,
+        report.reporterId,
+        now
+      );
+      if (reporterPenalty) continue;
+
+      const hasPresenceProof = await reporterHasQualifyingChatRoomPresence(
+        ctx,
+        roomId,
+        report.reporterId,
+        report.createdAt
+      );
+      if (!hasPresenceProof) continue;
+
+      qualifyingByReporter.set(String(report.reporterId), {
+        reporterId: report.reporterId,
+        reportId: report._id,
+      });
+    }
+
+    if (reports.length < ROOM_REPORT_LOOKUP_LIMIT) break;
+    const lastReport = reports[reports.length - 1];
+    cursor = { createdAt: lastReport.createdAt, creationTime: lastReport._creationTime };
   }
 
   const qualifying = Array.from(qualifyingByReporter.values());
@@ -1024,7 +1350,7 @@ async function evaluateChatRoomAutoTimeoutAfterReport(
   ctx: MutationCtx,
   roomId: Id<'chatRooms'>,
   reportedUserId: Id<'users'>,
-  newReportId: Id<'reports'>,
+  newReportId: Id<'chatRoomReports'>,
   reason: string
 ): Promise<{
   actionApplied: boolean;
@@ -1097,27 +1423,6 @@ async function evaluateChatRoomAutoTimeoutAfterReport(
   };
 }
 
-/** Ensure a conversationParticipants row exists (repair path for getOrCreateDmThread). */
-async function upsertConversationParticipant(
-  ctx: MutationCtx,
-  conversationId: Id<'conversations'>,
-  uid: Id<'users'>
-): Promise<void> {
-  const existing = await ctx.db
-    .query('conversationParticipants')
-    .withIndex('by_user_conversation', (q) =>
-      q.eq('userId', uid).eq('conversationId', conversationId)
-    )
-    .first();
-  if (!existing) {
-    await ctx.db.insert('conversationParticipants', {
-      conversationId,
-      userId: uid,
-      unreadCount: 0,
-    });
-  }
-}
-
 function chatRoomPrivateDmPairKey(
   userId: Id<'users'>,
   peerUserId: Id<'users'>
@@ -1125,280 +1430,8 @@ function chatRoomPrivateDmPairKey(
   return [userId as string, peerUserId as string].sort().join(':');
 }
 
-function isExactParticipantPair(
-  conversation: Doc<'conversations'>,
-  pairKey: string
-): boolean {
-  if (conversation.participants.length !== 2) return false;
-  return conversation.participants.map((id) => id as string).sort().join(':') === pairKey;
-}
-
-function getChatRoomPrivateDmSortTime(conversation: Doc<'conversations'>): number {
-  const updatedAt = (conversation as { updatedAt?: number }).updatedAt;
-  return conversation.lastMessageAt ?? updatedAt ?? conversation.createdAt ?? conversation._creationTime;
-}
-
-function compareChatRoomPrivateDmByNewestActivity(
-  a: Doc<'conversations'>,
-  b: Doc<'conversations'>
-): number {
-  const activityDiff = getChatRoomPrivateDmSortTime(b) - getChatRoomPrivateDmSortTime(a);
-  if (activityDiff !== 0) return activityDiff;
-  return b._creationTime - a._creationTime;
-}
-
-async function findActiveChatRoomPrivateDmConversationsForPair(
-  ctx: QueryCtx | MutationCtx,
-  userId: Id<'users'>,
-  peerUserId: Id<'users'>,
-  now: number
-): Promise<Array<Doc<'conversations'>>> {
-  const pairKey = chatRoomPrivateDmPairKey(userId, peerUserId);
-  const participantRows = await ctx.db
-    .query('conversationParticipants')
-    .withIndex('by_user', (q) => q.eq('userId', userId))
-    .collect();
-
-  const seen = new Set<string>();
-  const conversations: Array<Doc<'conversations'>> = [];
-  for (const row of participantRows) {
-    const conversationId = row.conversationId as string;
-    if (seen.has(conversationId)) continue;
-    seen.add(conversationId);
-
-    const conversation = await ctx.db.get(row.conversationId);
-    if (!conversation) continue;
-    if (!isChatRoomPrivateDmConversation(conversation)) continue;
-    if (isChatRoomPrivateDmExpired(conversation, now)) continue;
-    if (!isExactParticipantPair(conversation, pairKey)) continue;
-    conversations.push(conversation);
-  }
-
-  return conversations.sort(compareChatRoomPrivateDmByNewestActivity);
-}
-
-async function deleteEmptyChatRoomPrivateDmConversationIfSafe(
-  ctx: MutationCtx,
-  conversation: Doc<'conversations'>
-): Promise<boolean> {
-  const message = await ctx.db
-    .query('messages')
-    .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversation._id))
-    .first();
-  if (message) {
-    return false;
-  }
-
-  const media = await ctx.db
-    .query('media')
-    .withIndex('by_chat', (q) => q.eq('chatId', conversation._id))
-    .first();
-  if (media) {
-    return false;
-  }
-
-  const securityEvent = await ctx.db
-    .query('securityEvents')
-    .withIndex('by_chat', (q) => q.eq('chatId', conversation._id))
-    .first();
-  if (securityEvent) {
-    return false;
-  }
-
-  const typingRows = await ctx.db
-    .query('typingStatus')
-    .withIndex('by_conversation', (q) => q.eq('conversationId', conversation._id))
-    .collect();
-  for (const typing of typingRows) {
-    await ctx.db.delete(typing._id);
-  }
-
-  for (const participantId of conversation.participants) {
-    const hidden = await ctx.db
-      .query('chatRoomHiddenDmConversations')
-      .withIndex('by_user_conversation', (q) =>
-        q.eq('userId', participantId).eq('conversationId', conversation._id)
-      )
-      .first();
-    if (hidden) {
-      await ctx.db.delete(hidden._id);
-    }
-  }
-
-  const participantRows = await ctx.db
-    .query('conversationParticipants')
-    .withIndex('by_conversation', (q) => q.eq('conversationId', conversation._id))
-    .collect();
-  for (const participant of participantRows) {
-    await ctx.db.delete(participant._id);
-  }
-
-  await ctx.db.delete(conversation._id);
-  return true;
-}
-
-async function cleanupDuplicateActiveChatRoomPrivateDmsForPair(
-  ctx: MutationCtx,
-  userId: Id<'users'>,
-  peerUserId: Id<'users'>,
-  now: number
-): Promise<Id<'conversations'> | null> {
-  const activeConversations = await findActiveChatRoomPrivateDmConversationsForPair(
-    ctx,
-    userId,
-    peerUserId,
-    now
-  );
-  const [keep, ...duplicates] = activeConversations;
-  if (!keep) return null;
-
-  // Keep the newest active row so the canonical conversation matches the
-  // inbox card users already see. Only empty duplicates are deleted here.
-  for (const duplicate of duplicates) {
-    await deleteEmptyChatRoomPrivateDmConversationIfSafe(ctx, duplicate);
-  }
-
-  return keep._id;
-}
-
-/**
- * Requires valid room membership for READ access.
- *
- * Checks (in order):
- * 1. Authenticated user (via resolveUserIdByAuthId)
- * 2. Room exists
- * 3. Room not expired
- * 4. User is NOT banned (chatRoomBans)
- * 5. User IS a current member (chatRoomMembers)
- *
- * Does NOT check penalties - penalties only block sending, not reading.
- *
- * @param ctx - Convex query/mutation context
- * @param roomId - Room to check access for
- * @param authUserId - Auth identifier from frontend (validated server-side)
- * @returns { userId, room, membership } if authorized
- * @throws Error if not authorized
- */
-async function requireRoomReadAccess(
-  ctx: QueryCtx | MutationCtx,
-  roomId: Id<'chatRooms'>,
-  authUserId: string | undefined
-): Promise<{ userId: Id<'users'>; room: any; membership: any }> {
-  // 1. Require authenticated user (uses resolveUserIdByAuthId)
-  const userId = await requireAuthenticatedUser(ctx, authUserId);
-
-  // 2. Check room exists
-  const room = await ctx.db.get(roomId);
-  if (!room) {
-    throw new Error('Room not found');
-  }
-
-  // 3. Check room is not expired
-  const now = Date.now();
-  if (room.expiresAt && room.expiresAt <= now) {
-    throw new Error('Room has expired');
-  }
-
-  if (!room.isPublic) {
-    await requirePrivateRoomAdult(ctx, userId);
-  }
-
-  // 4. Check user is not banned from this room
-  const ban = await ctx.db
-    .query('chatRoomBans')
-    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-    .first();
-  if (ban) {
-    throw new Error('Access denied: you are banned from this room');
-  }
-
-  // 5. Check user has active membership
-  let membership = await ctx.db
-    .query('chatRoomMembers')
-    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-    .first();
-
-  // PUBLIC-ROOM-FIX: For public rooms, auto-create membership if not exists
-  // This ensures consistent behavior between checkRoomAccess (which returns 'member' for public rooms)
-  // and requireRoomReadAccess (which requires membership record)
-  if (!membership && room.isPublic) {
-    console.log('PUBLIC_ROOM_AUTO_JOIN', { roomId, userId: userId.slice(0, 12) });
-    // Create membership for public room
-    const membershipId = await (ctx as MutationCtx).db.insert('chatRoomMembers', {
-      roomId,
-      userId,
-      role: 'member',
-      joinedAt: Date.now(),
-    });
-    membership = await ctx.db.get(membershipId);
-    // P2-21: Recompute from the source of truth instead of a stale read-modify-write
-    // increment. Two parallel first-read auto-joins would otherwise both read the
-    // same `room.memberCount` and each +1 it, losing one membership from the count.
-    const actualMemberCount = await recomputeMemberCount(
-      ctx as MutationCtx,
-      roomId
-    );
-    await (ctx as MutationCtx).db.patch(roomId, {
-      memberCount: actualMemberCount,
-    });
-  }
-
-  if (!membership) {
-    throw new Error('Access denied: you must join this room first');
-  }
-
-  return { userId, room, membership };
-}
-
-/**
- * Requires valid room membership for SEND access.
- *
- * Checks:
- * 1. All of requireRoomReadAccess
- * 2. User has no active send-blocking penalty (readOnly, muted, send_blocked)
- *
- * @param ctx - Convex query/mutation context
- * @param roomId - Room to check access for
- * @param authUserId - Auth identifier from frontend (validated server-side)
- * @returns { userId, room, membership } if authorized
- * @throws Error if not authorized
- */
-async function requireRoomSendAccess(
-  ctx: QueryCtx | MutationCtx,
-  roomId: Id<'chatRooms'>,
-  authUserId: string | undefined
-): Promise<{ userId: Id<'users'>; room: any; membership: any }> {
-  // 1. Check read access first (auth, room exists, not expired, not banned, is member)
-  const { userId, room, membership } = await requireRoomReadAccess(ctx, roomId, authUserId);
-
-  // 2. Check user has no active send-blocking penalty
-  const now = Date.now();
-  const penalty = await getActiveChatRoomReadOnlyPenalty(ctx, roomId, userId, now);
-  if (penalty) {
-    throw new Error('You are restricted from sending messages in this room');
-  }
-
-  return { userId, room, membership };
-}
-
-// Query to get effective userId (for client-side owner detection)
-export const getEffectiveUserId = query({
-  args: {
-    isDemo: v.optional(v.boolean()),
-    demoUserId: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    try {
-      const userId = await resolveUserId(ctx, args);
-      return { userId };
-    } catch {
-      return { userId: null };
-    }
-  },
-});
-
 // Idempotent: ensures all default rooms exist
-export const ensureDefaultRooms = mutation({
+export const ensureDefaultRooms = internalMutation({
   args: {},
   handler: async (ctx) => {
     for (const room of DEFAULT_ROOMS) {
@@ -1443,31 +1476,37 @@ export const seedDefaultRoomsInternal = internalMutation({
         seededCount++;
       }
     }
-    if (process.env.NODE_ENV === 'development') {
-      console.log('[CHAT_ROOMS] Auto-seed completed:', { seededCount, total: DEFAULT_ROOMS.length });
-    }
     return { seededCount };
   },
 });
 
 // List rooms, optionally filtered by category, sorted by most recent activity
 // Phase-2: Filters out expired rooms (expiresAt < now)
-// Note: Returns empty array if no rooms exist - UI handles with FALLBACK_PUBLIC_ROOMS
-// To seed rooms: run `npx convex run chatRooms:ensureDefaultRooms` or use seedDefaultRoomsInternal cron
+// Note: Returns empty array if no rooms exist; production clients never seed rooms.
+// To seed rooms: use an internal/admin workflow that invokes seedDefaultRoomsInternal.
 export const listRooms = query({
   args: {
     category: v.optional(v.union(v.literal('language'), v.literal('general'))),
+    authUserId: v.optional(v.string()),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { category }) => {
+  handler: async (ctx, { category, authUserId, sessionToken }) => {
+    const viewerId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
+    if (!viewerId) {
+      return [];
+    }
     const now = Date.now();
     let rooms;
     if (category) {
       rooms = await ctx.db
         .query('chatRooms')
         .withIndex('by_category', (q) => q.eq('category', category))
-        .collect();
+        .take(ROOM_LIST_QUERY_LIMIT);
     } else {
-      rooms = await ctx.db.query('chatRooms').collect();
+      rooms = await ctx.db
+        .query('chatRooms')
+        .withIndex('by_public', (q) => q.eq('isPublic', true))
+        .take(ROOM_LIST_QUERY_LIMIT);
     }
     // Phase-2: Filter out expired rooms
     rooms = rooms.filter((r) => !r.expiresAt || r.expiresAt > now);
@@ -1493,8 +1532,10 @@ export const listRooms = query({
           )
           .take(ONLINE_CAP);
         return {
-          ...room,
-          onlineCount: recent.length,
+          ...sanitizeChatRoomForClient(room, {
+            onlineCount: recent.length,
+            includeLastMessage: true,
+          }),
         };
       })
     );
@@ -1516,8 +1557,9 @@ export const getRoomBySlug = query({
   args: {
     slug: v.string(),
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { slug, authUserId }) => {
+  handler: async (ctx, { slug, authUserId, sessionToken }) => {
     const room = await ctx.db
       .query('chatRooms')
       .withIndex('by_slug', (q) => q.eq('slug', slug))
@@ -1532,21 +1574,16 @@ export const getRoomBySlug = query({
 
     // For public rooms, return minimal public info without auth
     if (room.isPublic) {
-      return {
-        _id: room._id,
-        name: room.name,
-        slug: room.slug,
-        category: room.category,
-        isPublic: room.isPublic,
-        memberCount: room.memberCount,
-        lastMessageAt: room.lastMessageAt,
-      };
+      return sanitizeChatRoomForClient(room);
     }
 
     // For private rooms, require read access (authUserId required)
     try {
-      await requireRoomReadAccess(ctx, room._id, authUserId);
-      return room;
+      await requireRoomReadAccess(ctx, room._id, { authUserId, sessionToken });
+      return sanitizeChatRoomForClient(room, {
+        includeLastMessage: true,
+        includeCreatedBy: true,
+      });
     } catch {
       // User doesn't have access to this private room
       return null;
@@ -1567,11 +1604,11 @@ export const getRoom = query({
   args: {
     roomId: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
   handler: async (ctx, args) => {
-    console.log('GET ROOM HIT', args);
     try {
-      const { roomId: roomIdRaw, authUserId } = args;
+      const { roomId: roomIdRaw, authUserId, sessionToken } = args;
 
       if (
         authUserId === undefined ||
@@ -1579,7 +1616,6 @@ export const getRoom = query({
         typeof authUserId !== 'string' ||
         authUserId.trim().length === 0
       ) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
@@ -1589,54 +1625,42 @@ export const getRoom = query({
         typeof roomIdRaw !== 'string' ||
         roomIdRaw.trim().length === 0
       ) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
       const roomId = roomIdRaw.trim() as Id<'chatRooms'>;
 
-      let userId: Id<'users'> | null = null;
-      try {
-        userId = await resolveUserIdByAuthId(ctx, authUserId);
-      } catch (err) {
-        console.log('GET ROOM ERROR', err);
-        console.log('GET ROOM RESULT', null);
-        return null;
-      }
+      const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
       if (!userId) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
       let room: Doc<'chatRooms'> | null = null;
       try {
         room = await ctx.db.get(roomId);
-      } catch (err) {
-        console.log('GET ROOM ERROR', err);
-        console.log('GET ROOM RESULT', null);
+      } catch {
         return null;
       }
       if (!room) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
       const now = Date.now();
       const expiresAt = room.expiresAt;
       if (typeof expiresAt === 'number' && expiresAt <= now) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
       const isPublic = room.isPublic === true;
       if (isPublic) {
-        console.log('GET ROOM RESULT', room._id);
-        return room;
+        return sanitizeChatRoomForClient(room, {
+          includeLastMessage: true,
+          includeCreatedBy: true,
+        });
       }
 
       const viewer = await ctx.db.get(userId);
       if (!isUserAdultForPrivateRooms(viewer)) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
@@ -1646,13 +1670,10 @@ export const getRoom = query({
           .query('chatRoomBans')
           .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
           .first();
-      } catch (err) {
-        console.log('GET ROOM ERROR', err);
-        console.log('GET ROOM RESULT', null);
+      } catch {
         return null;
       }
       if (ban) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
@@ -1662,22 +1683,21 @@ export const getRoom = query({
           .query('chatRoomMembers')
           .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
           .first();
-      } catch (err) {
-        console.log('GET ROOM ERROR', err);
-        console.log('GET ROOM RESULT', null);
+      } catch {
         return null;
       }
       if (!membership) {
-        console.log('GET ROOM RESULT', null);
         return null;
       }
 
-      console.log('GET ROOM RESULT', room._id);
-      return room;
-    } catch (err) {
-      console.error('getRoom crash', err);
-      console.log('GET ROOM ERROR', err);
-      console.log('GET ROOM RESULT', null);
+      return sanitizeChatRoomForClient(room, {
+        includeLastMessage: true,
+        includeCreatedBy: true,
+        includeJoinCode: membership.role === 'owner' || membership.role === 'admin',
+        role: membership.role,
+        isMember: true,
+      });
+    } catch {
       return null;
     }
   },
@@ -1690,6 +1710,7 @@ export const listMessages = query({
   args: {
     roomId: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
     limit: v.number(),
     // P2-2: Optional stable cursor for loading older messages.
     // Pair (createdAt, _creationTime) — `_creationTime` is guaranteed
@@ -1708,10 +1729,7 @@ export const listMessages = query({
       hasMore: false,
       nextCursor: null as { createdAt: number; creationTime: number } | null,
     };
-    console.log('LIST_MESSAGES HIT', args);
-    console.log('LIST_MESSAGES STEP 1');
-
-    const { roomId: roomIdRaw, authUserId, limit, cursor } = args;
+    const { roomId: roomIdRaw, authUserId, sessionToken, limit, cursor } = args;
 
     if (!roomIdRaw || typeof roomIdRaw !== 'string') {
       return empty;
@@ -1722,24 +1740,15 @@ export const listMessages = query({
 
     const roomId = roomIdRaw.trim() as Id<'chatRooms'>;
 
-    console.log('LIST_MESSAGES STEP 2');
-    let userId: Id<'users'> | null = null;
-    try {
-      userId = await resolveUserIdByAuthId(ctx, authUserId);
-    } catch (err) {
-      console.error('LIST_MESSAGES FAIL AT AUTH_USER_RESOLUTION', err);
-      return empty;
-    }
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return empty;
     }
 
-    console.log('LIST_MESSAGES STEP 3');
     let room: Doc<'chatRooms'> | null = null;
     try {
       room = await ctx.db.get(roomId);
-    } catch (err) {
-      console.error('LIST_MESSAGES FAIL AT ROOM_LOOKUP', err);
+    } catch {
       return empty;
     }
     if (!room) {
@@ -1751,16 +1760,14 @@ export const listMessages = query({
       if (room.expiresAt && room.expiresAt <= now) {
         return empty;
       }
-    } catch (err) {
-      console.error('LIST_MESSAGES FAIL AT EXPIRY_CHECK', err);
+    } catch {
       return empty;
     }
 
     if (!room.isPublic) {
       try {
         await requirePrivateRoomAdult(ctx, userId);
-      } catch (err) {
-        console.error('LIST_MESSAGES FAIL AT_PRIVATE_ROOM_AGE_CHECK', err);
+      } catch {
         return empty;
       }
 
@@ -1770,8 +1777,7 @@ export const listMessages = query({
           .query('chatRoomBans')
           .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
           .first();
-      } catch (err) {
-        console.error('LIST_MESSAGES FAIL AT BAN_QUERY', err);
+      } catch {
         return empty;
       }
       if (ban) {
@@ -1784,8 +1790,7 @@ export const listMessages = query({
           .query('chatRoomMembers')
           .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
           .first();
-      } catch (err) {
-        console.error('LIST_MESSAGES FAIL AT MEMBERSHIP_QUERY', err);
+      } catch {
         return empty;
       }
       if (!membership) {
@@ -1800,8 +1805,7 @@ export const listMessages = query({
         getBidirectionalBlockedUserIds(ctx, userId),
         getRoomReportedUserHideAfterMap(ctx, userId, roomId),
       ]);
-    } catch (err) {
-      console.error('LIST_MESSAGES FAIL AT SAFETY_FILTER_LOOKUP', err);
+    } catch {
       return empty;
     }
 
@@ -1851,8 +1855,7 @@ export const listMessages = query({
       });
 
       messages = await q.order('desc').take(limit + 1);
-    } catch (err) {
-      console.error('LIST_MESSAGES FAIL AT MESSAGES_QUERY', err);
+    } catch {
       return empty;
     }
 
@@ -1873,8 +1876,7 @@ export const listMessages = query({
         }
         return true;
       });
-    } catch (err) {
-      console.error('LIST_MESSAGES FAIL AT RESULT_SHAPING', err);
+    } catch {
       return empty;
     }
 
@@ -1961,8 +1963,7 @@ export const listMessages = query({
         hasMore,
         nextCursor,
       };
-    } catch (err) {
-      console.error('LIST_MESSAGES FAIL AT SENDER_IDENTITY_ENRICH', err);
+    } catch {
       return empty;
     }
   },
@@ -1978,10 +1979,11 @@ export const listMembers = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId, authUserId);
+    await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
 
     return await ctx.db
       .query('chatRoomMembers')
@@ -2017,20 +2019,17 @@ export const listMembersWithProfiles = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    console.log('LIST_MEMBERS_HIT', { roomId, authUserId: authUserId?.slice?.(0, 20) });
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     // SAFE-QUERY FIX: Return empty array instead of throwing to prevent UI crashes
     // Access check: auth + membership + not banned
     try {
       if (!authUserId || authUserId.trim().length === 0) {
-        console.log('LIST_MEMBERS_FAIL', { reason: 'empty_authUserId' });
         return [];
       }
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
-      console.log('LIST_MEMBERS_RESOLVED', { authUserId: authUserId.slice(0, 20), resolvedUserId: userId?.slice?.(0, 20) ?? 'NULL' });
+      const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
       if (!userId) {
-        console.log('LIST_MEMBERS_FAIL', { reason: 'user_not_found' });
         return [];
       }
       const room = await ctx.db.get(roomId);
@@ -2099,15 +2098,6 @@ export const listMembersWithProfiles = query({
         const dobAge = calculateAgeFromDob(user?.dateOfBirth);
         const finalAge = dobAge;
 
-        // CHATROOM_MEMBER_AGE_BACKEND: Log age data sources
-        console.log('CHATROOM_MEMBER_AGE_BACKEND', {
-          memberId: String(member.userId).slice(0, 12),
-          userDob: user?.dateOfBirth,
-          dobAge,
-          finalAge,
-          gender: user?.gender ?? '',
-        });
-
         return {
           id: member.userId,
           // Chat Rooms identity (canonical)
@@ -2128,9 +2118,6 @@ export const listMembersWithProfiles = query({
 
     // PRESENCE-FILTER FIX: Remove null entries (members older than 3 hours)
     const filtered = membersWithProfiles.filter((m): m is NonNullable<typeof m> => m !== null);
-
-    // PRIVATE-ROOM-ACCESS-FIX: Instrumentation for member list count
-    console.log('CHATROOM_MEMBER_LIST_COUNT', { roomId, count: filtered.length });
 
     return filtered;
   },
@@ -2157,16 +2144,10 @@ export const joinRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(), // CR-010: Auth verification required
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // CR-010 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // CR-010 FIX: Check if user is banned from this room BEFORE allowing join
     const ban = await ctx.db
@@ -2181,22 +2162,23 @@ export const joinRoom = mutation({
     if (!room) {
       throw new Error('Room not found');
     }
+
+    const existing = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (existing) return existing._id;
+
     if (!room.isPublic) {
       await requireChatRoomTermsAccepted(ctx, userId);
       await requirePrivateRoomAdult(ctx, userId);
+      throw new Error('Use password or invite flow to join this private room.');
     }
 
     const now = Date.now();
 
     // MEMBER-STRIP FIX: Always update lastActive so user appears online in room
     await ctx.db.patch(userId, { lastActive: now });
-
-    // Check if already a member (idempotent)
-    const existing = await ctx.db
-      .query('chatRoomMembers')
-      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-      .first();
-    if (existing) return existing._id;
 
     const memberId = await ctx.db.insert('chatRoomMembers', {
       roomId,
@@ -2206,36 +2188,27 @@ export const joinRoom = mutation({
     });
 
     // CONSISTENCY FIX B6: Recompute memberCount from source of truth
-    const actualMemberCount = await recomputeMemberCount(ctx, roomId);
-    await ctx.db.patch(roomId, { memberCount: actualMemberCount });
+    await patchMemberCountIfExact(ctx, roomId);
 
     return memberId;
   },
 });
 
-// Leave a room
-// Safety: Deletes ALL matching membership rows (handles duplicates) and is fully idempotent
+// Leave a room session.
+// Public rooms remove membership; private rooms exit presence only and keep membership for re-entry.
 // CR-011 FIX: Auth hardening - verify caller can only leave for themselves
 export const leaveRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(), // CR-011: Auth verification required
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // CR-011 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // Check room type for different leave behaviors
     const room = await ctx.db.get(roomId);
     if (!room) {
-      // Room was ended/deleted - nothing to update, return safely
-      console.log('PRIVATE_ROOM_LEAVE_SUCCESS', { roomId, userId: userId.slice(0, 12), note: 'room_already_deleted' });
       return;
     }
 
@@ -2246,35 +2219,13 @@ export const leaveRoom = mutation({
     const presenceRows = await ctx.db
       .query('chatRoomPresence')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-      .collect();
+      .take(10);
     for (const row of presenceRows) {
       await ctx.db.delete(row._id);
     }
-    console.log('CHATROOM_BACKEND_LEAVE_DELETE', {
-      roomId,
-      userId: String(userId).slice(0, 12),
-      deletedRows: presenceRows.length,
-    });
-    console.log('CHATROOM_BACKEND_PRESENCE_ROWS', {
-      roomId,
-      userId: String(userId).slice(0, 12),
-      remainingRowsInRoom: (await ctx.db.query('chatRoomPresence').withIndex('by_room', (q) => q.eq('roomId', roomId)).collect()).length,
-    });
 
     if (isPrivate) {
-      console.log('PRIVATE_ROOM_LEAVE_TRIGGERED', { roomId, userId: userId.slice(0, 12) });
-
-      // PRIVATE-ROOM-MEMBERSHIP-FIX: For private rooms, do NOT delete membership
-      // "Leave Room" only exits the UI/presence, membership persists for re-entry without password
-      // The membership record stays so isMember remains true for approved users
-      // Presence system handles "currently in room" vs "left room" state
-
-      // Just log success - no membership deletion for private rooms
-      console.log('PRIVATE_ROOM_LEAVE_SUCCESS', {
-        roomId,
-        userId: userId.slice(0, 12),
-        note: 'membership_preserved_for_reentry',
-      });
+      // Private "leave" exits presence only; membership remains for password-less re-entry.
       return;
     }
 
@@ -2282,15 +2233,14 @@ export const leaveRoom = mutation({
     const memberships = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-      .collect();
+      .take(10);
 
     for (const membership of memberships) {
       await ctx.db.delete(membership._id);
     }
 
     // CONSISTENCY FIX B6: Always recompute memberCount from source of truth
-    const actualMemberCount = await recomputeMemberCount(ctx, roomId);
-    await ctx.db.patch(roomId, { memberCount: actualMemberCount });
+    await patchMemberCountIfExact(ctx, roomId);
   },
 });
 
@@ -2302,6 +2252,7 @@ export const sendMessage = mutation({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
     // SEND-FIX: senderId is now optional - we use resolved userId from authUserId
     // Frontend was passing authUserId as senderId which caused mismatch
     senderId: v.optional(v.id('users')),
@@ -2330,6 +2281,7 @@ export const sendMessage = mutation({
     {
       roomId,
       authUserId,
+      sessionToken,
       senderId: _senderIdLegacy, // SEND-FIX: Ignored - use resolved userId instead
       text,
       imageUrl,
@@ -2342,19 +2294,16 @@ export const sendMessage = mutation({
       mentions,
     }
   ) => {
-    console.log('SEND_MESSAGE HIT', { roomId, authUserId, text: text?.slice(0, 50) });
-
     // 0. SECURITY: Require send access (auth + membership + not banned + no send-blocking penalty)
     let userId: Id<'users'>;
     let room: any;
     let membership: any;
     try {
-      const access = await requireRoomSendAccess(ctx, roomId, authUserId);
+      const access = await requireRoomSendAccess(ctx, roomId, { authUserId, sessionToken });
       userId = access.userId;
       room = access.room;
       membership = access.membership;
     } catch (err: any) {
-      console.error('SEND_MESSAGE FAIL AT ACCESS_CHECK', err?.message, { roomId, authUserId });
       throw err;
     }
 
@@ -2600,10 +2549,6 @@ export const sendMessage = mutation({
 
     // Wallet rewards are ledger-backed and based on genuine engagement.
     // Random public room messages no longer earn coins.
-    if (!room.isPublic) {
-      console.log('PRIVATE_ROOM_NO_COIN_DEBIT_ON_MESSAGE', { roomId, senderId: senderId.slice(0, 12), isPublic: room.isPublic });
-    }
-
     // 8. DETERMINISTIC RETENTION: Delete exactly (newCount - 900) oldest when >= 1000
     // Uses room.messageCount as primary counter for efficiency
     const newCount = (room.messageCount ?? 0) + 1;
@@ -2614,11 +2559,6 @@ export const sendMessage = mutation({
     } else {
       // At or above 1000: delete exactly (newCount - 900) oldest messages
       const deleteCount = newCount - TARGET_AFTER_TRIM;
-
-      // DEV logging for retention verification
-      if (process.env.NODE_ENV === 'development') {
-        console.log('[RETENTION]', { roomId, newCount, deleteCount, targetFinal: TARGET_AFTER_TRIM });
-      }
 
       // Fetch oldest messages to delete (fetch extra to handle edge case where new msg is oldest)
       const oldestMessages = await ctx.db
@@ -2649,11 +2589,6 @@ export const sendMessage = mutation({
     // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
     await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
 
-    // Instrumentation for private room message send (no coin effect)
-    if (!room.isPublic) {
-      console.log('PRIVATE_ROOM_MESSAGE_SEND', { roomId, messageId, senderId: senderId.slice(0, 12), coinEffect: 'none' });
-    }
-
     return messageId;
   },
 });
@@ -2663,9 +2598,10 @@ export const openChatRoomVisualMedia = mutation({
     roomId: v.id('chatRooms'),
     messageId: v.id('chatRoomMessages'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, messageId, authUserId }) => {
-    const { userId } = await requireRoomReadAccess(ctx, roomId, authUserId);
+  handler: async (ctx, { roomId, messageId, authUserId, sessionToken }) => {
+    const { userId } = await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
 
     const message = await ctx.db.get(messageId);
     if (!message || message.roomId !== roomId || !isChatRoomVisualMediaType(message.type)) {
@@ -2734,13 +2670,11 @@ export const deleteMessage = mutation({
     roomId: v.id('chatRooms'),
     messageId: v.id('chatRoomMessages'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, messageId, authUserId }) => {
+  handler: async (ctx, { roomId, messageId, authUserId, sessionToken }) => {
     // 1. Verify auth
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // 2. Get the message
     const message = await ctx.db.get(messageId);
@@ -2872,29 +2806,29 @@ export const createPrivateRoom = mutation({
     name: v.string(),
     password: v.optional(v.string()),
     authUserId: v.string(),
+    sessionToken: v.string(),
     isDemo: v.optional(v.boolean()),
     demoUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { name, password, authUserId, isDemo, demoUserId }) => {
-    console.log('CREATE_PRIVATE_ROOM_START', { name, authUserId: authUserId?.slice(0, 20), isDemo, demoUserId: demoUserId?.slice(0, 20) });
+  handler: async (ctx, { name, password, authUserId, sessionToken, isDemo, demoUserId }) => {
+    // 1. Auth guard - session token is the source of truth for room ownership.
+    const sessionAuth = { authUserId, sessionToken };
+    const createdBy = await requireAuthenticatedUser(ctx, sessionAuth);
 
-    // 1. Auth guard - use app's custom session-based auth
-    const authId = authUserId || demoUserId;
-    if (!authId || authId.trim().length === 0) {
-      console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'no_auth_id' });
-      throw new Error('Unauthorized: authentication required');
+    const creator = await ctx.db.get(createdBy);
+    if (!creator) {
+      throw new Error('User not found');
     }
 
-    console.log('CREATE_PRIVATE_ROOM_RESOLVING_USER', { authId: authId.slice(0, 20) });
-    const createdBy = await resolveUserIdByAuthId(ctx, authId);
-    if (!createdBy) {
-      console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'user_not_found', authId: authId.slice(0, 20) });
-      throw new Error('Unauthorized: user not found');
+    if (isDemo === true && demoUserId) {
+      const demoResolved = await resolveUserIdByAuthId(ctx, demoUserId);
+      if (demoResolved !== createdBy) {
+        throw new Error('Unauthorized: demo session mismatch');
+      }
     }
-    console.log('CREATE_PRIVATE_ROOM_USER_RESOLVED', { createdBy: createdBy.slice(0, 12) });
 
     // Check if demo user (for coin bypass)
-    const isDemoUser = isDemo === true && !!demoUserId;
+    const isDemoUser = isDemo === true && creator.isDemo === true;
     if (!isDemoUser) {
       await requireChatRoomTermsAccepted(ctx, createdBy);
       await requirePrivateRoomAdult(ctx, createdBy);
@@ -2903,20 +2837,10 @@ export const createPrivateRoom = mutation({
     // 2. Check wallet balance (skip for demo users)
     let currentCoins = 0;
     if (!isDemoUser) {
-      console.log('CREATE_PRIVATE_ROOM_COIN_CHECK', { isDemoUser, createdBy: createdBy.slice(0, 12) });
-      const user = await ctx.db.get(createdBy);
-      if (!user) {
-        console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'user_lookup_failed', createdBy: createdBy.slice(0, 12) });
-        throw new Error('User not found');
-      }
-      currentCoins = user.walletCoins ?? 0;
-      console.log('CREATE_PRIVATE_ROOM_COINS', { currentCoins });
+      currentCoins = creator.walletCoins ?? 0;
       if (currentCoins < 1) {
-        console.log('CREATE_PRIVATE_ROOM_FAIL', { reason: 'insufficient_coins', currentCoins });
         throw new Error('Insufficient coins. You need at least 1 coin to create a private room.');
       }
-    } else {
-      console.log('CREATE_PRIVATE_ROOM_DEMO_USER_SKIP_COINS', { isDemoUser });
     }
 
     // 4. Generate unique join code (max 10 retries)
@@ -2963,6 +2887,7 @@ export const createPrivateRoom = mutation({
       slug: finalSlug,
       category: 'general',
       isPublic: false,
+      discoverable: true,
       createdAt: now,
       memberCount: 1,
       createdBy,
@@ -2982,7 +2907,6 @@ export const createPrivateRoom = mutation({
 
     // 9. Deduct 1 coin AFTER successful room creation (skip for demo users)
     if (!isDemoUser) {
-      console.log('PRIVATE_ROOM_COIN_DEBIT_ON_CREATE', { roomId, userId: createdBy.slice(0, 12), previousCoins: currentCoins, newCoins: currentCoins - 1 });
       await ctx.db.patch(createdBy, {
         walletCoins: currentCoins - 1,
       });
@@ -2992,7 +2916,6 @@ export const createPrivateRoom = mutation({
     const expiresAt = now + ROOM_LIFETIME_MS;
     await ctx.scheduler.runAt(expiresAt, internal.chatRooms.deleteExpiredRoom, { roomId });
 
-    console.log('CREATE_PRIVATE_ROOM_SUCCESS', { roomId, joinCode });
     return { roomId, joinCode };
   },
 });
@@ -3002,20 +2925,16 @@ export const joinRoomByCode = mutation({
   args: {
     joinCode: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
     roomId: v.optional(v.id('chatRooms')),
   },
-  handler: async (ctx, { joinCode, authUserId, roomId }) => {
-    // 1. Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { joinCode, authUserId, sessionToken, roomId }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+    const now = Date.now();
+    await enforceJoinCodeLookupThrottle(ctx, userId, now);
 
     // 2. Normalize code to uppercase
-    const normalizedCode = joinCode.toUpperCase().trim();
+    const normalizedCode = normalizeJoinCode(joinCode);
 
     // 3. Find room by join code
     const room = await ctx.db
@@ -3024,10 +2943,10 @@ export const joinRoomByCode = mutation({
       .first();
 
     if (!room) {
-      throw new Error('Invalid join code. Room not found.');
+      throw new Error(JOIN_CODE_GENERIC_ERROR);
     }
     if (roomId && room._id !== roomId) {
-      throw new Error('This code does not match the selected room.');
+      throw new Error(JOIN_CODE_GENERIC_ERROR);
     }
     if (!room.isPublic) {
       await requireChatRoomTermsAccepted(ctx, userId);
@@ -3035,9 +2954,8 @@ export const joinRoomByCode = mutation({
     }
 
     // 4. Check if room is expired
-    const now = Date.now();
     if (room.expiresAt && room.expiresAt <= now) {
-      throw new Error('This room has expired.');
+      throw new Error(JOIN_CODE_GENERIC_ERROR);
     }
 
     // 5. P1: Reject banned users BEFORE (re)creating membership. joinRoom and
@@ -3069,18 +2987,29 @@ export const joinRoomByCode = mutation({
     });
 
     // M-003 FIX: Recompute memberCount from source of truth (consistent with joinRoom)
-    const actualMemberCount = await recomputeMemberCount(ctx, room._id);
-    await ctx.db.patch(room._id, { memberCount: actualMemberCount });
+    await patchMemberCountIfExact(ctx, room._id);
 
     return { roomId: room._id, alreadyMember: false };
   },
 });
 
 // Phase-2: Get room by join code (for preview before joining)
-export const getRoomByJoinCode = query({
-  args: { joinCode: v.string() },
-  handler: async (ctx, { joinCode }) => {
-    const normalizedCode = joinCode.toUpperCase().trim();
+export const getRoomByJoinCode = mutation({
+  args: {
+    joinCode: v.string(),
+    authUserId: v.string(),
+    sessionToken: v.string(),
+  },
+  handler: async (ctx, { joinCode, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+    const now = Date.now();
+    await enforceJoinCodeLookupThrottle(ctx, userId, now);
+
+    const normalizedCode = normalizeJoinCode(joinCode);
+    if (!/^[A-Z2-9]{6}$/.test(normalizedCode)) {
+      return null;
+    }
+
     const room = await ctx.db
       .query('chatRooms')
       .withIndex('by_join_code', (q) => q.eq('joinCode', normalizedCode))
@@ -3089,23 +3018,16 @@ export const getRoomByJoinCode = query({
     if (!room) return null;
 
     // Check if expired
-    const now = Date.now();
     if (room.expiresAt && room.expiresAt <= now) {
       return null;
     }
 
-    // MEMBER-COUNT-SYNC FIX: Compute live member count from chatRoomMembers table
-    const members = await ctx.db
-      .query('chatRoomMembers')
-      .withIndex('by_room', (q) => q.eq('roomId', room._id))
-      .collect();
-
     return {
       _id: room._id,
       name: room.name,
-      memberCount: members.length,
-      createdAt: room.createdAt,
+      memberCount: room.memberCount,
       expiresAt: room.expiresAt,
+      hasPassword: hasChatRoomPassword(room),
     };
   },
 });
@@ -3115,23 +3037,16 @@ export const getRoomByJoinCode = query({
 export const getMyPrivateRooms = query({
   args: {
     authUserId: v.optional(v.string()), // Real mode: user's auth ID
+    sessionToken: v.optional(v.string()),
     isDemo: v.optional(v.boolean()),
     demoUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Resolve userId (auth or demo)
-    // AUTH FIX: Use authUserId for real mode, demoUserId for demo mode
-    const authId = args.authUserId || args.demoUserId;
-    if (!authId) {
-      return [];
-    }
-
-    let userId: Id<'users'>;
-    try {
-      const resolved = await resolveUserIdByAuthId(ctx, authId);
-      if (!resolved) return [];
-      userId = resolved;
-    } catch {
+    const userId = await getAuthenticatedUserOrNull(ctx, {
+      authUserId: args.authUserId ?? args.demoUserId,
+      sessionToken: args.sessionToken,
+    });
+    if (!userId) {
       return [];
     }
 
@@ -3146,7 +3061,7 @@ export const getMyPrivateRooms = query({
     const memberships = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(PRIVATE_ROOM_LIST_QUERY_LIMIT);
 
     const memberRoomIds = new Set(memberships.map((m) => m.roomId.toString()));
 
@@ -3154,7 +3069,7 @@ export const getMyPrivateRooms = query({
     const createdRooms = await ctx.db
       .query('chatRooms')
       .withIndex('by_creator', (q) => q.eq('createdBy', userId))
-      .collect();
+      .take(PRIVATE_ROOM_LIST_QUERY_LIMIT);
 
     // Build a map of roomId -> membership for role lookup
     const membershipByRoom = new Map(
@@ -3206,27 +3121,22 @@ export const getMyPrivateRooms = query({
           .withIndex('by_room_heartbeat', (q) =>
             q.eq('roomId', room._id).gte('lastHeartbeatAt', onlineThreshold)
           )
-          .collect();
+          .take(200);
         const onlineCount = presenceRecords.length;
 
         // Determine if current user is a member
         const isMember = memberRoomIds.has(room._id.toString());
+        const role = membership?.role ?? (room.createdBy === userId ? 'owner' : 'member');
 
         return {
-          _id: room._id,
-          name: room.name,
-          slug: room.slug,
-          category: room.category,
-          isPublic: room.isPublic,
-          onlineCount,
-          lastMessageAt: room.lastMessageAt,
-          lastMessageText: room.lastMessageText,
-          createdAt: room.createdAt,
-          expiresAt: room.expiresAt,
-          joinCode: room.joinCode,
-          createdBy: room.createdBy,
-          role: membership?.role ?? (room.createdBy === userId ? 'owner' : 'member'),
-          isMember, // Whether user currently has membership (for UI hints)
+          ...sanitizeChatRoomForClient(room, {
+            onlineCount,
+            includeLastMessage: true,
+            includeCreatedBy: true,
+            includeJoinCode: role === 'owner' || role === 'admin',
+            role,
+            isMember,
+          }),
         };
       })
     );
@@ -3249,27 +3159,15 @@ export const getMyPrivateRooms = query({
 export const getDiscoverablePrivateRooms = query({
   args: {
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { authUserId }) => {
-    const logResult = (count: number) => {
-      console.log('[P2_DISCOVERABLE_PRIVATE_ROOMS]', { authUserId, count });
-    };
-
+  handler: async (ctx, { authUserId, sessionToken }) => {
     if (!authUserId || authUserId.trim().length === 0) {
-      logResult(0);
       return [];
     }
 
-    let userId: Id<'users'>;
-    try {
-      const resolved = await resolveUserIdByAuthId(ctx, authUserId);
-      if (!resolved) {
-        logResult(0);
-        return [];
-      }
-      userId = resolved;
-    } catch {
-      logResult(0);
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
+    if (!userId) {
       return [];
     }
 
@@ -3279,11 +3177,12 @@ export const getDiscoverablePrivateRooms = query({
     const privateRooms = await ctx.db
       .query('chatRooms')
       .withIndex('by_public', (q) => q.eq('isPublic', false))
-      .collect();
+      .take(PRIVATE_ROOM_LIST_QUERY_LIMIT);
 
     const discoverableRooms = await Promise.all(
       privateRooms.map(async (room) => {
         if (room.expiresAt && room.expiresAt <= now) return null;
+        if (room.discoverable !== true) return null;
         if (!room.createdBy || room.createdBy === userId) return null;
 
         const membership = await ctx.db
@@ -3307,24 +3206,13 @@ export const getDiscoverablePrivateRooms = query({
           .withIndex('by_room_heartbeat', (q) =>
             q.eq('roomId', room._id).gte('lastHeartbeatAt', onlineThreshold)
           )
-          .collect();
+          .take(200);
 
-        return {
-          _id: room._id,
-          name: room.name,
-          slug: room.slug,
-          category: room.category,
-          isPublic: room.isPublic,
-          memberCount: room.memberCount,
+        return sanitizeChatRoomForClient(room, {
           onlineCount: presenceRecords.length,
-          lastMessageAt: room.lastMessageAt,
-          lastMessageText: room.lastMessageText,
-          createdAt: room.createdAt,
-          expiresAt: room.expiresAt,
-          createdBy: room.createdBy,
-          hasPassword: !!room.passwordHash || !!room.passwordEncrypted,
+          includeCreatedBy: true,
           isMember: false,
-        };
+        });
       })
     );
 
@@ -3337,7 +3225,6 @@ export const getDiscoverablePrivateRooms = query({
         return a.name.localeCompare(b.name);
       });
 
-    logResult(rooms.length);
     return rooms;
   },
 });
@@ -3348,17 +3235,12 @@ export const reportMessage = mutation({
   args: {
     messageId: v.id('chatRoomMessages'),
     authUserId: v.string(), // CR-012: Auth verification required
+    sessionToken: v.string(),
     reason: v.string(),
   },
-  handler: async (ctx, { messageId, authUserId, reason }) => {
+  handler: async (ctx, { messageId, authUserId, sessionToken, reason }) => {
     // CR-012 FIX: Derive reporterId from authenticated user
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!reporterId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const reporterId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     const message = await ctx.db.get(messageId);
     if (!message) {
@@ -3371,7 +3253,8 @@ export const reportMessage = mutation({
     }
 
     const now = Date.now();
-    const roomId = String(message.roomId);
+    const roomId = message.roomId;
+    await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
     const existingRecentReport = await findRecentRoomUserReport(
       ctx,
       reporterId,
@@ -3387,8 +3270,7 @@ export const reportMessage = mutation({
       };
     }
 
-    // Store report in existing reports table
-    const reportId = await ctx.db.insert('reports', {
+    const reportId = await ctx.db.insert('chatRoomReports', {
       reporterId,
       reportedUserId: message.senderId,
       reason: 'harassment', // Map to existing enum
@@ -3396,11 +3278,13 @@ export const reportMessage = mutation({
       status: 'pending',
       createdAt: now,
       roomId,
+      messageId: String(messageId),
+      reportType: 'content',
     });
 
     const autoTimeout = await evaluateChatRoomAutoTimeoutAfterReport(
       ctx,
-      message.roomId,
+      roomId,
       message.senderId,
       reportId,
       reason
@@ -3424,14 +3308,15 @@ export const reportMessage = mutation({
 export const getRoomsForUser = query({
   args: {
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { authUserId }) => {
+  handler: async (ctx, { authUserId, sessionToken }) => {
     // SECURITY: Require authenticated user - only return caller's own rooms
     // Return empty array if not authenticated (graceful degradation)
     if (!authUserId || authUserId.trim().length === 0) {
       return [];
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return [];
     }
@@ -3441,7 +3326,7 @@ export const getRoomsForUser = query({
     const memberships = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(PRIVATE_ROOM_LIST_QUERY_LIMIT);
 
     // Fetch room details for each membership
     const rooms = await Promise.all(
@@ -3451,8 +3336,13 @@ export const getRoomsForUser = query({
         // Phase-2: Filter out expired rooms
         if (room.expiresAt && room.expiresAt <= now) return null;
         return {
-          ...room,
-          role: membership.role,
+          ...sanitizeChatRoomForClient(room, {
+            includeLastMessage: true,
+            includeCreatedBy: true,
+            includeJoinCode: membership.role === 'owner' || membership.role === 'admin',
+            role: membership.role,
+            isMember: true,
+          }),
           joinedAt: membership.joinedAt,
         };
       })
@@ -3480,11 +3370,12 @@ export const getUserPenalty = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     // SECURITY: Require authenticated user (but NOT full read access,
     // since penalized users should still be able to check their penalty status)
-    const userId = await requireAuthenticatedUser(ctx, authUserId);
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // Check room exists and is not expired
     const room = await ctx.db.get(roomId);
@@ -3527,7 +3418,7 @@ export const hasAnyActivePenalty = query({
     const penalties = await ctx.db
       .query('chatRoomPenalties')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(50);
 
     return penalties.some((p) => p.expiresAt > now);
   },
@@ -3538,22 +3429,23 @@ export const listMembersWithPenalties = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId, authUserId);
+    await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
 
     const now = Date.now();
     const members = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
+      .take(ROOM_MEMBER_LIST_LIMIT);
 
     // Get all penalties for this room using by_room index
     const penalties = await ctx.db
       .query('chatRoomPenalties')
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
+      .take(ROOM_MEMBER_LIST_LIMIT);
 
     const penaltyMap = new Map(
       penalties
@@ -3581,16 +3473,10 @@ export const closeRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(), // CR-016: Auth verification required
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // CR-016 FIX: Verify caller identity via session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     const room = await ctx.db.get(roomId);
     if (!room) {
@@ -3607,11 +3493,6 @@ export const closeRoom = mutation({
       throw new Error('Only the room creator can close this room');
     }
 
-    // Instrumentation for private room end
-    if (!room.isPublic) {
-      console.log('PRIVATE_ROOM_END_TRIGGERED', { roomId, userId: userId.slice(0, 12), roomName: room.name });
-    }
-
     // Delete room and all related data
     await deleteRoomFully(ctx, roomId);
 
@@ -3622,12 +3503,16 @@ export const closeRoom = mutation({
 // Reset/delete all private rooms created by user (demo mode support)
 export const resetMyPrivateRooms = mutation({
   args: {
+    authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
     isDemo: v.optional(v.boolean()),
     demoUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Resolve userId (auth or demo)
-    const userId = await resolveUserId(ctx, args);
+    const userId = await requireAuthenticatedUser(ctx, {
+      authUserId: args.authUserId ?? args.demoUserId,
+      sessionToken: args.sessionToken,
+    });
 
     // P2-10: Use the `by_creator` index to fetch only this user's rooms
     // instead of scanning every chat room in the database and filtering
@@ -3635,7 +3520,7 @@ export const resetMyPrivateRooms = mutation({
     const myRooms = await ctx.db
       .query('chatRooms')
       .withIndex('by_creator', (q) => q.eq('createdBy', userId))
-      .collect();
+      .take(PRIVATE_ROOM_LIST_QUERY_LIMIT);
     const myPrivateRooms = myRooms.filter((room) => !!room.joinCode);
 
     let deletedCount = 0;
@@ -3662,16 +3547,10 @@ export const promoteMember = mutation({
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
-    // 1. Auth guard
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // 2. Get room
     const room = await ctx.db.get(roomId);
@@ -3725,16 +3604,10 @@ export const demoteMember = mutation({
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
-    // 1. Auth guard
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // 2. Get room
     const room = await ctx.db.get(roomId);
@@ -3788,13 +3661,10 @@ export const getMemberRole = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { role: null, canModerate: false };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { role: null, canModerate: false };
     }
@@ -3818,11 +3688,11 @@ export const getMemberRole = query({
     // canModerate = true if user can delete others' messages / kick users
     // - In platform rooms: platform admins can moderate
     // - In private rooms: owners and admins can moderate (using getRoleLevel for backward compat with 'mod')
-    const canModerate = isPlatformRoom
+    const canModerateResult = isPlatformRoom
       ? isPlatformAdmin
-      : getRoleLevel(role) >= ROLE_LEVEL.admin;
+      : canModerate(role);
 
-    return { role, canModerate };
+    return { role, canModerate: canModerateResult };
   },
 });
 
@@ -4061,7 +3931,7 @@ export const cleanupExpiredChatRoomMessages = internalMutation({
         const survivingMessages = await ctx.db
           .query('chatRoomMessages')
           .withIndex('by_room_created', (q) => q.eq('roomId', typedRoomId))
-          .collect();
+          .take(MAX_MESSAGES_PER_ROOM + 1);
         const actualCount = survivingMessages.filter((m) => !m.deletedAt).length;
 
         if (actualCount !== room.messageCount) {
@@ -4522,24 +4392,23 @@ export const cleanupStalePasswordAttempts = internalMutation({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PHASE-2: Private Rooms - Password + Admin Approval
+// PHASE-2: Private Rooms - Password-only runtime
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Private room access remains gated here. Discovery is handled separately by
 // getDiscoverablePrivateRooms, which returns card-safe fields only.
+// The join-request approval helpers below are retained as internal future
+// scaffolding only; the shipping frontend uses joinRoomWithPassword directly.
 
 // Check user's access status for a private room
 export const checkRoomAccess = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard - use app's custom auth pattern
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { status: 'unauthenticated' as const };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { status: 'unauthenticated' as const };
     }
@@ -4554,18 +4423,7 @@ export const checkRoomAccess = query({
       return { status: 'member' as const, role: 'member' as const };
     }
 
-    // PRIVATE-ROOM-LIFETIME-FIX: Log room existence with lifetime info
     const now = Date.now();
-    const remainingMs = room.expiresAt ? room.expiresAt - now : null;
-    const remainingHours = remainingMs ? Math.round(remainingMs / (1000 * 60 * 60) * 10) / 10 : null;
-    console.log('PRIVATE_ROOM_ROOM_EXISTS', {
-      roomId,
-      name: room.name,
-      expiresAt: room.expiresAt,
-      remainingHours,
-      isExpired: room.expiresAt ? room.expiresAt <= now : false,
-    });
-
     // Check if expired
     if (room.expiresAt && room.expiresAt <= now) {
       return { status: 'expired' as const };
@@ -4582,11 +4440,6 @@ export const checkRoomAccess = query({
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
       .first();
     if (ban) {
-      // PRIVATE-ROOM-ACCESS-FIX: Kicked user denied access
-      console.log('PRIVATE_ROOM_KICKED_DENY', {
-        roomId,
-        userId: userId.slice(0, 12),
-      });
       return { status: 'banned' as const };
     }
 
@@ -4596,31 +4449,7 @@ export const checkRoomAccess = query({
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
       .first();
     if (membership) {
-      // PRIVATE-ROOM-ACCESS-FIX: Approved member re-entry (no password needed)
-      console.log('PRIVATE_ROOM_APPROVED_MEMBER_REENTRY', {
-        roomId,
-        userId: userId.slice(0, 12),
-        role: membership.role ?? 'member',
-      });
       return { status: 'member' as const, role: membership.role ?? 'member' };
-    }
-
-    // Check join request status
-    const request = await ctx.db
-      .query('chatRoomJoinRequests')
-      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-      .first();
-    if (request) {
-      if (request.status === 'pending') {
-        return { status: 'pending' as const };
-      }
-      if (request.status === 'rejected') {
-        return { status: 'rejected' as const };
-      }
-      // approved but not member - shouldn't happen, but handle it
-      if (request.status === 'approved') {
-        return { status: 'approved_pending_entry' as const };
-      }
     }
 
     // PRIVATE-ROOM-ACCESS-FIX: Return 'none' with room info for password modal decision
@@ -4628,23 +4457,13 @@ export const checkRoomAccess = query({
     const isCreator = room.createdBy === userId;
     const hasPassword = !!room.passwordHash || !!room.passwordEncrypted;
 
-    console.log('PRIVATE_ROOM_ACCESS_CHECK', {
-      roomId,
-      userId: userId.slice(0, 12),
-      status: 'none',
-      isCreator,
-      hasPassword,
-    });
-
     // Owner bypass: creator always gets access (will auto-join on room load)
     if (isCreator) {
-      console.log('PRIVATE_ROOM_OWNER_BYPASS', { roomId, userId: userId.slice(0, 12) });
       return { status: 'owner_bypass' as const, role: 'owner' as const, isCreator: true };
     }
 
     // First-time entrant: needs password if room has one
     if (hasPassword) {
-      console.log('PRIVATE_ROOM_FIRST_TIME_PASSWORD_REQUIRED', { roomId, userId: userId.slice(0, 12) });
       return { status: 'none' as const, hasPassword: true };
     }
 
@@ -4653,22 +4472,16 @@ export const checkRoomAccess = query({
   },
 });
 
-// Request to join a private room (requires correct password)
-export const requestJoinPrivateRoom = mutation({
+// Future-only approval request helper (not part of the public password-only runtime).
+export const requestJoinPrivateRoom = internalMutation({
   args: {
     roomId: v.id('chatRooms'),
     password: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, password, authUserId }) => {
-    // 1. Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, password, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // 2. Get room
     const room = await ctx.db.get(roomId);
@@ -4738,8 +4551,7 @@ export const requestJoinPrivateRoom = mutation({
           role: 'member',
         });
         // CONSISTENCY FIX B6: Recompute memberCount from source of truth
-        const actualMemberCount = await recomputeMemberCount(ctx, roomId);
-        await ctx.db.patch(roomId, { memberCount: actualMemberCount });
+        await patchMemberCountIfExact(ctx, roomId);
         return { status: 'member' as const };
       }
     }
@@ -4756,18 +4568,15 @@ export const requestJoinPrivateRoom = mutation({
   },
 });
 
-// List pending join requests for a room (owner only)
-export const listJoinRequests = query({
+// Future-only approval request helper (not part of the public password-only runtime).
+export const listJoinRequests = internalQuery({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return [];
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return [];
     }
@@ -4782,7 +4591,7 @@ export const listJoinRequests = query({
     const requests = await ctx.db
       .query('chatRoomJoinRequests')
       .withIndex('by_room_status', (q) => q.eq('roomId', roomId).eq('status', 'pending'))
-      .collect();
+      .take(100);
 
     // P2-9: Dedupe userIds before fetching — the `by_room_user` uniqueness
     // invariant means the typical case is 1 request per user, but the
@@ -4814,18 +4623,15 @@ export const listJoinRequests = query({
   },
 });
 
-// Get count of pending requests (owner only, for badge)
-export const getPendingRequestCount = query({
+// Future-only approval request helper (not part of the public password-only runtime).
+export const getPendingRequestCount = internalQuery({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return 0;
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return 0;
     }
@@ -4839,28 +4645,22 @@ export const getPendingRequestCount = query({
     const requests = await ctx.db
       .query('chatRoomJoinRequests')
       .withIndex('by_room_status', (q) => q.eq('roomId', roomId).eq('status', 'pending'))
-      .collect();
+      .take(100);
 
     return requests.length;
   },
 });
 
-// Approve a join request (owner only)
-export const approveJoinRequest = mutation({
+// Future-only approval request helper (not part of the public password-only runtime).
+export const approveJoinRequest = internalMutation({
   args: {
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
-    // 1. Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // 2. Check if owner
     const room = await ctx.db.get(roomId);
@@ -4910,30 +4710,23 @@ export const approveJoinRequest = mutation({
         role: 'member',
       });
       // CONSISTENCY FIX B6: Recompute memberCount from source of truth
-      const actualMemberCount = await recomputeMemberCount(ctx, roomId);
-      await ctx.db.patch(roomId, { memberCount: actualMemberCount });
+      await patchMemberCountIfExact(ctx, roomId);
     }
 
     return { success: true };
   },
 });
 
-// Reject a join request (owner only)
-export const rejectJoinRequest = mutation({
+// Future-only approval request helper (not part of the public password-only runtime).
+export const rejectJoinRequest = internalMutation({
   args: {
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
-    // 1. Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // 2. Check if owner
     const room = await ctx.db.get(roomId);
@@ -4962,24 +4755,17 @@ export const rejectJoinRequest = mutation({
   },
 });
 
-// Kick and ban a member (owner only)
+// Kick and ban a member (owner/admin hierarchy)
 export const kickAndBanMember = mutation({
   args: {
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
-    // 1. Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
-    // 2. Check if owner
     const room = await ctx.db.get(roomId);
     if (!room) {
       throw new Error('Room not found');
@@ -4987,29 +4773,44 @@ export const kickAndBanMember = mutation({
     if (room.isPublic) {
       throw new Error('Kick is only allowed in private rooms');
     }
-    const ownerId = room.createdBy;
-    if (ownerId !== userId) {
-      throw new Error('Only room owner can kick members');
-    }
 
-    // 3. Cannot kick yourself
     if (targetUserId === userId) {
       throw new Error('Cannot kick yourself');
+    }
+
+    const actorMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (!actorMembership) {
+      throw new Error('Only room moderators can kick members');
+    }
+
+    const targetMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (!targetMembership) {
+      throw new Error('Target user is not a member of this room');
+    }
+
+    const actor = await ctx.db.get(userId);
+    if (
+      !canKickInRoom(
+        actorMembership.role,
+        targetMembership.role,
+        actor?.isAdmin === true,
+        isPlatformOwnedRoom(room)
+      )
+    ) {
+      throw new Error('You do not have permission to kick this member');
     }
 
     const now = Date.now();
 
     // 4. Remove from members
-    const membership = await ctx.db
-      .query('chatRoomMembers')
-      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
-      .first();
-    if (membership) {
-      await ctx.db.delete(membership._id);
-      // CONSISTENCY FIX B6: Recompute memberCount from source of truth
-      const actualMemberCount = await recomputeMemberCount(ctx, roomId);
-      await ctx.db.patch(roomId, { memberCount: actualMemberCount });
-    }
+    await ctx.db.delete(targetMembership._id);
+    await patchMemberCountIfExact(ctx, roomId);
 
     // 5. Add to bans
     const existingBan = await ctx.db
@@ -5028,7 +4829,7 @@ export const kickAndBanMember = mutation({
     const presenceRows = await ctx.db
       .query('chatRoomPresence')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
-      .collect();
+      .take(10);
     for (const row of presenceRows) {
       await ctx.db.delete(row._id);
     }
@@ -5036,11 +4837,11 @@ export const kickAndBanMember = mutation({
     const mutesByTargetUser = await ctx.db
       .query('chatRoomPerUserMutes')
       .withIndex('by_room_muter', (q) => q.eq('roomId', roomId).eq('muterId', targetUserId))
-      .collect();
+      .take(500);
     const mutesTargetingUser = await ctx.db
       .query('chatRoomPerUserMutes')
       .withIndex('by_room_target', (q) => q.eq('roomId', roomId).eq('targetUserId', targetUserId))
-      .collect();
+      .take(500);
     const muteIds = new Set([
       ...mutesByTargetUser.map((mute) => mute._id),
       ...mutesTargetingUser.map((mute) => mute._id),
@@ -5049,10 +4850,10 @@ export const kickAndBanMember = mutation({
       await ctx.db.delete(muteId);
     }
 
-    const removedMessageText = 'A member was removed by the room owner.';
+    const removedMessageText = 'A member was removed by a room moderator.';
     await ctx.db.insert('chatRoomMessages', {
       roomId,
-      senderId: ownerId,
+      senderId: userId,
       type: 'system',
       text: removedMessageText,
       createdAt: now,
@@ -5085,22 +4886,22 @@ export const getRoomPassword = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.optional(v.string()), // AUTH-FIX: Added for non-demo mode
+    sessionToken: v.optional(v.string()),
     isDemo: v.optional(v.boolean()),
     demoUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { roomId, authUserId, isDemo, demoUserId } = args;
+    const { roomId, authUserId, sessionToken, isDemo, demoUserId } = args;
 
-    // AUTH-FIX: Use custom session-based auth pattern
-    // In demo mode: use demoUserId; in real mode: use authUserId
-    const authId = isDemo ? demoUserId : authUserId;
-    if (!authId || authId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-
-    const userId = await resolveUserIdByAuthId(ctx, authId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
+    const userId = await requireAuthenticatedUser(ctx, {
+      authUserId: isDemo ? (demoUserId ?? authUserId) : authUserId,
+      sessionToken,
+    });
+    if (isDemo === true && demoUserId) {
+      const demoResolved = await resolveUserIdByAuthId(ctx, demoUserId);
+      if (demoResolved !== userId) {
+        throw new Error('Unauthorized: demo session mismatch');
+      }
     }
 
     // Get room
@@ -5129,13 +4930,10 @@ export const isRoomOwner = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return false;
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return false;
     }
@@ -5155,10 +4953,11 @@ export const getRoomInfo = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     // SECURITY: Require read access
-    const { room } = await requireRoomReadAccess(ctx, roomId, authUserId);
+    const { room } = await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
 
     return {
       _id: room._id,
@@ -5182,13 +4981,10 @@ export const getUserRoomPref = query({
   args: {
     roomId: v.string(),
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { muted: false };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { muted: false };
     }
@@ -5209,16 +5005,10 @@ export const setUserRoomMuted = mutation({
     roomId: v.string(),
     muted: v.boolean(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, muted, authUserId }) => {
-    // Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, muted, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     const now = Date.now();
 
@@ -5253,13 +5043,10 @@ export const hasReportedRoom = query({
   args: {
     roomId: v.string(),
     authUserId: v.optional(v.string()),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { reported: false };
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { reported: false };
     }
@@ -5279,16 +5066,10 @@ export const markReportedRoom = mutation({
   args: {
     roomId: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Auth guard - use app's custom session-based auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // Check if already reported
     const existing = await ctx.db
@@ -5317,6 +5098,7 @@ export const markReportedRoom = mutation({
 export const submitChatRoomReport = mutation({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
     reportedUserId: v.string(),
     roomId: v.optional(v.string()),
     reason: v.union(
@@ -5339,15 +5121,14 @@ export const submitChatRoomReport = mutation({
     messageId: v.optional(v.string()),
     reportType: v.optional(v.union(v.literal('user'), v.literal('content'))),
   },
-  handler: async (ctx, { authUserId, reportedUserId, roomId, reason, details, messageId, reportType }) => {
+  handler: async (ctx, { authUserId, sessionToken, reportedUserId, roomId, reason, details, messageId, reportType }) => {
     // 1. SECURITY: Authenticate the reporter
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
+    const reporterId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+    const roomDocId = roomId ? ctx.db.normalizeId('chatRooms', roomId) : null;
+    if (!roomDocId) {
+      throw new Error('Room not found');
     }
-    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!reporterId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    await requireRoomReadAccess(ctx, roomDocId, { authUserId, sessionToken });
 
     const effectiveReportType = reportType ?? 'user';
     let reportedId = await resolveUserIdByAuthId(ctx, reportedUserId);
@@ -5365,7 +5146,7 @@ export const submitChatRoomReport = mutation({
       if (!message || message.deletedAt) {
         throw new Error('Message not found');
       }
-      if (roomId && String(message.roomId) !== roomId) {
+      if (message.roomId !== roomDocId) {
         throw new Error('Message not found');
       }
       reportedId = message.senderId;
@@ -5398,12 +5179,12 @@ export const submitChatRoomReport = mutation({
           message: 'You already reported this message recently.',
         };
       }
-    } else if (roomId) {
+    } else {
       const existingRecentReport = await findRecentRoomUserReport(
         ctx,
         reporterId,
         reportedId,
-        roomId,
+        roomDocId,
         now
       );
       if (existingRecentReport) {
@@ -5415,50 +5196,45 @@ export const submitChatRoomReport = mutation({
       }
     }
 
-    // 5. Create the report record in the reports table
-    const reportId = await ctx.db.insert('reports', {
+    const reportId = await ctx.db.insert('chatRoomReports', {
       reporterId,
       reportedUserId: reportedId,
       reason,
       description: details ?? undefined,
       status: 'pending',
       createdAt: now,
-      roomId: roomId ?? undefined,
+      roomId: roomDocId,
       messageId: effectiveMessageId,
       reportType: effectiveReportType,
     });
 
     // 6. Also mark the room as reported (for quick lookups)
-    if (roomId) {
-      const existingRoomReport = await ctx.db
-        .query('userRoomReports')
-        .withIndex('by_user_room', (q) => q.eq('userId', reporterId).eq('roomId', roomId))
-        .first();
+    const roomIdString = String(roomDocId);
+    const existingRoomReport = await ctx.db
+      .query('userRoomReports')
+      .withIndex('by_user_room', (q) => q.eq('userId', reporterId).eq('roomId', roomIdString))
+      .first();
 
-      if (!existingRoomReport) {
-        await ctx.db.insert('userRoomReports', {
-          userId: reporterId,
-          roomId,
-          createdAt: Date.now(),
-        });
-      }
+    if (!existingRoomReport) {
+      await ctx.db.insert('userRoomReports', {
+        userId: reporterId,
+        roomId: roomIdString,
+        createdAt: Date.now(),
+      });
     }
 
     let autoTimeout:
       | Awaited<ReturnType<typeof evaluateChatRoomAutoTimeoutAfterReport>>
       | undefined;
-    const roomDocId = roomId ? ctx.db.normalizeId('chatRooms', roomId) : null;
-    if (roomDocId) {
-      const room = await ctx.db.get(roomDocId);
-      if (room) {
-        autoTimeout = await evaluateChatRoomAutoTimeoutAfterReport(
-          ctx,
-          roomDocId,
-          reportedId,
-          reportId,
-          reason
-        );
-      }
+    const room = await ctx.db.get(roomDocId);
+    if (room) {
+      autoTimeout = await evaluateChatRoomAutoTimeoutAfterReport(
+        ctx,
+        roomDocId,
+        reportedId,
+        reportId,
+        reason
+      );
     }
 
     if (autoTimeout?.actionApplied) {
@@ -5473,8 +5249,8 @@ export const submitChatRoomReport = mutation({
   },
 });
 
-// Seed demo user for testing (run once via: npx convex run chatRooms:seedDemoUser)
-export const seedDemoUser = mutation({
+// Internal-only demo seed helper; not available as a public client mutation.
+export const seedDemoUser = internalMutation({
   args: {},
   handler: async (ctx) => {
     const demoUserId = 'demo_manmohan_gmain_com';
@@ -5534,9 +5310,10 @@ export const seedDemoUser = mutation({
 export const getUserWalletCoins = query({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { authUserId }) => {
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { walletCoins: 0 };
     }
@@ -5565,7 +5342,7 @@ export const diagnoseRoomBySlug = internalQuery({
     const members = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room', (q) => q.eq('roomId', room._id))
-      .collect();
+      .take(ROOM_MEMBER_LIST_LIMIT);
 
     const membersWithDetails = await Promise.all(
       members.map(async (member) => {
@@ -5613,7 +5390,7 @@ export const clearRoomMemberships = mutation({
     const members = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room', (q) => q.eq('roomId', room._id))
-      .collect();
+      .take(ROOM_MEMBER_LIST_LIMIT);
 
     for (const member of members) {
       await ctx.db.delete(member._id);
@@ -5641,13 +5418,11 @@ export const clearRoomMemberships = mutation({
 export const getChatRoomProfile = query({
   args: {
     authUserId: v.string(),
+    sessionToken: v.optional(v.string()),
   },
-  handler: async (ctx, { authUserId }) => {
+  handler: async (ctx, { authUserId, sessionToken }) => {
     // Auth guard
-    if (!authUserId || authUserId.trim().length === 0) {
-      return null;
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return null;
     }
@@ -5681,19 +5456,14 @@ export const getChatRoomProfile = query({
 export const createOrUpdateChatRoomProfile = mutation({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
     nickname: v.string(),
     avatarUrl: v.optional(v.string()),
     bio: v.optional(v.string()),
   },
-  handler: async (ctx, { authUserId, nickname, avatarUrl, bio }) => {
+  handler: async (ctx, { authUserId, sessionToken, nickname, avatarUrl, bio }) => {
     // Auth guard
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // Validate nickname
     const trimmedNickname = nickname.trim();
@@ -5782,12 +5552,13 @@ export const getChatRoomProfilesByUserIds = query({
   args: {
     userIds: v.array(v.id('users')),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { userIds, authUserId }) => {
+  handler: async (ctx, { userIds, authUserId, sessionToken }) => {
     if (!authUserId || authUserId.trim().length === 0) {
       return {};
     }
-    const currentUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    const currentUserId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!currentUserId) {
       return {};
     }
@@ -5834,9 +5605,10 @@ export const getRoomUserIdentities = query({
   args: {
     roomId: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
   handler: async (ctx, args) => {
-    const { roomId: roomIdRaw, authUserId } = args;
+    const { roomId: roomIdRaw, authUserId, sessionToken } = args;
 
     if (!authUserId || authUserId.trim().length === 0) {
       return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
@@ -5848,7 +5620,7 @@ export const getRoomUserIdentities = query({
     const roomId = roomIdRaw.trim() as Id<'chatRooms'>;
 
     // Auth + access (aligns with getRoom/checkRoomAccess)
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { selfUserId: null as string | null, byUserId: {} as Record<string, { nickname: string; avatarUrl: string | null; bio: string | null; age?: number; gender?: string }> };
     }
@@ -5883,7 +5655,7 @@ export const getRoomUserIdentities = query({
     const members = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
+      .take(ROOM_MEMBER_LIST_LIMIT);
 
     const memberUserIds = members.map((m) => m.userId);
 
@@ -5948,11 +5720,107 @@ export const generateChatRoomAvatarUploadUrl = mutation({
 export const getChatRoomAvatarUrl = mutation({
   args: {
     storageId: v.id('_storage'),
+    token: v.string(),
   },
-  handler: async (ctx, { storageId }) => {
+  handler: async (ctx, { storageId, token }) => {
+    const userId = await validateSessionToken(ctx, token.trim());
+    if (!userId) {
+      throw new Error('Unauthorized: authentication required');
+    }
     return await ctx.storage.getUrl(storageId);
   },
 });
+
+function getChatRoomPrivateConversationLastActivityAt(
+  conversation: Doc<'chatRoomPrivateConversations'>
+): number {
+  return conversation.lastMessageAt ?? conversation.createdAt;
+}
+
+function isChatRoomPrivateConversationExpired(
+  conversation: Doc<'chatRoomPrivateConversations'> | null | undefined,
+  now = Date.now()
+): boolean {
+  if (!conversation) return false;
+  return getChatRoomPrivateConversationLastActivityAt(conversation) + CHAT_ROOM_PRIVATE_DM_INACTIVITY_MS <= now;
+}
+
+async function getChatRoomProfileIdentity(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<'users'>
+): Promise<{ name: string; avatar?: string; gender?: 'male' | 'female' | 'other' }> {
+  const [profile, user] = await Promise.all([
+    ctx.db
+      .query('chatRoomProfiles')
+      .withIndex('by_userId', (q) => q.eq('userId', userId))
+      .first(),
+    ctx.db.get(userId),
+  ]);
+  const genderValue = (user?.gender ?? 'other').toLowerCase();
+  return {
+    name: profile?.nickname?.trim() || 'User',
+    avatar: profile?.avatarUrl ?? undefined,
+    gender: genderValue === 'male' || genderValue === 'female' ? genderValue : 'other',
+  };
+}
+
+async function requireRoomMemberForPrivateDm(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>,
+  userId: Id<'users'>
+): Promise<Doc<'chatRoomMembers'>> {
+  const ban = await ctx.db
+    .query('chatRoomBans')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .first();
+  if (ban) {
+    throw new Error('Access denied');
+  }
+  const membership = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .first();
+  if (!membership || membership.isBanned) {
+    throw new Error('Both users must be in this room');
+  }
+  return membership;
+}
+
+async function requireChatRoomPrivateConversationAccess(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<'chatRoomPrivateConversations'>,
+  token: string
+): Promise<{
+  userId: Id<'users'>;
+  peerUserId: Id<'users'>;
+  conversation: Doc<'chatRoomPrivateConversations'>;
+  room: Doc<'chatRooms'>;
+}> {
+  const userId = await validateSessionToken(ctx, token.trim());
+  if (!userId) {
+    throw new Error('Unauthorized: authentication required');
+  }
+  const conversation = await ctx.db.get(conversationId);
+  if (!conversation || !conversation.participants.includes(userId)) {
+    throw new Error('Conversation not found');
+  }
+  if (isChatRoomPrivateConversationExpired(conversation)) {
+    throw new Error('This chat expired');
+  }
+  const room = await ctx.db.get(conversation.roomId);
+  if (!room || (room.expiresAt && room.expiresAt <= Date.now())) {
+    throw new Error('Room not found');
+  }
+  if (!room.isPublic) {
+    await requirePrivateRoomAdult(ctx, userId);
+  }
+  await requireRoomMemberForPrivateDm(ctx, conversation.roomId, userId);
+  const peerUserId = conversation.participants.find((participantId) => participantId !== userId);
+  if (!peerUserId) {
+    throw new Error('Conversation not found');
+  }
+  return { userId, peerUserId, conversation, room };
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UNREAD DM COUNTS BY ROOM
@@ -5967,48 +5835,44 @@ export const getChatRoomAvatarUrl = mutation({
 export const getUnreadDmCountsByRoom = query({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { authUserId }) => {
-    const now = Date.now();
-    // Auth guard
+  handler: async (ctx, { authUserId, sessionToken }) => {
     if (!authUserId || authUserId.trim().length === 0) {
       return { byRoomId: {}, totalUnread: 0, hasAnyUnread: false };
     }
 
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { byRoomId: {}, totalUnread: 0, hasAnyUnread: false };
     }
 
-    // Get all participant rows for this user
-    const participantRows = await ctx.db
-      .query('conversationParticipants')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
-
-    if (participantRows.length === 0) {
-      return { byRoomId: {}, totalUnread: 0, hasAnyUnread: false };
-    }
-
-    // Batch-fetch conversations
-    const conversations = await Promise.all(
-      participantRows.map((row) => ctx.db.get(row.conversationId))
-    );
-
-    // Build unread counts by room
+    const now = Date.now();
+    const [asUser1, asUser2] = await Promise.all([
+      ctx.db
+        .query('chatRoomPrivateConversations')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .take(USER_DM_THREAD_LOOKUP_LIMIT),
+      ctx.db
+        .query('chatRoomPrivateConversations')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .take(USER_DM_THREAD_LOOKUP_LIMIT),
+    ]);
     const byRoomId: Record<string, number> = {};
     let totalUnread = 0;
 
-    for (let i = 0; i < conversations.length; i++) {
-      const conversation = conversations[i];
-      if (!conversation) continue;
-      if (!conversation.sourceRoomId) continue;
-      if (isChatRoomPrivateDmExpired(conversation, now)) continue;
-
-      const roomIdStr = conversation.sourceRoomId as string;
-      const unreadCount = participantRows[i].unreadCount || 0;
-
+    for (const conversation of [...asUser1, ...asUser2]) {
+      if (isChatRoomPrivateConversationExpired(conversation, now)) continue;
+      const unreadMessages = await ctx.db
+        .query('chatRoomPrivateMessages')
+        .withIndex('by_conversation_readAt', (q) =>
+          q.eq('conversationId', conversation._id).eq('readAt', undefined)
+        )
+        .filter((q) => q.neq(q.field('senderId'), userId))
+        .take(100);
+      const unreadCount = unreadMessages.length;
       if (unreadCount > 0) {
+        const roomIdStr = conversation.roomId as string;
         byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
         totalUnread += unreadCount;
       }
@@ -6023,40 +5887,49 @@ export const getUnreadDmCountsByRoom = query({
 });
 
 /**
- * List DM threads originated from chat rooms (conversations with sourceRoomId).
+ * List DM threads from the dedicated room-scoped Chat Room DM table.
  * Used by Chat Rooms room screen — Messages popover + unread badge.
  * Never throws: returns [] if auth cannot be resolved or on any per-thread error.
  */
 export const getDmThreads = query({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
+    roomId: v.optional(v.id('chatRooms')),
   },
-  handler: async (ctx, { authUserId }) => {
+  handler: async (ctx, { authUserId, sessionToken, roomId }) => {
     const now = Date.now();
     if (!authUserId || authUserId.trim().length === 0) {
       return [];
     }
 
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return [];
     }
 
     const hiddenRows = await ctx.db
-      .query('chatRoomHiddenDmConversations')
+      .query('chatRoomPrivateConversationHides')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(USER_DM_THREAD_LOOKUP_LIMIT);
     const hiddenAtByConversationId = new Map<string, number>(
       hiddenRows.map((h) => [h.conversationId as string, h.hiddenAt])
     );
 
-    const participantRows = await ctx.db
-      .query('conversationParticipants')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+    const [asUser1, asUser2] = await Promise.all([
+      ctx.db
+        .query('chatRoomPrivateConversations')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .take(USER_DM_THREAD_LOOKUP_LIMIT),
+      ctx.db
+        .query('chatRoomPrivateConversations')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .take(USER_DM_THREAD_LOOKUP_LIMIT),
+    ]);
 
     type ThreadRow = {
       id: string;
+      roomId: string;
       peerId: string;
       peerName: string;
       peerAvatar?: string;
@@ -6066,28 +5939,24 @@ export const getDmThreads = query({
       unreadCount: number;
     };
 
-    const threadsByPeer = new Map<string, ThreadRow>();
+    const threads: ThreadRow[] = [];
 
-    for (const row of participantRows) {
+    for (const conversation of [...asUser1, ...asUser2]) {
       try {
-        const conversation = await ctx.db.get(row.conversationId);
-        if (!conversation) continue;
-        if (!conversation.sourceRoomId) continue;
-        if (isChatRoomPrivateDmExpired(conversation, now)) continue;
+        if (roomId && conversation.roomId !== roomId) continue;
+        if (isChatRoomPrivateConversationExpired(conversation, now)) continue;
 
         const lastMsg = await ctx.db
-          .query('messages')
+          .query('chatRoomPrivateMessages')
           .withIndex('by_conversation_created', (q) =>
             q.eq('conversationId', conversation._id)
           )
           .order('desc')
           .first();
 
-        const updatedAt = (conversation as { updatedAt?: number }).updatedAt;
         const lastMessageAt =
           lastMsg?.createdAt ??
           conversation.lastMessageAt ??
-          updatedAt ??
           conversation.createdAt ??
           conversation._creationTime;
         const hiddenAt = hiddenAtByConversationId.get(conversation._id as string);
@@ -6095,24 +5964,7 @@ export const getDmThreads = query({
 
         const peerId = conversation.participants.find((p) => p !== userId);
         if (!peerId) continue;
-        const dedupeKey = peerId as string;
-
-        const peer = await ctx.db.get(peerId);
-        if (!peer) continue;
-
-        // CHATROOM_IDENTITY_NONCANONICAL_PATH_FOUND:
-        // DMs are not allowed to use userPrivateProfiles for identity.
-        // Use chat-room profile only for name/photo/bio, and main user gender for ring color.
-        const chatProfile = await ctx.db
-          .query('chatRoomProfiles')
-          .withIndex('by_userId', (q) => q.eq('userId', peerId))
-          .first();
-
-        const peerName = chatProfile?.nickname ?? 'User';
-        const peerAvatar = chatProfile?.avatarUrl ?? undefined;
-        const g = (peer.gender ?? 'other').toLowerCase();
-        const peerGender: 'male' | 'female' | 'other' =
-          g === 'male' || g === 'female' ? g : 'other';
+        const peerIdentity = await getChatRoomProfileIdentity(ctx, peerId);
 
         let lastMessage = '';
         if (lastMsg) {
@@ -6129,38 +5981,31 @@ export const getDmThreads = query({
           }
         }
 
-        const unreadCount = row.unreadCount ?? 0;
-        const existingThread = threadsByPeer.get(dedupeKey);
-        if (!existingThread) {
-          threadsByPeer.set(dedupeKey, {
-            id: conversation._id as string,
-            peerId: peerId as string,
-            peerName,
-            peerAvatar,
-            peerGender,
-            lastMessage,
-            lastMessageAt,
-            unreadCount,
-          });
-        } else {
-          existingThread.unreadCount += unreadCount;
-          if (lastMessageAt > existingThread.lastMessageAt) {
-            existingThread.id = conversation._id as string;
-            existingThread.peerId = peerId as string;
-            existingThread.peerName = peerName;
-            existingThread.peerAvatar = peerAvatar;
-            existingThread.peerGender = peerGender;
-            existingThread.lastMessage = lastMessage;
-            existingThread.lastMessageAt = lastMessageAt;
-          }
-        }
+        const unreadMessages = await ctx.db
+          .query('chatRoomPrivateMessages')
+          .withIndex('by_conversation_readAt', (q) =>
+            q.eq('conversationId', conversation._id).eq('readAt', undefined)
+          )
+          .filter((q) => q.neq(q.field('senderId'), userId))
+          .take(100);
+
+        threads.push({
+          id: conversation._id as string,
+          roomId: conversation.roomId as string,
+          peerId: peerId as string,
+          peerName: peerIdentity.name,
+          peerAvatar: peerIdentity.avatar,
+          peerGender: peerIdentity.gender,
+          lastMessage,
+          lastMessageAt,
+          unreadCount: unreadMessages.length,
+        });
       } catch {
         // Skip malformed thread; keep popover + screen alive
         continue;
       }
     }
 
-    const threads = Array.from(threadsByPeer.values());
     threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
     return threads;
   },
@@ -6177,14 +6022,15 @@ export const getDmThreads = query({
 export const getUserMentions = query({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
     limit: v.optional(v.number()),
   },
-  handler: async (ctx, { authUserId, limit }) => {
+  handler: async (ctx, { authUserId, sessionToken, limit }) => {
     try {
       if (!authUserId || authUserId.trim().length === 0) {
         return [];
       }
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
       if (!userId) {
         return [];
       }
@@ -6242,13 +6088,14 @@ export const getUserMentions = query({
 export const getUnreadMentionCount = query({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { authUserId }) => {
+  handler: async (ctx, { authUserId, sessionToken }) => {
     if (!authUserId || authUserId.trim().length === 0) {
       return { totalUnread: 0, perRoom: {} as Record<string, number> };
     }
 
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { totalUnread: 0, perRoom: {} as Record<string, number> };
     }
@@ -6258,7 +6105,7 @@ export const getUnreadMentionCount = query({
       .withIndex('by_mentioned_user_readAt', (q) =>
         q.eq('mentionedUserId', userId).eq('readAt', undefined)
       )
-      .collect();
+      .take(500);
 
     const perRoom: Record<string, number> = {};
     let totalUnread = 0;
@@ -6279,14 +6126,12 @@ export const getUnreadMentionCount = query({
 export const markMentionRead = mutation({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
     mentionId: v.id('chatRoomMentionNotifications'),
   },
-  handler: async (ctx, { authUserId, mentionId }) => {
+  handler: async (ctx, { authUserId, sessionToken, mentionId }) => {
     try {
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
-      if (!userId) {
-        return { success: false as const };
-      }
+      const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
       const row = await ctx.db.get(mentionId);
       if (!row || row.mentionedUserId !== userId) {
         return { success: false as const };
@@ -6300,17 +6145,14 @@ export const markMentionRead = mutation({
 });
 
 export const markAllMentionsRead = mutation({
-  args: { authUserId: v.string() },
-  handler: async (ctx, { authUserId }) => {
+  args: { authUserId: v.string(), sessionToken: v.string() },
+  handler: async (ctx, { authUserId, sessionToken }) => {
     try {
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
-      if (!userId) {
-        return { success: false as const };
-      }
+      const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
       const rows = await ctx.db
         .query('chatRoomMentionNotifications')
         .withIndex('by_mentioned_user_created', (q) => q.eq('mentionedUserId', userId))
-        .collect();
+        .take(500);
       const now = Date.now();
       for (const row of rows) {
         if (row.readAt === undefined || row.readAt === null) {
@@ -6332,14 +6174,15 @@ export const getReactionsForMessages = query({
     roomId: v.id('chatRooms'),
     messageIds: v.array(v.id('chatRoomMessages')),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, messageIds, authUserId }) => {
+  handler: async (ctx, { roomId, messageIds, authUserId, sessionToken }) => {
     try {
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
       if (!userId) {
         return {};
       }
-      await requireRoomReadAccess(ctx, roomId, authUserId);
+      await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
       const maxIds = messageIds.slice(0, 200);
       const result: Record<string, Array<{ emoji: string; count: number; userIds: string[] }>> = {};
       for (const mid of maxIds) {
@@ -6356,7 +6199,7 @@ export const getReactionsForMessages = query({
             .withIndex('by_room_message', (q) =>
               q.eq('roomId', roomId).eq('messageId', mid)
             )
-            .collect();
+            .take(500);
           const byEmoji = new Map<string, Set<string>>();
           for (const r of reactions) {
             if (!byEmoji.has(r.emoji)) {
@@ -6390,9 +6233,10 @@ export const addReaction = mutation({
     messageId: v.id('chatRoomMessages'),
     emoji: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, messageId, emoji, authUserId }) => {
-    const { userId } = await requireRoomReadAccess(ctx, roomId, authUserId);
+  handler: async (ctx, { roomId, messageId, emoji, authUserId, sessionToken }) => {
+    const { userId } = await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
     const msg = await ctx.db.get(messageId);
     if (!msg || msg.roomId !== roomId || msg.deletedAt) {
       throw new Error('Message not found');
@@ -6426,7 +6270,7 @@ export const addReaction = mutation({
       .withIndex('by_message_user_emoji', (q) =>
         q.eq('messageId', messageId).eq('userId', userId).eq('emoji', emoji)
       )
-      .collect();
+      .take(20);
     if (afterInsert.length > 1) {
       const [keep, ...extras] = afterInsert.sort(
         (a, b) => a._creationTime - b._creationTime
@@ -6449,9 +6293,10 @@ export const removeReaction = mutation({
     // reaction the user placed on this message.
     emoji: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, messageId, emoji, authUserId }) => {
-    const { userId } = await requireRoomReadAccess(ctx, roomId, authUserId);
+  handler: async (ctx, { roomId, messageId, emoji, authUserId, sessionToken }) => {
+    const { userId } = await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
     const msg = await ctx.db.get(messageId);
     if (!msg || msg.roomId !== roomId) {
       throw new Error('Message not found');
@@ -6463,7 +6308,7 @@ export const removeReaction = mutation({
       .withIndex('by_message_user_emoji', (q) =>
         q.eq('messageId', messageId).eq('userId', userId).eq('emoji', emoji)
       )
-      .collect();
+      .take(20);
     for (const row of rows) {
       await ctx.db.delete(row._id);
     }
@@ -6478,10 +6323,11 @@ export const getMutedUsersInRoom = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     try {
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
+      const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
       if (!userId) {
         return { mutedUserIds: [] as string[] };
       }
@@ -6495,7 +6341,7 @@ export const getMutedUsersInRoom = query({
       const rows = await ctx.db
         .query('chatRoomPerUserMutes')
         .withIndex('by_room_muter', (q) => q.eq('roomId', roomId).eq('muterId', userId))
-        .collect();
+        .take(500);
       return { mutedUserIds: rows.map((r) => r.targetUserId as string) };
     } catch {
       return { mutedUserIds: [] as string[] };
@@ -6508,13 +6354,14 @@ export const toggleMuteUserInRoom = mutation({
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
-    const userId = await requireAuthenticatedUser(ctx, authUserId);
+  handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
     if (userId === targetUserId) {
       throw new Error('Cannot mute yourself');
     }
-    await requireRoomReadAccess(ctx, roomId, authUserId);
+    await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
     const targetMembership = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room_user', (q) =>
@@ -6535,7 +6382,7 @@ export const toggleMuteUserInRoom = mutation({
           .eq('muterId', userId)
           .eq('targetUserId', targetUserId)
       )
-      .collect();
+      .take(20);
     if (existingRows.length > 0) {
       // Toggle OFF: delete every matching row (also collapses any duplicates
       // left by a prior race).
@@ -6561,7 +6408,7 @@ export const toggleMuteUserInRoom = mutation({
           .eq('muterId', userId)
           .eq('targetUserId', targetUserId)
       )
-      .collect();
+      .take(20);
     if (afterInsert.length > 1) {
       const [keep, ...extras] = afterInsert.sort(
         (a, b) => a._creationTime - b._creationTime
@@ -6576,17 +6423,16 @@ export const toggleMuteUserInRoom = mutation({
   },
 });
 
-/**
- * Create or return a DM conversation (Phase-1 `conversations` table) tied to a chat room when given.
- */
+/** Create or return a room-scoped private conversation in dedicated Chat Room DM tables. */
 export const getOrCreateDmThread = mutation({
   args: {
     authUserId: v.string(),
+    sessionToken: v.string(),
     peerUserId: v.id('users'),
-    sourceRoomId: v.optional(v.id('chatRooms')),
+    roomId: v.id('chatRooms'),
   },
-  handler: async (ctx, { authUserId, peerUserId, sourceRoomId }) => {
-    const userId = await requireAuthenticatedUser(ctx, authUserId);
+  handler: async (ctx, { authUserId, sessionToken, peerUserId, roomId }) => {
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
     await requireChatRoomTermsAccepted(ctx, userId);
     if (userId === peerUserId) {
       throw new Error('Invalid recipient');
@@ -6600,77 +6446,50 @@ export const getOrCreateDmThread = mutation({
     }
 
     const now = Date.now();
-    if (sourceRoomId) {
-      const r = await ctx.db.get(sourceRoomId);
-      if (!r || (r.expiresAt && r.expiresAt <= now)) {
-        throw new Error('Room not found');
-      }
-      const m1 = await ctx.db
-        .query('chatRoomMembers')
-        .withIndex('by_room_user', (q) => q.eq('roomId', sourceRoomId).eq('userId', userId))
-        .first();
-      const m2 = await ctx.db
-        .query('chatRoomMembers')
-        .withIndex('by_room_user', (q) => q.eq('roomId', sourceRoomId).eq('userId', peerUserId))
-        .first();
-      if (!m1 || !m2) {
-        throw new Error('Both users must be in this room');
-      }
-      if (
-        await hasActiveSevereRoomReportBetweenUsers(ctx, userId, peerUserId, sourceRoomId, now)
-      ) {
-        throw new Error('Cannot start conversation');
-      }
+    const room = await ctx.db.get(roomId);
+    if (!room || (room.expiresAt && room.expiresAt <= now)) {
+      throw new Error('Room not found');
+    }
+    if (!room.isPublic) {
+      await requirePrivateRoomAdult(ctx, userId);
+    }
+    await requireRoomMemberForPrivateDm(ctx, roomId, userId);
+    await requireRoomMemberForPrivateDm(ctx, roomId, peerUserId);
+    if (
+      await hasActiveSevereRoomReportBetweenUsers(ctx, userId, peerUserId, roomId, now)
+    ) {
+      throw new Error('Cannot start conversation');
     }
 
     const sortedParticipants: [Id<'users'>, Id<'users'>] =
       (userId as string) < (peerUserId as string)
         ? [userId, peerUserId]
         : [peerUserId, userId];
+    const pairKey = chatRoomPrivateDmPairKey(userId, peerUserId);
 
-    const [activeConversation] = await findActiveChatRoomPrivateDmConversationsForPair(
-      ctx,
-      userId,
-      peerUserId,
-      now
-    );
-    const found = activeConversation?._id ?? null;
+    const existingRows = await ctx.db
+      .query('chatRoomPrivateConversations')
+      .withIndex('by_room_pair', (q) => q.eq('roomId', roomId).eq('pairKey', pairKey))
+      .take(20);
+    const activeRows = existingRows
+      .filter((conversation) => !isChatRoomPrivateConversationExpired(conversation, now))
+      .sort((a, b) => getChatRoomPrivateConversationLastActivityAt(b) - getChatRoomPrivateConversationLastActivityAt(a));
 
-    if (!found) {
-      const conversationId = await ctx.db.insert('conversations', {
-        participants: sortedParticipants,
-        isPreMatch: false,
-        connectionSource: 'room',
-        ...(sourceRoomId ? { sourceRoomId } : {}),
-        createdAt: now,
-        lastMessageAt: now,
-      });
-
-      await ctx.db.insert('conversationParticipants', {
-        conversationId,
-        userId,
-        unreadCount: 0,
-      });
-      await ctx.db.insert('conversationParticipants', {
-        conversationId,
-        userId: peerUserId,
-        unreadCount: 0,
-      });
-
-      const canonicalConversationId = await cleanupDuplicateActiveChatRoomPrivateDmsForPair(
-        ctx,
-        userId,
-        peerUserId,
-        now
-      );
-
-      return { threadId: canonicalConversationId ?? conversationId };
+    if (activeRows[0]) {
+      return { threadId: activeRows[0]._id };
     }
 
-    await upsertConversationParticipant(ctx, found, userId);
-    await upsertConversationParticipant(ctx, found, peerUserId);
+    const conversationId = await ctx.db.insert('chatRoomPrivateConversations', {
+      roomId,
+      pairKey,
+      participants: sortedParticipants,
+      user1Id: sortedParticipants[0],
+      user2Id: sortedParticipants[1],
+      createdAt: now,
+      lastMessageAt: now,
+    });
 
-    return { threadId: found };
+    return { threadId: conversationId };
   },
 });
 
@@ -6678,61 +6497,366 @@ export const getOrCreateDmThread = mutation({
 export const hideDmThread = mutation({
   args: {
     authUserId: v.string(),
-    threadId: v.id('conversations'),
+    sessionToken: v.string(),
+    threadId: v.id('chatRoomPrivateConversations'),
   },
-  handler: async (ctx, { authUserId, threadId }) => {
+  handler: async (ctx, { authUserId, sessionToken, threadId }) => {
     try {
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
-      if (!userId) {
-        return { success: false as const };
-      }
+      const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
       const conv = await ctx.db.get(threadId);
       if (!conv || !conv.participants.includes(userId)) {
         return { success: false as const };
       }
       const now = Date.now();
-      const targetConversationIds = new Set([threadId]);
-      const peerId = conv.participants.find((p) => p !== userId);
+      const existing = await ctx.db
+        .query('chatRoomPrivateConversationHides')
+        .withIndex('by_user_conversation', (q) =>
+          q.eq('userId', userId).eq('conversationId', threadId)
+        )
+        .first();
 
-      if (conv.sourceRoomId && peerId) {
-        const siblingConversations = await ctx.db
-          .query('conversations')
-          .withIndex('by_source_room', (q) => q.eq('sourceRoomId', conv.sourceRoomId))
-          .collect();
-
-        for (const sibling of siblingConversations) {
-          if (
-            sibling.participants.length === 2 &&
-            sibling.participants.includes(userId) &&
-            sibling.participants.includes(peerId)
-          ) {
-            targetConversationIds.add(sibling._id);
-          }
-        }
-      }
-
-      for (const conversationId of targetConversationIds) {
-        const existing = await ctx.db
-          .query('chatRoomHiddenDmConversations')
-          .withIndex('by_user_conversation', (q) =>
-            q.eq('userId', userId).eq('conversationId', conversationId)
-          )
-          .first();
-
-        if (existing) {
-          await ctx.db.patch(existing._id, { hiddenAt: now });
-        } else {
-          await ctx.db.insert('chatRoomHiddenDmConversations', {
-            userId,
-            conversationId,
-            hiddenAt: now,
-          });
-        }
+      if (existing) {
+        await ctx.db.patch(existing._id, { hiddenAt: now });
+      } else {
+        await ctx.db.insert('chatRoomPrivateConversationHides', {
+          userId,
+          conversationId: threadId,
+          hiddenAt: now,
+        });
       }
 
       return { success: true as const };
     } catch {
       return { success: false as const };
+    }
+  },
+});
+
+export const getRoomDmMessages = query({
+  args: {
+    token: v.string(),
+    threadId: v.id('chatRoomPrivateConversations'),
+    paginationOpts: v.object({
+      numItems: v.number(),
+      cursor: v.union(v.string(), v.null()),
+    }),
+  },
+  handler: async (ctx, { token, threadId, paginationOpts }) => {
+    try {
+      let access;
+      try {
+        access = await requireChatRoomPrivateConversationAccess(ctx, threadId, token);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'This chat expired') {
+          return { page: [], isDone: true, continueCursor: null, expired: true as const };
+        }
+        return { page: [], isDone: true, continueCursor: null };
+      }
+      const { userId } = access;
+      const numItems = Math.min(Math.max(paginationOpts.numItems, 1), 100);
+      let q = ctx.db
+        .query('chatRoomPrivateMessages')
+        .withIndex('by_conversation_created', (q) => q.eq('conversationId', threadId))
+        .order('desc');
+
+      if (paginationOpts.cursor) {
+        try {
+          const parsed = JSON.parse(paginationOpts.cursor) as { before: number };
+          q = q.filter((qf) => qf.lt(qf.field('createdAt'), parsed.before));
+        } catch {
+          return { page: [], isDone: true, continueCursor: null };
+        }
+      }
+
+      const batch = await q.take(numItems + 1);
+      const hasMore = batch.length > numItems;
+      const slice = hasMore ? batch.slice(0, numItems) : batch;
+      const orderedMessages = slice.slice().reverse();
+      const senderIds = Array.from(new Set(orderedMessages.map((message) => message.senderId)));
+      const identities = await Promise.all(
+        senderIds.map((senderId) => getChatRoomProfileIdentity(ctx, senderId))
+      );
+      const identityByUserId = new Map(
+        senderIds.map((senderId, index) => [senderId as string, identities[index]])
+      );
+      const storageIds = Array.from(new Set(
+        orderedMessages.flatMap((message) => {
+          if ((message.type === 'image' || message.type === 'video') && message.imageStorageId) {
+            return [message.imageStorageId];
+          }
+          if (message.type === 'voice' && message.audioStorageId) {
+            return [message.audioStorageId];
+          }
+          return [];
+        })
+      ));
+      const urls = await Promise.all(storageIds.map((storageId) => ctx.storage.getUrl(storageId)));
+      const urlByStorageId = new Map(
+        storageIds.map((storageId, index) => [storageId as string, urls[index] ?? undefined])
+      );
+
+      const page = orderedMessages
+        .filter((message) => !message.deletedAt)
+        .map((message) => {
+          const identity = identityByUserId.get(message.senderId as string);
+          let mediaUrl: string | undefined;
+          if ((message.type === 'image' || message.type === 'video') && message.imageStorageId) {
+            mediaUrl = urlByStorageId.get(message.imageStorageId as string);
+          } else if (message.type === 'voice' && message.audioStorageId) {
+            mediaUrl = urlByStorageId.get(message.audioStorageId as string);
+          }
+          return {
+            id: message._id as string,
+            threadId: threadId as string,
+            senderId: message.senderId as string,
+            senderName: identity?.name ?? 'User',
+            senderAvatar: identity?.avatar,
+            text: message.type === 'text' ? message.content : undefined,
+            type: message.type === 'voice' ? 'audio' : message.type,
+            mediaUrl,
+            readAt: message.readAt,
+            createdAt: message.createdAt,
+            isMe: message.senderId === userId,
+          };
+        });
+
+      const oldest = slice.length > 0 ? slice[slice.length - 1] : null;
+      return {
+        page,
+        isDone: !hasMore,
+        continueCursor: hasMore && oldest ? JSON.stringify({ before: oldest.createdAt }) : null,
+      };
+    } catch {
+      return { page: [], isDone: true, continueCursor: null };
+    }
+  },
+});
+
+export const markRoomDmRead = mutation({
+  args: {
+    conversationId: v.id('chatRoomPrivateConversations'),
+    token: v.string(),
+  },
+  handler: async (ctx, { conversationId, token }) => {
+    try {
+      const { userId } = await requireChatRoomPrivateConversationAccess(ctx, conversationId, token);
+      const now = Date.now();
+      const unreadMessages = await ctx.db
+        .query('chatRoomPrivateMessages')
+        .withIndex('by_conversation_readAt', (q) =>
+          q.eq('conversationId', conversationId).eq('readAt', undefined)
+        )
+        .filter((q) => q.neq(q.field('senderId'), userId))
+        .take(100);
+      for (const message of unreadMessages) {
+        await ctx.db.patch(message._id, { readAt: now });
+      }
+      return { success: true as const, count: unreadMessages.length };
+    } catch {
+      return { success: true as const, count: 0 };
+    }
+  },
+});
+
+export const sendRoomDmMessage = mutation({
+  args: {
+    conversationId: v.id('chatRoomPrivateConversations'),
+    token: v.string(),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('voice')),
+    content: v.string(),
+    imageStorageId: v.optional(v.id('_storage')),
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
+    clientMessageId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { conversationId, token, type, imageStorageId, audioStorageId, audioDurationMs, clientMessageId } = args;
+    const content = type === 'text' ? args.content.trim() : args.content;
+    const now = Date.now();
+    const { userId, peerUserId, conversation } = await requireChatRoomPrivateConversationAccess(
+      ctx,
+      conversationId,
+      token
+    );
+    await requireRoomMemberForPrivateDm(ctx, conversation.roomId, peerUserId);
+    await requireChatRoomTermsAccepted(ctx, userId);
+    if (await isBlockedBidirectional(ctx, userId, peerUserId)) {
+      throw new Error('Cannot send message');
+    }
+    if (await hasActiveSevereRoomReportBetweenUsers(ctx, userId, peerUserId, conversation.roomId, now)) {
+      throw new Error('Cannot send message');
+    }
+    const mutedByRecipient = await ctx.db
+      .query('chatRoomPerUserMutes')
+      .withIndex('by_room_muter_target', (q) =>
+        q
+          .eq('roomId', conversation.roomId)
+          .eq('muterId', peerUserId)
+          .eq('targetUserId', userId)
+      )
+      .first();
+    if (mutedByRecipient) {
+      throw new Error("You can't message this user right now.");
+    }
+    const penalty = await getActiveChatRoomReadOnlyPenalty(ctx, conversation.roomId, userId, now);
+    if (penalty) {
+      throw new Error('You are restricted from sending messages in this room');
+    }
+
+    if (clientMessageId) {
+      const existing = await ctx.db
+        .query('chatRoomPrivateMessages')
+        .withIndex('by_conversation_clientMessageId', (q) =>
+          q.eq('conversationId', conversationId).eq('clientMessageId', clientMessageId)
+        )
+        .first();
+      if (existing) {
+        return { success: true as const, messageId: existing._id, duplicate: true as const };
+      }
+    }
+
+    const recentMessages = await ctx.db
+      .query('chatRoomPrivateMessages')
+      .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('senderId'), userId),
+          q.gt(q.field('createdAt'), now - 60_000)
+        )
+      )
+      .take(10);
+    const contentPolicy = validateChatRoomMessageContent({
+      text: content,
+      context: 'dm',
+      recentMessages,
+      allowMentions: false,
+    });
+    if (contentPolicy.ok === false) {
+      throw new ConvexError({
+        code: contentPolicy.code,
+        category: contentPolicy.category,
+        message: formatChatRoomContentPolicyError(contentPolicy),
+      });
+    }
+    if (recentMessages.length >= 10) {
+      throw new Error('Rate limit exceeded: max 10 messages per minute');
+    }
+
+    if (type === 'text' && !content) {
+      throw new Error('Message cannot be empty');
+    }
+    if ((type === 'image' || type === 'video') && !imageStorageId) {
+      throw new Error('Media attachment required');
+    }
+    if (type === 'voice' && !audioStorageId) {
+      throw new Error('Audio attachment required');
+    }
+    if (imageStorageId) {
+      await verifyOrClaimChatRoomMediaOwnership(ctx, imageStorageId, userId, type === 'video' ? 'video' : 'image');
+      await validateChatRoomMediaMetadata(ctx, imageStorageId, type === 'video' ? 'video' : 'image');
+    }
+    if (audioStorageId) {
+      await verifyOrClaimChatRoomMediaOwnership(ctx, audioStorageId, userId, 'audio');
+      await validateChatRoomMediaMetadata(ctx, audioStorageId, 'audio');
+    }
+
+    const maskedContent = type === 'text' ? softMaskText(content) : '';
+    const messageId = await ctx.db.insert('chatRoomPrivateMessages', {
+      conversationId,
+      roomId: conversation.roomId,
+      senderId: userId,
+      type,
+      content: maskedContent,
+      imageStorageId,
+      audioStorageId,
+      audioDurationMs,
+      clientMessageId,
+      createdAt: now,
+    });
+
+    const lastMessageText =
+      type === 'text'
+        ? maskedContent
+        : type === 'image'
+          ? 'Photo'
+          : type === 'video'
+            ? 'Video'
+            : 'Voice message';
+    await ctx.db.patch(conversationId, {
+      lastMessageAt: now,
+      lastMessageText,
+    });
+
+    const hiddenRow = await ctx.db
+      .query('chatRoomPrivateConversationHides')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', peerUserId).eq('conversationId', conversationId)
+      )
+      .first();
+    if (hiddenRow) {
+      await ctx.db.delete(hiddenRow._id);
+    }
+
+    return { success: true as const, messageId };
+  },
+});
+
+export const setRoomDmTypingStatus = mutation({
+  args: {
+    conversationId: v.id('chatRoomPrivateConversations'),
+    token: v.string(),
+    isTyping: v.boolean(),
+  },
+  handler: async (ctx, { conversationId, token, isTyping }) => {
+    try {
+      const { userId, conversation } = await requireChatRoomPrivateConversationAccess(ctx, conversationId, token);
+      const existing = await ctx.db
+        .query('chatRoomPrivateTyping')
+        .withIndex('by_user_conversation', (q) =>
+          q.eq('userId', userId).eq('conversationId', conversationId)
+        )
+        .first();
+      if (!isTyping) {
+        if (existing) await ctx.db.delete(existing._id);
+        return { success: true as const };
+      }
+      const now = Date.now();
+      if (existing) {
+        await ctx.db.patch(existing._id, { isTyping, updatedAt: now });
+      } else {
+        await ctx.db.insert('chatRoomPrivateTyping', {
+          conversationId,
+          roomId: conversation.roomId,
+          userId,
+          isTyping,
+          updatedAt: now,
+        });
+      }
+      return { success: true as const };
+    } catch {
+      return { success: false as const };
+    }
+  },
+});
+
+export const getRoomDmTypingStatus = query({
+  args: {
+    conversationId: v.id('chatRoomPrivateConversations'),
+    token: v.string(),
+  },
+  handler: async (ctx, { conversationId, token }) => {
+    try {
+      const { peerUserId } = await requireChatRoomPrivateConversationAccess(ctx, conversationId, token);
+      const typing = await ctx.db
+        .query('chatRoomPrivateTyping')
+        .withIndex('by_user_conversation', (q) =>
+          q.eq('userId', peerUserId).eq('conversationId', conversationId)
+        )
+        .first();
+      if (!typing) return { isTyping: false };
+      return { isTyping: typing.isTyping && Date.now() - typing.updatedAt <= 5000 };
+    } catch {
+      return { isTyping: false };
     }
   },
 });
@@ -6763,10 +6887,15 @@ export const getPasswordAttemptState = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     // Validate auth
     if (!authUserId || authUserId.trim().length === 0) {
+      return { stage: 1, attemptsRemaining: 3, blocked: false, cooldown: false };
+    }
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
+    if (!userId) {
       return { stage: 1, attemptsRemaining: 3, blocked: false, cooldown: false };
     }
 
@@ -6823,12 +6952,14 @@ export const joinRoomWithPassword = mutation({
     roomId: v.id('chatRooms'),
     password: v.string(),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, password, authUserId }) => {
+  handler: async (ctx, { roomId, password, authUserId, sessionToken }) => {
     // Validate auth
     if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
     }
+    const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
     // Get the room
     const room = await ctx.db.get(roomId);
@@ -6896,10 +7027,6 @@ export const joinRoomWithPassword = mutation({
 
     if (isCorrect) {
       // Password correct - join the room
-      const userId = await resolveUserIdByAuthId(ctx, authUserId);
-      if (!userId) {
-        return { success: false, message: 'User not found' };
-      }
       try {
         await requireChatRoomTermsAccepted(ctx, userId);
         await requirePrivateRoomAdult(ctx, userId);
@@ -6944,8 +7071,7 @@ export const joinRoomWithPassword = mutation({
         });
         // P1: Recompute memberCount from source of truth to avoid lost
         // updates from concurrent joins racing on a stale read of `room`.
-        const actualMemberCount = await recomputeMemberCount(ctx, roomId);
-        await ctx.db.patch(roomId, { memberCount: actualMemberCount });
+        await patchMemberCountIfExact(ctx, roomId);
       }
 
       // Clear attempt record on success
@@ -7034,14 +7160,10 @@ export const heartbeatPresence = mutation({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Validate auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { success: false };
-    }
-
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { success: false };
     }
@@ -7049,6 +7171,9 @@ export const heartbeatPresence = mutation({
     // Verify room exists
     const room = await ctx.db.get(roomId);
     if (!room) {
+      return { success: false };
+    }
+    if (room.expiresAt && room.expiresAt <= Date.now()) {
       return { success: false };
     }
 
@@ -7062,11 +7187,21 @@ export const heartbeatPresence = mutation({
       const bannedPresenceRows = await ctx.db
         .query('chatRoomPresence')
         .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-        .collect();
+        .take(10);
       for (const row of bannedPresenceRows) {
         await ctx.db.delete(row._id);
       }
       return { success: false };
+    }
+
+    if (!room.isPublic) {
+      const membership = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+      if (!membership || membership.isBanned) {
+        return { success: false };
+      }
     }
 
     // SINGLE-ROOM PRESENCE: ensure user exists in only one room at a time.
@@ -7074,7 +7209,7 @@ export const heartbeatPresence = mutation({
     const otherPresence = await ctx.db
       .query('chatRoomPresence')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(10);
     let deletedOther = 0;
     for (const row of otherPresence) {
       if (row.roomId !== roomId) {
@@ -7113,12 +7248,6 @@ export const heartbeatPresence = mutation({
       });
     }
 
-    console.log('CHATROOM_BACKEND_ONLINE_COUNT', {
-      roomId,
-      userId: String(userId).slice(0, 12),
-      deletedOtherRooms: deletedOther,
-    });
-
     return { success: true };
   },
 });
@@ -7131,19 +7260,35 @@ export const getRoomPresence = query({
   args: {
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
+    sessionToken: v.string(),
   },
-  handler: async (ctx, { roomId, authUserId }) => {
-    // Validate auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      return { online: [], recentlyLeft: [] };
-    }
-
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, { roomId, authUserId, sessionToken }) => {
+    const userId = await getAuthenticatedUserOrNull(ctx, { authUserId, sessionToken });
     if (!userId) {
       return { online: [], recentlyLeft: [] };
     }
 
     const now = Date.now();
+    const room = await ctx.db.get(roomId);
+    if (!room || (room.expiresAt && room.expiresAt <= now)) {
+      return { online: [], recentlyLeft: [] };
+    }
+    const ban = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (ban) {
+      return { online: [], recentlyLeft: [] };
+    }
+    if (!room.isPublic) {
+      const membership = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+        .first();
+      if (!membership || membership.isBanned) {
+        return { online: [], recentlyLeft: [] };
+      }
+    }
 
     // P2-5: Bound the read to the "recently-left" window (anything older
     // is dropped by the UI anyway), indexed by (roomId, lastHeartbeatAt),
@@ -7179,7 +7324,7 @@ export const getRoomPresence = query({
     const members = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
+      .take(ROOM_MEMBER_LIST_LIMIT);
 
     const memberRoleMap = new Map<string, 'owner' | 'admin' | 'member'>();
     for (const m of members) {

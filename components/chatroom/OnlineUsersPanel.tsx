@@ -143,10 +143,6 @@ export default function OnlineUsersPanel({
       const result: SectionData[] = [];
 
       // CHATROOM_PRESENCE_STATE: Log presence state
-      console.log('CHATROOM_PRESENCE_STATE', {
-        onlineCount: presenceOnline?.length ?? 0,
-        recentlyLeftCount: presenceRecentlyLeft?.length ?? 0,
-      });
 
       if (presenceOnline && presenceOnline.length > 0) {
         const online: UnifiedUser[] = presenceOnline.map((u) => ({
@@ -260,13 +256,6 @@ export default function OnlineUsersPanel({
       : item.displayName;
 
     // CHATROOM_USERS_PANEL_RENDER: Log what's being rendered
-    console.log('CHATROOM_USERS_PANEL_RENDER', {
-      userId: item.id.slice(0, 12),
-      displayName: item.displayName,
-      age: item.age,
-      isOnline: item.isOnline,
-      hasAvatar: !!item.avatar,
-    });
 
     return (
       <Pressable

@@ -285,13 +285,13 @@ async function hasDeepConnectViewerReportedTarget(
   viewerUserId: Id<'users'>,
   targetUserId: Id<'users'>,
 ): Promise<boolean> {
-  const report = await ctx.db
+  const reports = await ctx.db
     .query('reports')
     .withIndex('by_reporter_reported_created', (q) =>
       q.eq('reporterId', viewerUserId).eq('reportedUserId', targetUserId)
     )
-    .first();
-  return !!report;
+    .collect();
+  return reports.some((report) => !report.roomId);
 }
 
 export async function canDeepConnectInteract(
@@ -533,7 +533,9 @@ export const getProfiles = query({
     }
 
     const swipedUserIds = new Set(myPrivateSwipes.map((s) => s.toUserId as string));
-    const reportedUserIds = new Set(myReports.map((r) => r.reportedUserId as string));
+    const reportedUserIds = new Set(
+      myReports.filter((r) => !r.roomId).map((r) => r.reportedUserId as string)
+    );
 
     // P1-1: Bounded, recency-ordered candidate fetch.
     // Replaces the prior unbounded .collect() over the entire enabled
@@ -945,13 +947,13 @@ export const getProfileCard = query({
       .first();
     if (blockedByOwner) return null;
 
-    const reportedByViewer = await ctx.db
+    const reportsByViewer = await ctx.db
       .query('reports')
       .withIndex('by_reporter_reported_created', (q) =>
         q.eq('reporterId', viewerUserId).eq('reportedUserId', p.userId)
       )
-      .first();
-    if (reportedByViewer) return null;
+      .collect();
+    if (reportsByViewer.some((report) => !report.roomId)) return null;
 
     // Cast to access optional schema fields that may not be in generated types yet
     const profile = p as typeof p & {
@@ -1063,13 +1065,13 @@ export const getProfileByUserId = query({
     if (blockedByOwner) return null;
 
     // If the viewer reported this profile owner, fail closed like an unavailable profile.
-    const reportedByViewer = await ctx.db
+    const reportsByViewer = await ctx.db
       .query('reports')
       .withIndex('by_reporter_reported_created', (q) =>
         q.eq('reporterId', viewerUserId).eq('reportedUserId', args.userId)
       )
-      .first();
-    if (reportedByViewer) return null;
+      .collect();
+    if (reportsByViewer.some((report) => !report.roomId)) return null;
 
     // Cast to access optional schema fields that may not be in generated types yet
     const profile = p as typeof p & {
