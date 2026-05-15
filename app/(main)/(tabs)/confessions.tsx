@@ -729,12 +729,14 @@ export default function ConfessionsScreen() {
     pendingBlockAuthorsRef.current.add(authorId);
 
     try {
-      if (!token) {
+      if (!token || !currentUserId) {
         Alert.alert('Unable to block user right now');
         return;
       }
+      // P1-3: backend now requires (token, authUserId).
       await blockUserMutation({
         token,
+        authUserId: currentUserId,
         blockedUserId: authorId as any,
       });
       blockUserLocal(authorId);

@@ -40,6 +40,10 @@ const REPORT_REASONS: { key: ReportReason; label: string; icon: IoniconName }[] 
 
 interface ReportModalProps {
   visible: boolean;
+  // P0-1: `reporterId` is no longer trusted from the parent component — the
+  // backend now derives the reporter from the validated session token.
+  // The prop is retained for backward compatibility with existing callers
+  // but is intentionally unused.
   reporterId: string;
   reportedUserId: string;
   chatId: string;
@@ -53,9 +57,16 @@ const asMediaId = (value: string): Id<'media'> => value as Id<'media'>;
 const getErrorMessage = (error: unknown, fallback: string) =>
   error instanceof Error && error.message ? error.message : fallback;
 
+const REPORT_ERROR_COPY: Record<string, string> = {
+  cannot_report_self: 'You cannot report yourself.',
+  duplicate_recent_report: 'You already reported this user in the last 24 hours.',
+  rate_limited: 'Too many reports recently. Please try again later.',
+  description_too_long: 'Please shorten the additional details and try again.',
+};
+
 export function ReportModal({
   visible,
-  reporterId,
+  reporterId: _reporterId,
   reportedUserId,
   chatId,
   mediaId,
@@ -63,6 +74,7 @@ export function ReportModal({
 }: ReportModalProps) {
   const insets = useSafeAreaInsets();
   const token = useAuthStore((s) => s.token);
+  const authUserId = useAuthStore((s) => s.userId);
   const [selectedReason, setSelectedReason] = useState<ReportReason | null>(null);
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -84,16 +96,34 @@ export function ReportModal({
       return;
     }
 
+    // P0-1: Backend now requires (token, authUserId) and derives reporterId
+    // server-side. Bail out if the session is missing rather than calling the
+    // mutation with invalid args.
+    if (!token || !authUserId) {
+      Alert.alert('Error', 'Please log in again to submit this report.');
+      return;
+    }
+
     setSubmitting(true);
     try {
-      await reportMedia({
-        reporterId: asUserId(reporterId),
+      const result = await reportMedia({
+        token,
+        authUserId,
         reportedUserId: asUserId(reportedUserId),
         chatId: asConversationId(chatId),
         mediaId: mediaId ? asMediaId(mediaId) : undefined,
         reason: selectedReason,
         description: description.trim() || undefined,
       });
+
+      if (!result?.success) {
+        const errorKey = result?.error ?? 'unknown';
+        Alert.alert(
+          'Error',
+          REPORT_ERROR_COPY[errorKey] ?? 'Failed to submit report',
+        );
+        return;
+      }
 
       trackEvent({ name: 'report_user', reportedUserId, reason: selectedReason });
       handleClose();

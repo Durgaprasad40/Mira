@@ -698,6 +698,21 @@ export const getDiscoverProfiles = query({
         }
         continue;
       }
+      // P1-2: Shadow-ban from Discover. Set true when an automated
+      // high-severity behaviorFlag is created (e.g. >=10 reports/hour or
+      // crossing the high-severity report threshold). Filtered here so the
+      // user is silently removed from Phase-1 Discover without leaking the
+      // moderation signal to either side. Denormalized field on `users`
+      // avoids a per-candidate behaviorFlags lookup (no full table scan).
+      if (user.discoverShadowBanned === true) {
+        if (DISCOVER_AUDIT_ENABLED) {
+          console.log('[DISCOVER_AUDIT][visibility] discover_shadow_banned', {
+            viewer: currentUser._id,
+            candidate: user._id,
+          });
+        }
+        continue;
+      }
       if (isEffectivelyHiddenFromDiscover(user)) {
         if (DISCOVER_AUDIT_ENABLED) {
           console.log('[DISCOVER_AUDIT][visibility] hidden_from_discover', {
@@ -2303,6 +2318,83 @@ export const recordExploreImpression = mutation({
             }
           }
         }
+      }
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// recordPhase1Impression — P1-9. Records that the given Phase-1 Discover
+// candidate profiles were shown to the viewer in the main Discover deck.
+// Mirrors `recordExploreImpression` but is scoped to the (viewer, viewedUser)
+// pair only — Discover has no per-category dimension. Designed to be called
+// fire-and-forget from the client immediately after a successful
+// `getDiscoverProfiles` fetch, batched per page.
+//
+// Anti-abuse:
+//   * Hard-cap batch size (MAX_EXPLORE_IMPRESSION_BATCH = 100) so a tampered
+//     client cannot spam thousands of pair rows in a single mutation.
+//   * Self-impression filtered out (sanity).
+//   * Per-pair upsert + de-duplication of any historical multi-row state so
+//     the table never accumulates a row-per-fetch over time.
+//   * Silent return on auth failure / empty input — same shape as
+//     recordExploreImpression so the caller never blocks the UI on this.
+// ---------------------------------------------------------------------------
+
+export const recordPhase1Impression = mutation({
+  args: {
+    token: v.string(),
+    viewedUserIds: v.array(v.id('users')),
+  },
+  handler: async (ctx, args) => {
+    const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
+    if (sessionToken.length === 0) return;
+
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) return;
+    const resolvedViewerId: Id<'users'> = viewerId;
+
+    const dedupedIds = [...new Set(args.viewedUserIds)]
+      .filter((viewedUserId) => viewedUserId !== resolvedViewerId)
+      .slice(0, MAX_EXPLORE_IMPRESSION_BATCH);
+    if (dedupedIds.length === 0) return;
+
+    const now = Date.now();
+
+    for (const viewedUserId of dedupedIds) {
+      const existingRows = await ctx.db
+        .query('phase1ViewerImpressions')
+        .withIndex('by_pair', (q) =>
+          q.eq('viewerId', resolvedViewerId).eq('viewedUserId', viewedUserId)
+        )
+        .collect();
+
+      if (existingRows.length > 0) {
+        // Upsert: keep the most recent row, fold any historical duplicates
+        // into a single row, refresh lastSeenAt + accumulate seenCount.
+        const [keeper, ...duplicates] = [...existingRows].sort((a, b) => {
+          const aTime = a.lastSeenAt ?? a._creationTime;
+          const bTime = b.lastSeenAt ?? b._creationTime;
+          return bTime - aTime;
+        });
+        const mergedSeenCount = existingRows.reduce(
+          (total, row) => total + Math.max(row.seenCount ?? 1, 1),
+          1,
+        );
+        await ctx.db.patch(keeper._id, {
+          lastSeenAt: now,
+          seenCount: mergedSeenCount,
+        });
+        for (const duplicate of duplicates) {
+          await ctx.db.delete(duplicate._id);
+        }
+      } else {
+        await ctx.db.insert('phase1ViewerImpressions', {
+          viewerId: resolvedViewerId,
+          viewedUserId,
+          lastSeenAt: now,
+          seenCount: 1,
+        });
       }
     }
   },

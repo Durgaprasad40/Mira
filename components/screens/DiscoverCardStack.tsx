@@ -849,6 +849,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // ── Swipe lock: prevents re-entrant swipes while animation + processing is in flight ──
   // Acquired in animateSwipe, released after advanceCard + match logic complete.
   const swipeLockRef = useRef(false);
+  // P2-1: React-state mirror of swipeLockRef so the action-button row can
+  // re-render `disabled` while a swipe is in flight. The ref alone does not
+  // trigger re-renders, leaving Like/Pass/Stand-Out buttons visually active
+  // even though duplicate taps are silently swallowed by the lock guard.
+  const [isSwipeInFlight, setIsSwipeInFlight] = useState(false);
   const prevDiscoverReadyLogKeyRef = useRef<string | null>(null);
   // LIVE_LOCATION: Prevent duplicate location refresh requests during focus
   const isRefreshingLocationRef = useRef(false);
@@ -868,6 +873,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const acquireSwipeLock = useCallback((): number => {
     swipeIdRef.current += 1;
     swipeLockRef.current = true;
+    // P2-1: Mirror lock to React state so the button row re-renders disabled.
+    // React 18+ silently no-ops setState on unmounted components, so the
+    // mountedRef guard below is unnecessary here.
+    setIsSwipeInFlight(true);
     return swipeIdRef.current;
   }, []);
 
@@ -879,6 +888,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const releaseSwipeLock = useCallback((id: number): void => {
     if (swipeIdRef.current === id) {
       swipeLockRef.current = false;
+      // P2-1: Re-enable buttons once the in-flight swipe owner releases.
+      setIsSwipeInFlight(false);
     }
     // else: stale callback from old swipe — ignore silently
   }, []);
@@ -1091,7 +1102,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       !shouldHoldPhase1Query
         ? {
             token: token!.trim(),
-            sortBy: (sortBy || "recommended") as any,
+            // P3-4: `sortBy` is typed `SortOption` in filterStore and the
+            // Convex `getDiscoverProfiles` args union accepts exactly the
+            // same five literals, so no `as any` is needed here.
+            sortBy: sortBy || "recommended",
             // P2-4: First page uses larger size to give the deck enough
             // cushion before background pagination kicks in.
             limit: phase1FetchOffset === 0 ? PHASE1_FIRST_PAGE_SIZE : PHASE1_PAGE_SIZE,
@@ -2232,6 +2246,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       isFocusedRef.current = true;
       navigatingRef.current = false;
       swipeLockRef.current = false;
+      // P2-1: Keep React-state mirror in sync when focus resets the lock,
+      // otherwise the action buttons could remain visually disabled after
+      // a navigation away+back if a stale swipe was still pending.
+      setIsSwipeInFlight(false);
 
       const now = Date.now();
       const shouldRefreshLocation =
@@ -2259,6 +2277,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // from the previous focus session. Their releaseSwipeLock(oldId) calls will no-op.
       swipeIdRef.current += 1;
       swipeLockRef.current = false;
+      // P2-1: Mirror the lock reset to React state so buttons aren't left
+      // disabled across blur→focus cycles.
+      setIsSwipeInFlight(false);
       pendingPhase2SwipeRef.current = null;
       reconciledPhase2SwipeIdsRef.current.clear();
       // Reset all shared values on blur
@@ -3006,10 +3027,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             clearTimeout(slowSwipeTimer);
           }
         } else {
-          const timeoutPromise = new Promise<null>((_, reject) =>
-            setTimeout(() => reject(new Error("Swipe timed out")), SWIPE_TIMEOUT_MS)
-          );
-          result = await Promise.race([swipePromise, timeoutPromise]);
+          // P2-2: Mirror the Phase-2 honest "still confirming" pattern for
+          // Phase-1 live swipes (and demo). Previously we hard-rejected via
+          // Promise.race after 6s, which surfaced a "Please try again" error
+          // even when the mutation was still in flight and would shortly
+          // succeed — leading to duplicate likes if the user retried. Now we
+          // keep the swipe lock held, surface a soft toast once at 6s, and
+          // settle on the real backend result. Lock is released by the outer
+          // finally block once the mutation resolves; navigation away clears
+          // it via the focus-change effect.
+          const slowSwipeTimer = setTimeout(() => {
+            if (!mountedRef.current || swipeIdRef.current !== activeSwipeId) {
+              return;
+            }
+            Toast.show("Still confirming that swipe...");
+          }, SWIPE_TIMEOUT_MS);
+
+          try {
+            result = await swipePromise;
+          } finally {
+            clearTimeout(slowSwipeTimer);
+          }
         }
 
         // LOG_NOISE_FIX: Match logging moved to trackAction/analytics
@@ -4425,10 +4463,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             styles.actionButton,
             styles.premiumSkipBtn,
             isPhase2 && styles.deepConnectSkipBtn,
-            (!current || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
+            // P2-1: also visually disable while a swipe is in flight.
+            (!current || isSwipeInFlight || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
           ]}
           onPress={() => animateSwipeRef.current("left")}
-          disabled={!current || (isPhase2 && !phase2TopCardReady)}
+          disabled={!current || isSwipeInFlight || (isPhase2 && !phase2TopCardReady)}
           feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="light"
         >
@@ -4467,11 +4506,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             styles.actionButton,
             styles.premiumStandOutBtn,
             isPhase2 && styles.deepConnectStandOutBtn,
-            (hasReachedStandOutLimit() || !current || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
+            // P2-1: also visually disable while a swipe is in flight.
+            (hasReachedStandOutLimit() || !current || isSwipeInFlight || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
           ]}
           onPress={() => {
             const c = currentRef.current;
-            if (!hasReachedStandOutLimit() && c && (!isPhase2 || phase2TopCardReady)) {
+            // P2-1: also reject taps during in-flight swipe to avoid opening
+            // the Stand Out sheet while a swipe animation/network is active.
+            if (!hasReachedStandOutLimit() && c && !isSwipeInFlight && (!isPhase2 || phase2TopCardReady)) {
               // Open inline composer over the current profile card. The
               // numeric `standOutsLeft` is read live by the sheet via the
               // standOutsRemaining() callback below — no need to pass it
@@ -4479,7 +4521,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               setStandOutSheetTarget({ profileId: c.id, name: c.name });
             }
           }}
-          disabled={hasReachedStandOutLimit() || !current || (isPhase2 && !phase2TopCardReady)}
+          disabled={hasReachedStandOutLimit() || !current || isSwipeInFlight || (isPhase2 && !phase2TopCardReady)}
           feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="medium"
         >
@@ -4520,10 +4562,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             styles.actionButton,
             styles.premiumLikeBtn,
             isPhase2 && styles.deepConnectLikeBtn,
-            (!current || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
+            // P2-1: also visually disable while a swipe is in flight.
+            (!current || isSwipeInFlight || (isPhase2 && !phase2TopCardReady)) && styles.premiumBtnDisabled,
           ]}
           onPress={() => animateSwipeRef.current("right")}
-          disabled={!current || (isPhase2 && !phase2TopCardReady)}
+          disabled={!current || isSwipeInFlight || (isPhase2 && !phase2TopCardReady)}
           feedbackScale={isPhase2 ? DC_PRESS_SCALE : P1_PRESS_SCALE}
           hapticType="medium"
         >

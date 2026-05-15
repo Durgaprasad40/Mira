@@ -538,6 +538,12 @@ export default defineSchema({
     isActive: v.boolean(),
     isBanned: v.boolean(),
     banReason: v.optional(v.string()),
+    // P1-2: Denormalized "shadow ban from Discover" flag. Set true when an
+    // automated high-severity behaviorFlag is created (e.g. >=10 reports in
+    // 1h, or repeated reports crossing the high-severity threshold). Filtered
+    // out by `getDiscoverProfiles` so the user no longer surfaces in Phase-1
+    // Discover. Cleared by moderators (out of P1 scope; manual DB action).
+    discoverShadowBanned: v.optional(v.boolean()),
     deletedAt: v.optional(v.number()), // Soft delete timestamp (account deletion)
     deletionFinalizedAt: v.optional(v.number()), // When the 30-day soft-delete window was finalized
 
@@ -1291,6 +1297,22 @@ export default defineSchema({
   })
     .index('by_user_device_window', ['userId', 'deviceHash', 'windowKind']),
 
+  // Generic per-user action rate-limit counters.
+  // Used by report flows, swipe velocity guards, pre-match text caps,
+  // and per-recipient Discover-notification caps. Each row holds a fixed
+  // window counter for one (userId, action, windowKind) tuple. Windows
+  // reset by replacing windowStartedAt + count (see reserveActionSlots
+  // in convex/actionRateLimits.ts).
+  actionRateLimits: defineTable({
+    userId: v.id('users'),
+    action: v.string(),
+    windowKind: v.string(),
+    windowStartedAt: v.number(),
+    count: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user_action_window', ['userId', 'action', 'windowKind']),
+
   // Phase 1 Background Crossed Paths — server-side feature flag table.
   // Single source of truth for kill-switching the entire background
   // pipeline. The only flag currently consumed is bgCrossedPathsEnabled;
@@ -1405,6 +1427,16 @@ export default defineSchema({
     roomId: v.optional(v.string()),
     messageId: v.optional(v.string()),
     reportType: v.optional(v.union(v.literal('user'), v.literal('content'))),
+    // P1-6: Origin surface for the report (where the user filed it from).
+    // Optional for back-compat with existing rows that pre-date this field.
+    source: v.optional(v.union(
+      v.literal('discover'),
+      v.literal('profile'),
+      v.literal('chat'),
+      v.literal('media'),
+      v.literal('confession'),
+      v.literal('unknown'),
+    )),
   })
     .index('by_reported_user', ['reportedUserId'])
     .index('by_reporter', ['reporterId'])
@@ -2971,4 +3003,20 @@ export default defineSchema({
     .index('by_viewer_category_lastSeenAt', ['viewerId', 'categoryId', 'lastSeenAt'])
     // Upsert path: locate existing (viewer, viewed, category) row.
     .index('by_pair_category', ['viewerId', 'viewedUserId', 'categoryId']),
+
+  // P1-9: Phase-1 Discover impression recording.
+  // Records (viewerId, viewedUserId) pairs that surfaced in the Discover deck
+  // so the backend can dedupe / suppress / measure later. Mirrors
+  // exploreViewerImpressions but without the categoryId scope (Discover is a
+  // single feed). Hard safety filters (block, report, banned, hidden) remain
+  // enforced upstream by getDiscoverProfiles — this table is metric-only.
+  phase1ViewerImpressions: defineTable({
+    viewerId: v.id('users'),
+    viewedUserId: v.id('users'),
+    lastSeenAt: v.number(),
+    seenCount: v.number(),
+  })
+    .index('by_viewer', ['viewerId'])
+    .index('by_viewer_lastSeenAt', ['viewerId', 'lastSeenAt'])
+    .index('by_pair', ['viewerId', 'viewedUserId']),
 });

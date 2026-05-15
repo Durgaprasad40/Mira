@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
 import { Id, Doc } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { reserveActionSlots } from './actionRateLimits';
 import { softMaskText } from './softMask';
 import { DEFAULT_MIN_AGE, normalizeDiscoveryPreferences } from '../lib/discoveryDefaults';
 import { getSafePhase1PrimaryPhoto } from './phase1Media';
@@ -55,6 +56,83 @@ async function getPhase1PrimaryPhoto(
 
 function isPhase1UserAvailable(user: Doc<'users'> | null): user is Doc<'users'> {
   return !!user && user.isActive !== false && user.isBanned !== true && !user.deletedAt;
+}
+
+// P0-5: Per-recipient daily cap for Phase-1 Discover-surface notifications
+// (matches, messages, likes, super likes). Recipient also has a master toggle
+// (`notificationsEnabled`) and per-category granular toggles. Sender storms
+// can no longer flood a recipient's bell beyond the daily cap.
+const PHASE1_NOTIFICATION_DAILY_CAP = 50;
+
+type Phase1NotificationCategory = 'match' | 'message' | 'like_or_super_like';
+
+type Phase1NotificationType =
+  | 'match'
+  | 'message'
+  | 'like'
+  | 'super_like';
+
+type Phase1NotificationData = {
+  matchId?: string;
+  conversationId?: string;
+  userId?: string;
+  likeType?: 'like' | 'super_like';
+};
+
+async function tryInsertPhase1Notification(
+  ctx: MutationCtx,
+  recipientId: Id<'users'>,
+  category: Phase1NotificationCategory,
+  payload: {
+    type: Phase1NotificationType;
+    title: string;
+    body: string;
+    data: Phase1NotificationData;
+    dedupeKey: string;
+    createdAt: number;
+    expiresAt?: number;
+  },
+): Promise<void> {
+  const recipient = await ctx.db.get(recipientId);
+  if (!recipient) return;
+
+  // Master switch — required field, default ON only if undefined for legacy rows.
+  if (recipient.notificationsEnabled === false) return;
+
+  // Granular preference. `undefined` is treated as ON (default).
+  const granular = (() => {
+    switch (category) {
+      case 'match':
+        return recipient.notifyNewMatches;
+      case 'message':
+        return recipient.notifyNewMessages;
+      case 'like_or_super_like':
+        return recipient.notifyLikesAndSuperLikes;
+    }
+  })();
+  if (granular === false) return;
+
+  // Per-recipient daily cap. Reservation is silently dropped if cap is hit so
+  // a single sender (or burst of senders) cannot flood the recipient's bell.
+  const cap = await reserveActionSlots(
+    ctx,
+    recipientId,
+    'phase1_notification',
+    [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: PHASE1_NOTIFICATION_DAILY_CAP }],
+  );
+  if (!cap.accept) return;
+
+  await ctx.db.insert('notifications', {
+    userId: recipientId,
+    type: payload.type,
+    title: payload.title,
+    body: payload.body,
+    data: payload.data,
+    phase: 'phase1',
+    dedupeKey: payload.dedupeKey,
+    createdAt: payload.createdAt,
+    expiresAt: payload.expiresAt,
+  });
 }
 
 function isDiscoveryPaused(user: Pick<Doc<'users'>, 'isDiscoveryPaused' | 'discoveryPausedUntil'>): boolean {
@@ -826,9 +904,10 @@ export const swipe = mutation({
       throw new Error(statusMessages[fromStatus] || 'Verification required to swipe.');
     }
 
-    // TODO: Subscription restrictions disabled for testing mode.
-    // Re-enable usage limits once testing is complete.
-    // if (fromUser.gender === 'male') { ... }
+    // P1-1: Subscription gating is intentionally separate; safety-relevant
+    // daily caps for like / super_like are enforced universally below via
+    // DAILY_LIKE_LIMIT_FREE / DAILY_STANDOUT_LIMIT_FREE, which apply to all
+    // non-policy-unlimited users. No subscription product logic is added here.
 
     // Check if already swiped
     const existingLike = await ctx.db
@@ -840,6 +919,46 @@ export const swipe = mutation({
 
     if (existingLike) {
       throw new Error('Already swiped on this user');
+    }
+
+    // P0-4: Per-user velocity caps to prevent enumeration / spam storms.
+    // Reserved AFTER the duplicate check so repeat targets fast-fail without
+    // burning a slot. The text action's per-day cap is enforced separately
+    // inside the text branch below (P0-6); the duplicate check above already
+    // gives text a 1/pair lifetime guarantee.
+    const velocityWindows = (() => {
+      switch (action) {
+        case 'pass':
+          return [
+            { kind: '1sec', windowMs: 1_000, max: 5 },
+            { kind: '1hour', windowMs: 60 * 60 * 1000, max: 600 },
+          ];
+        case 'like':
+          return [
+            { kind: '1sec', windowMs: 1_000, max: 1 },
+            { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+          ];
+        case 'super_like':
+          return [
+            { kind: '1min', windowMs: 60 * 1000, max: 1 },
+            { kind: '1hour', windowMs: 60 * 60 * 1000, max: 5 },
+          ];
+        case 'text':
+          return null;
+        default:
+          return null;
+      }
+    })();
+    if (velocityWindows) {
+      const velocityLimit = await reserveActionSlots(
+        ctx,
+        fromUserId,
+        `swipe_${action}`,
+        velocityWindows,
+      );
+      if (!velocityLimit.accept) {
+        throw new Error('Slow down — too many actions in a short period.');
+      }
     }
 
     // Stage-2 Discover auth hardening: re-check hard Discover eligibility
@@ -913,13 +1032,30 @@ export const swipe = mutation({
       }
     }
 
-    // TODO: Usage count updates disabled for testing mode.
-    // Re-enable once testing is complete.
+    // P1-1: No separate per-user usage counters are written here. Daily
+    // caps for like / super_like are derived directly from the `likes`
+    // table via the indexed `by_from_user_createdAt` query above, which
+    // is the canonical source of truth and avoids counter drift. Velocity
+    // caps are enforced via `actionRateLimits` (P0-4).
 
     // Handle text action: send a direct message via message token (pre-match conversation)
     if (action === 'text') {
       if (!message) {
         throw new Error('Message is required for text action');
+      }
+
+      // P0-6: Pre-match text spam protection. Daily cap of 10/sender. The
+      // 1/pair lifetime guarantee is already provided by the `existingLike`
+      // duplicate check above (one likes row per pair, all subsequent swipe
+      // actions blocked for that pair).
+      const textLimit = await reserveActionSlots(
+        ctx,
+        fromUserId,
+        'swipe_text',
+        [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 }],
+      );
+      if (!textLimit.accept) {
+        throw new Error('Daily message limit reached. Please try again tomorrow.');
       }
 
       // D1-REPAIR: Check if either user has blocked the other
@@ -945,15 +1081,19 @@ export const swipe = mutation({
       });
 
       // Notify the receiver
-      // D3: Add dedupeKey and expiresAt for consistency with messages.ts notifications
-      await ctx.db.insert('notifications', {
-        userId: toUserId,
+      // P1-10: Dedupe key is scoped to the (sender, recipient) pair rather
+      // than the freshly-created conversationId. The pre-existing
+      // `existingLike` check above already enforces 1-text-per-pair lifetime,
+      // but the pair-scoped key is defense-in-depth: even if a future change
+      // ever loosens that constraint, the bell would still upsert a single
+      // notification per sender→recipient instead of stacking N entries.
+      // P0-5: gated by recipient prefs + per-recipient 24h cap
+      await tryInsertPhase1Notification(ctx, toUserId, 'message', {
         type: 'message',
         title: 'New Direct Message!',
         body: `${fromUser.name} sent you a message`,
         data: { conversationId: conversationId, userId: fromUserId },
-        phase: 'phase1',
-        dedupeKey: `message:${conversationId}:unread`,
+        dedupeKey: `pre_match_text:${fromUserId}:${toUserId}`,
         createdAt: now,
         expiresAt: now + 24 * 60 * 60 * 1000,
       });
@@ -1028,6 +1168,27 @@ export const swipe = mutation({
         // B1 SECURITY: Race condition protection - check for duplicates BEFORE downstream writes
         // If two swipes raced past the existingMatch check, multiple matches may exist.
         // P1-FIX: Use _id (lexicographic) for deterministic winner - both mutations agree on same winner
+        //
+        // P3-5 RACE-SAFETY CONTRACT (no automated test in this repo; Jest is
+        // declared in package.json but no jest.config is wired up, so a
+        // focused test is deferred). The invariant this block enforces:
+        //
+        //   1. Convex `_id` strings are globally unique and stable, so
+        //      `localeCompare` produces a TOTAL ORDER both racing mutations
+        //      agree on.
+        //   2. Each racing mutation picks the same `winnerMatchId` (smallest
+        //      `_id`) WITHOUT cross-mutation coordination.
+        //   3. The loser deletes its own match row and returns the winner's
+        //      id; only the winner runs the downstream conversation /
+        //      notification side-effects.
+        //   4. A strict re-verification (`finalMatches`) below catches the
+        //      degenerate case where both sides happened to delete their own
+        //      row, so we never proceed with stale `matchId` writes.
+        //
+        // Changing the winner rule (e.g. switching to a numeric tiebreaker,
+        // randomized id, or a different field) MUST preserve total ordering
+        // and determinism across mutations or it will silently re-introduce
+        // duplicate matches / duplicate notifications.
         const allMatches = await ctx.db
           .query('matches')
           .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
@@ -1146,26 +1307,23 @@ export const swipe = mutation({
 
         // Create notifications for both users
         // D5: Add dedupeKey and expiresAt for match notifications
+        // P0-5: gated by recipient prefs + per-recipient 24h cap
         const toUser = await ctx.db.get(toUserId);
-        await ctx.db.insert('notifications', {
-          userId: fromUserId,
+        await tryInsertPhase1Notification(ctx, fromUserId, 'match', {
           type: 'match',
           title: 'New Match!',
           body: `You matched with ${toUser?.name || 'someone'}!`,
           data: { matchId: matchId },
-          phase: 'phase1',
           dedupeKey: `match:${matchId}`,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
         });
 
-        await ctx.db.insert('notifications', {
-          userId: toUserId,
+        await tryInsertPhase1Notification(ctx, toUserId, 'match', {
           type: 'match',
           title: 'New Match!',
           body: `You matched with ${fromUser.name}!`,
           data: { matchId: matchId },
-          phase: 'phase1',
           dedupeKey: `match:${matchId}`,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
@@ -1181,25 +1339,23 @@ export const swipe = mutation({
     const senderName = fromUser.name || 'Someone';
 
     if (action === 'like') {
-      await ctx.db.insert('notifications', {
-        userId: toUserId,
+      // P0-5: gated by recipient prefs + per-recipient 24h cap
+      await tryInsertPhase1Notification(ctx, toUserId, 'like_or_super_like', {
         type: 'like',
         title: `${senderName} liked you`,
         body: 'Check your likes to see their profile',
         data: { userId: fromUserId, likeType: 'like' },
-        phase: 'phase1',
         dedupeKey: `like:${fromUserId}`,
         createdAt: now,
         // No expiresAt - notification stays until acted on
       });
     } else if (action === 'super_like') {
-      await ctx.db.insert('notifications', {
-        userId: toUserId,
+      // P0-5: gated by recipient prefs + per-recipient 24h cap
+      await tryInsertPhase1Notification(ctx, toUserId, 'like_or_super_like', {
         type: 'super_like',
         title: `${senderName} super liked you`,
         body: 'Open your likes to view their profile',
         data: { userId: fromUserId, likeType: 'super_like' },
-        phase: 'phase1',
         dedupeKey: `super_like:${fromUserId}`,
         createdAt: now,
         // No expiresAt - notification stays until acted on
@@ -1226,8 +1382,10 @@ export const rewind = mutation({
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');
 
-    // TODO: Subscription restrictions disabled for testing mode.
-    // Re-enable rewind limits once testing is complete.
+    // P1-1: Subscription gating for rewind is intentionally separate; the
+    // universal safety/abuse-prevention check is the 5-second window below
+    // (applies to all users so the action genuinely undoes the most recent
+    // intentional swipe rather than resurrecting an old one).
 
     // Get the last like
     const lastLike = await ctx.db
@@ -1240,8 +1398,13 @@ export const rewind = mutation({
       throw new Error('No swipe to rewind');
     }
 
-    // TODO: Time restriction disabled for testing mode.
-    // Re-enable 5-second window / premium check once testing is complete.
+    // P1-1: Universal 5-second window. Prevents users from rewinding old
+    // swipes long after the fact (which would otherwise let them re-surface
+    // already-decided candidates and bypass daily cap accounting).
+    const REWIND_WINDOW_MS = 5 * 1000;
+    if (Date.now() - lastLike.createdAt > REWIND_WINDOW_MS) {
+      throw new Error('Rewind window expired (last swipe is older than 5 seconds)');
+    }
 
     // Delete the like
     await ctx.db.delete(lastLike._id);
@@ -1356,6 +1519,12 @@ export const getLikesReceived = query({
       const photo = await getPhase1PrimaryPhoto(ctx, like.fromUserId);
 
       // PRODUCT FIX: Always return REAL profile data (no anonymization)
+      // P3-3 SAFE-PAYLOAD CONTRACT: Only public, Phase-1-Discover-equivalent
+      // profile fields are exposed here (name, age, photoUrl, gender). Do NOT
+      // add private identifiers (email, phone, deviceId), location coords,
+      // unredacted DOB, push tokens, raw chat content, Phase-2/private bio or
+      // intent fields, or any moderation state. Anything new must pass the
+      // same "what a swiper would see on the Discover card" bar.
       result.push({
         likeId: like._id,
         userId: like.fromUserId,

@@ -243,7 +243,10 @@ export default function DiscoveryPreferencesScreen() {
     const serverLookingFor = currentUser.lookingFor ?? [];
     const serverRelationshipIntent = currentUser.relationshipIntent ?? [];
     const serverOrientation = currentUser.orientation ?? null;
-    const serverSortBy = (currentUser as any).sortBy ?? 'recommended';
+    // P3-4: `projectCurrentUserForPhase1` (convex/users.ts) projects the
+    // schema's `sortBy` literal union onto the response, so the previous
+    // `as any` is no longer needed.
+    const serverSortBy = currentUser.sortBy ?? 'recommended';
 
     // Update filterStore with server values
     setMinAge(serverMinAge);

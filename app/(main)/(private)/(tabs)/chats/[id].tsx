@@ -102,6 +102,15 @@ const SYSTEM_MESSAGE_ROW_RE = /^\[SYSTEM:[a-z_]+\]/i;
 const DEBUG_PHASE2_CHAT_LOGS =
   __DEV__ && process.env.EXPO_PUBLIC_DEBUG_PHASE2_CHAT === 'true';
 
+// P2-3: Format the server-supplied `retryAfterMs` into a user-facing string.
+// Mirrors the helper used in ReportBlockModal / ReportModal so the Phase-2
+// chat report flow surfaces the same "Slow down" copy on rate_limited.
+function formatRateLimitMessage(retryAfterMs: unknown): string {
+  const raw = typeof retryAfterMs === 'number' && retryAfterMs > 0 ? retryAfterMs : 1000;
+  const seconds = Math.max(1, Math.min(60, Math.ceil(raw / 1000)));
+  return `Slow down. Please try again in ${seconds}s.`;
+}
+
 function getPhase2SecureMediaExpiredAt(message: any, nowMs: number): number | null {
   if (!message?.isProtected) return null;
   if (message.type !== 'image' && message.type !== 'video') return null;
@@ -1781,7 +1790,7 @@ export default function Phase2ChatThread() {
   // --------------------------------------------------------------------- safety handlers
   const handleBlock = useCallback(() => {
     setShowMenu(false);
-    if (!token || !otherUserId) return;
+    if (!token || !otherUserId || !userId) return;
     Alert.alert(
       'Block this person?',
       `${otherUserName} will no longer be able to contact you. This conversation will be hidden.`,
@@ -1792,8 +1801,10 @@ export default function Phase2ChatThread() {
           style: 'destructive',
           onPress: async () => {
             try {
+              // P1-3: backend now requires (token, authUserId).
               await blockUser({
                 token,
+                authUserId: userId,
                 blockedUserId: otherUserId as any,
               });
               if (token && id) {
@@ -1816,6 +1827,7 @@ export default function Phase2ChatThread() {
     );
   }, [
     token,
+    userId,
     otherUserId,
     otherUserName,
     blockUser,
@@ -1887,24 +1899,60 @@ export default function Phase2ChatThread() {
         | 'inappropriate_photos'
         | 'harassment'
         | 'underage'
+        // P3-2: Spam added for parity with the full report modal. `other`
+        // intentionally stays out of this quick-action sheet because it
+        // requires the description sub-view; the dedicated Scam quick
+        // action below already covers the free-form description path.
+        | 'spam'
     ) => {
       setShowReportSheet(false);
-      if (!token || !otherUserId) return;
+      if (!token || !otherUserId || !userId) return;
       try {
-        await reportUser({
+        // P1-3 / P1-6: pass authUserId + source.
+        // P2-3: Inspect the discriminated result so the Phase-2 chat report
+        // flow handles `rate_limited` (with retryAfterMs), `cannot_report_self`,
+        // `duplicate_recent_report`, and `description_too_long` honestly
+        // instead of silently swallowing them as a generic success toast.
+        // P2-9: Convex infers the discriminated union on the result; no `any`
+        // annotation is needed here, the narrowed branches below are typed.
+        const result = await reportUser({
           token,
+          authUserId: userId,
           reportedUserId: otherUserId as any,
           reason,
+          source: 'chat',
         });
-        Alert.alert(
-          'Report submitted',
-          'Thanks — our team will review this report.'
-        );
+        if (result && result.success === false) {
+          if (result.error === 'rate_limited') {
+            Alert.alert('Slow down', formatRateLimitMessage(result.retryAfterMs));
+          } else if (result.error === 'duplicate_recent_report') {
+            // P2-8: Friendly copy — they already reported this user recently.
+            Alert.alert(
+              'Already reported',
+              "Thanks — we'll review this report."
+            );
+          } else if (result.error === 'cannot_report_self') {
+            Alert.alert('Not allowed', 'You cannot report yourself.');
+          } else if (result.error === 'description_too_long') {
+            Alert.alert(
+              'Description too long',
+              'Please keep your report under 500 characters.'
+            );
+          } else {
+            Alert.alert(
+              'Could not submit report',
+              'Please try again in a moment.'
+            );
+          }
+          return;
+        }
+        // P2-8: Aligned success copy with the modal flows.
+        Alert.alert('Report submitted', "Thanks — we'll review this report.");
       } catch (err: any) {
         Alert.alert('Could not submit report', String(err?.message ?? err));
       }
     },
-    [token, otherUserId, reportUser]
+    [token, userId, otherUserId, reportUser]
   );
 
   // MENU-CLEANUP: Phase-2 Scam quick action. Frontend-only mapping to
@@ -1912,22 +1960,50 @@ export default function Phase2ChatThread() {
   // required. Moderators see the descriptive label in the audit row.
   const handleScam = useCallback(async () => {
     setShowMenu(false);
-    if (!token || !otherUserId) return;
+    if (!token || !otherUserId || !userId) return;
     try {
-      await reportUser({
+      // P1-3 / P1-6: pass authUserId + source.
+      // P2-3: Mirror handleReportReason — inspect the discriminated result and
+      // surface rate-limit / dedupe / self-report / description-too-long
+      // explicitly rather than reporting a fake success.
+      // P2-9: rely on Convex's inferred result type instead of widening to any.
+      const result = await reportUser({
         token,
+        authUserId: userId,
         reportedUserId: otherUserId as any,
         reason: 'other',
         description: 'Scam/fraudulent behavior',
+        source: 'chat',
       });
-      Alert.alert(
-        'Reported as scam',
-        'Thanks — our team will review this report.'
-      );
+      if (result && result.success === false) {
+        if (result.error === 'rate_limited') {
+          Alert.alert('Slow down', formatRateLimitMessage(result.retryAfterMs));
+        } else if (result.error === 'duplicate_recent_report') {
+          Alert.alert(
+            'Already reported',
+            "Thanks — we'll review this report."
+          );
+        } else if (result.error === 'cannot_report_self') {
+          Alert.alert('Not allowed', 'You cannot report yourself.');
+        } else if (result.error === 'description_too_long') {
+          Alert.alert(
+            'Description too long',
+            'Please keep your report under 500 characters.'
+          );
+        } else {
+          Alert.alert(
+            'Could not submit report',
+            'Please try again in a moment.'
+          );
+        }
+        return;
+      }
+      // P2-8: Aligned success copy with the modal flows.
+      Alert.alert('Reported as scam', "Thanks — we'll review this report.");
     } catch (err: any) {
       Alert.alert('Could not submit report', String(err?.message ?? err));
     }
-  }, [token, otherUserId, reportUser]);
+  }, [token, userId, otherUserId, reportUser]);
 
   // --------------------------------------------------------------------- render helpers
   // MESSAGES-STABILIZE: Convex `useQuery` returns `undefined` whenever its
@@ -2802,8 +2878,10 @@ export default function Phase2ChatThread() {
         </TouchableOpacity>
       </Modal>
 
-      {/* Report reason sheet — MENU-CLEANUP: 4 reasons only
-          (Spam and Other removed). */}
+      {/* Report reason sheet — P3-2: 5 reasons (Spam restored for parity
+          with the full report modal). `other` intentionally stays out of
+          this sheet — the separate "Scam" menu item maps to other + a
+          fixed description so users still have the free-form path. */}
       <Modal
         visible={showReportSheet}
         transparent
@@ -2824,6 +2902,7 @@ export default function Phase2ChatThread() {
               ['fake_profile', 'Fake profile'],
               ['inappropriate_photos', 'Inappropriate photos'],
               ['harassment', 'Harassment'],
+              ['spam', 'Spam'],
               ['underage', 'Underage'],
             ] as const).map(([reason, label]) => (
               <TouchableOpacity

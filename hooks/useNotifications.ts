@@ -679,8 +679,9 @@ function useNotificationsForPhase(phase: 'phase1' | 'phase2') {
   // The two queries are never combined.
   const phase1Notifications = useQuery(
     api.notifications.getNotifications,
+    // P0-2: token is required server-side; Phase-1 caller must supply it.
     phase === 'phase1' && !isDemoMode && convexUserId && authReady && hasValidToken
-      ? { userId: convexUserId }
+      ? { token: token as string, userId: convexUserId }
       : 'skip',
   );
   const phase2Notifications = useQuery(

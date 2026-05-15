@@ -1,10 +1,11 @@
 import { v } from "convex/values";
-import { internalMutation, mutation, query, QueryCtx } from "./_generated/server";
+import { internalMutation, mutation, MutationCtx, query, QueryCtx } from "./_generated/server";
 import { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { validateAccess } from "./devReset";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateOwnership, validateSessionToken } from "./helpers";
+import { reserveActionSlots } from "./actionRateLimits";
 import { BG_LOCATION_CONSENT_VERSION, NEARBY_CONSENT_VERSION } from "./crossedPaths";
 import {
   hasCurrentBgCrossedPathsConsentOnUser,
@@ -1274,6 +1275,20 @@ export const updatePreferences = mutation({
       throw new Error("Unauthorized: invalid session token");
     }
 
+    // P1-8: Per-user anti-abuse rate limit. Phase-1 Discover preferences are
+    // a tiny payload but each save triggers re-ranking + recommendation
+    // recompute on the next fetch — a tampered client could spam this to
+    // burn server resources or fish for borderline candidates by toggling
+    // age/distance bounds. 30/hr is well above any legitimate user pattern
+    // (preferences screen mounts ~1-2x per session in practice) while still
+    // hard-blocking obvious abuse loops.
+    const prefsLimit = await reserveActionSlots(ctx, userId, 'update_preferences', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+    ]);
+    if (!prefsLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     // BUGFIX #37: Age bounds validation
     if (minAge !== undefined) {
       if (!Number.isFinite(minAge) || minAge < 18 || minAge > 99) {
@@ -2053,22 +2068,31 @@ export const markVerified = mutation({
 // Block user
 export const blockUser = mutation({
   args: {
+    // P1-3: token + authUserId double-validation (validateOwnership) — same
+    // ownership pattern as unblockUser. Prevents an attacker from blocking on
+    // behalf of another user even if they have a stolen/leaked session token
+    // pasted under the wrong authUserId.
     token: v.string(),
+    authUserId: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { token, blockedUserId } = args;
+    const { token, authUserId, blockedUserId } = args;
 
-    const sessionToken = token.trim();
-    const blockerId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
-    if (!blockerId) {
-      return { success: false, error: 'unauthorized' };
+    // P1-3: Server-derived blockerId via validated session+ownership pair.
+    let blockerId;
+    try {
+      blockerId = await validateOwnership(ctx, token, authUserId);
+    } catch {
+      return { success: false as const, error: 'unauthorized' };
     }
 
     // Prevent self-blocking
     if (blockerId === blockedUserId) {
-      return { success: false, error: 'cannot_block_self' };
+      return { success: false as const, error: 'cannot_block_self' };
     }
+
+    const now = Date.now();
 
     // Check if already blocked
     const existing = await ctx.db
@@ -2085,13 +2109,17 @@ export const blockUser = mutation({
         userAId: blockerId,
         userBId: blockedUserId,
       });
-      return { success: true };
+      // P1-4: still re-run match deactivation in case a prior block was
+      // created before this hardening shipped and a stale active match
+      // remains for the pair.
+      await deactivateActiveMatchForPair(ctx, blockerId, blockedUserId, now);
+      return { success: true as const };
     }
 
     await ctx.db.insert("blocks", {
       blockerId,
       blockedUserId,
-      createdAt: Date.now(),
+      createdAt: now,
     });
 
     // Step 5: denormalized trust counter for Discover ranking (scale-safe)
@@ -2108,9 +2136,48 @@ export const blockUser = mutation({
       userBId: blockedUserId,
     });
 
-    return { success: true };
+    // P1-4: Deactivate any active match between blocker + blocked. Without
+    // this, an attacker who already matched could keep harassing through the
+    // existing match/conversation even after being "blocked" — the
+    // bidirectional block check in messages.ts now also short-circuits, but
+    // hard-deactivating the match removes the surface entirely (UI no
+    // longer renders the thread on either side).
+    await deactivateActiveMatchForPair(ctx, blockerId, blockedUserId, now);
+
+    return { success: true as const };
   },
 });
+
+// P1-4 helper: Deactivate the (single) active match between two users, if
+// one exists. Indexed by (user1Id, user2Id) — checks both orderings since
+// match rows are not normalized to a canonical pair direction.
+async function deactivateActiveMatchForPair(
+  ctx: MutationCtx,
+  userAId: Id<'users'>,
+  userBId: Id<'users'>,
+  now: number,
+) {
+  const matchAB = await ctx.db
+    .query('matches')
+    .withIndex('by_users', (q) => q.eq('user1Id', userAId).eq('user2Id', userBId))
+    .first();
+  const matchBA = await ctx.db
+    .query('matches')
+    .withIndex('by_users', (q) => q.eq('user1Id', userBId).eq('user2Id', userAId))
+    .first();
+  for (const match of [matchAB, matchBA]) {
+    if (!match || match.isActive === false) continue;
+    const patch: { isActive: boolean; user1UnmatchedAt?: number; user2UnmatchedAt?: number } = {
+      isActive: false,
+    };
+    if (match.user1Id === userAId) {
+      patch.user1UnmatchedAt = now;
+    } else {
+      patch.user2UnmatchedAt = now;
+    }
+    await ctx.db.patch(match._id, patch);
+  }
+}
 
 // Unblock user
 export const unblockUser = mutation({
@@ -2156,7 +2223,10 @@ export const unblockUser = mutation({
 // Report user
 export const reportUser = mutation({
   args: {
+    // P1-3: token + authUserId double-validation (validateOwnership) — same
+    // ownership pattern as events.reportMedia (P0-1) and unblockUser (P0).
     token: v.string(),
+    authUserId: v.string(),
     reportedUserId: v.id("users"),
     reason: v.union(
       v.literal("fake_profile"),
@@ -2175,22 +2245,55 @@ export const reportUser = mutation({
         })
       )
     ),
+    // P1-6: Origin surface for the report (back-compat optional).
+    source: v.optional(v.union(
+      v.literal('discover'),
+      v.literal('profile'),
+      v.literal('chat'),
+      v.literal('media'),
+      v.literal('confession'),
+      v.literal('unknown'),
+    )),
   },
   handler: async (ctx, args) => {
-    const { token, reportedUserId, reason, description, evidence } = args;
+    const { token, authUserId, reportedUserId, reason, description, evidence, source } = args;
     const now = Date.now();
     const REPORT_FLAG_WINDOW_DAYS = 30;
     const REPORT_FLAG_THRESHOLD = 3;
+    // P1-5: Per-target hourly spike protection. If a single user receives
+    // >=10 reports in the trailing 1-hour window, escalate to a
+    // high-severity behaviorFlag and shadow-ban from Discover. Distinct
+    // from the slow 30-day cumulative threshold (REPORT_FLAG_THRESHOLD)
+    // which graduates from medium → high based on volume.
+    const REPORT_SPIKE_WINDOW_MS = 60 * 60 * 1000;
+    const REPORT_SPIKE_THRESHOLD = 10;
 
-    const sessionToken = token.trim();
-    const reporterId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
-    if (!reporterId) {
-      return { success: false, error: 'unauthorized' };
+    // P1-3: Server-derived reporterId via validated session+ownership pair.
+    let reporterId;
+    try {
+      reporterId = await validateOwnership(ctx, token, authUserId);
+    } catch {
+      return { success: false as const, error: 'unauthorized' };
     }
 
     // Prevent self-reporting
     if (reporterId === reportedUserId) {
-      return { success: false, error: 'cannot_report_self' };
+      return { success: false as const, error: 'cannot_report_self' };
+    }
+
+    // P0-3: Per-reporter anti-abuse velocity limit. Reserve BEFORE dedupe so a
+    // burst of varied targets still gets capped (dedupe alone only protects
+    // against the same target being reported repeatedly).
+    const reportLimit = await reserveActionSlots(ctx, reporterId, 'report_user', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 5 },
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 30 },
+    ]);
+    if (!reportLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited',
+        retryAfterMs: reportLimit.retryAfterMs,
+      };
     }
 
     const existingRecentReport = await ctx.db
@@ -2232,6 +2335,11 @@ export const reportUser = mutation({
       evidence: evidence && evidence.length > 0 ? evidence : undefined,
       status: "pending",
       createdAt: now,
+      // P1-6: Origin surface (chat / profile / discover / media / confession /
+      // unknown). Optional for back-compat with existing rows; new rows
+      // default to 'unknown' if the caller did not pass it so moderators
+      // always see *something* in the dashboard.
+      source: source ?? 'unknown',
     });
 
     // Step 5: denormalized trust counter for Discover ranking (scale-safe)
@@ -2253,7 +2361,15 @@ export const reportUser = mutation({
       .collect();
 
     const recentReportCount = recentReports.length;
-    if (recentReportCount >= REPORT_FLAG_THRESHOLD) {
+    // P1-5: Derive the 1h spike count from the 30-day window we already
+    // pulled — avoids a second indexed read.
+    const spikeWindowStart = now - REPORT_SPIKE_WINDOW_MS;
+    const recentHourReportCount = recentReports.filter(
+      (r) => r.createdAt >= spikeWindowStart,
+    ).length;
+    const spikeTriggered = recentHourReportCount >= REPORT_SPIKE_THRESHOLD;
+
+    if (recentReportCount >= REPORT_FLAG_THRESHOLD || spikeTriggered) {
       const existingFlag = await ctx.db
         .query("behaviorFlags")
         .withIndex("by_user_type", (q) =>
@@ -2261,8 +2377,11 @@ export const reportUser = mutation({
         )
         .first();
 
-      const severity = recentReportCount >= 5 ? "high" : "medium";
-      const flagDescription = `Received ${recentReportCount} reports in last ${REPORT_FLAG_WINDOW_DAYS} days`;
+      // P1-5: Spike forces severity high regardless of long-window count.
+      const severity = spikeTriggered || recentReportCount >= 5 ? "high" : "medium";
+      const flagDescription = spikeTriggered
+        ? `Spike: ${recentHourReportCount} reports in last 1h (${recentReportCount} in last ${REPORT_FLAG_WINDOW_DAYS}d)`
+        : `Received ${recentReportCount} reports in last ${REPORT_FLAG_WINDOW_DAYS} days`;
 
       if (!existingFlag) {
         await ctx.db.insert("behaviorFlags", {
@@ -2279,9 +2398,17 @@ export const reportUser = mutation({
           description: flagDescription,
         });
       }
+
+      // P1-2 / P1-5: When severity is high (either by spike OR by long-
+      // window cumulative), shadow-ban the user from Phase-1 Discover. The
+      // discoverShadowBanned flag is denormalized on `users` and read by
+      // `getDiscoverProfiles`. Cleared by moderators (out of scope here).
+      if (severity === 'high' && reportedUser?.discoverShadowBanned !== true) {
+        await ctx.db.patch(reportedUserId, { discoverShadowBanned: true });
+      }
     }
 
-    return { success: true };
+    return { success: true as const };
   },
 });
 

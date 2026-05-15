@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   Modal,
   Alert,
+  TextInput,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useMutation } from "convex/react";
@@ -19,6 +20,15 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuthStore } from "@/stores/authStore";
 import type { Id } from "@/convex/_generated/dataModel";
 
+// P2-3: Convert a backend retryAfterMs value into a friendly "slow down"
+// message. Backend (`actionRateLimits.reserveActionSlots`) returns the
+// milliseconds until the rate-limit window expires. We round up to the next
+// whole second and cap the displayed value at 60s so the copy stays readable.
+const formatRateLimitMessage = (retryAfterMs?: number): string => {
+  const seconds = Math.min(60, Math.max(1, Math.ceil((retryAfterMs ?? 0) / 1000)));
+  return `Slow down. Please try again in ${seconds}s.`;
+};
+
 interface Props {
   visible: boolean;
   onClose: () => void;
@@ -29,18 +39,28 @@ interface Props {
   matchId?: string; // For unmatch functionality
   onBlockSuccess?: () => void;
   onUnmatchSuccess?: () => void;
+  // P2-4: Fired after a successful report submission (any reason, including
+  // Scam quick-action). Callers launched from the Phase-1 discover profile
+  // sheet use this to invalidate the in-memory deck card so the reported
+  // profile doesn't pop back into view until the next fetch.
+  onReportSuccess?: () => void;
 }
 
 // MENU-CLEANUP: Final user-facing actions only — Unmatch / Block / Report / Scam.
 // (Spam, Other, Uncrush rows removed.)
 type ActionType = 'unmatch' | 'block' | 'report' | 'scam';
 
-// MENU-CLEANUP: Final 4 report reasons only.
+// P2-6: Reasons reconciled with backend `users.reportUser` literal union
+// (fake_profile | inappropriate_photos | harassment | spam | underage | other).
+// "Spam" and "Other" were missing from the UI; "Other" requires a free-text
+// description so moderators can act on it.
 type ReportReasonId =
   | 'fake_profile'
   | 'inappropriate_photos'
   | 'harassment'
-  | 'underage';
+  | 'spam'
+  | 'underage'
+  | 'other';
 
 const REPORT_REASONS: ReadonlyArray<{
   id: ReportReasonId;
@@ -50,10 +70,17 @@ const REPORT_REASONS: ReadonlyArray<{
   { id: 'fake_profile', label: 'Fake profile', icon: 'person-remove-outline' },
   { id: 'inappropriate_photos', label: 'Inappropriate photos', icon: 'warning-outline' },
   { id: 'harassment', label: 'Harassment', icon: 'hand-left-outline' },
+  { id: 'spam', label: 'Spam', icon: 'mail-unread-outline' },
   { id: 'underage', label: 'Underage', icon: 'alert-circle-outline' },
+  { id: 'other', label: 'Other', icon: 'ellipsis-horizontal-outline' },
 ];
 
-type ViewState = 'main' | 'report';
+// P2-6: 'other_description' captures a free-text description from the user
+// before submitting `reason: 'other'` to the backend. Backend caps the field
+// at 500 chars.
+type ViewState = 'main' | 'report' | 'other_description';
+const OTHER_DESCRIPTION_MIN = 5;
+const OTHER_DESCRIPTION_MAX = 500;
 
 const asUserId = (value: string): Id<'users'> => value as Id<'users'>;
 const asMatchId = (value: string): Id<'matches'> => value as Id<'matches'>;
@@ -71,9 +98,17 @@ export function ReportBlockModal({
   matchId,
   onBlockSuccess,
   onUnmatchSuccess,
+  onReportSuccess,
 }: Props) {
   const [viewState, setViewState] = useState<ViewState>('main');
+  // P2-6: Free-text description for `reason: 'other'`. Cleared on reset.
+  const [otherDescription, setOtherDescription] = useState('');
+  // P2-3: Single in-flight guard for all destructive actions so the modal
+  // doesn't fire the same mutation twice from a fast double-tap.
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const token = useAuthStore((s) => s.token);
+  // P1-3: backend now requires (token, authUserId) for blockUser/reportUser.
+  const authUserId = useAuthStore((s) => s.userId);
   const insets = useSafeAreaInsets();
   const bottomClearance = Math.max(16, insets.bottom + 12);
 
@@ -103,6 +138,8 @@ export function ReportBlockModal({
 
   const resetAndClose = () => {
     setViewState('main');
+    setOtherDescription('');
+    setIsSubmitting(false);
     onClose();
   };
 
@@ -152,6 +189,7 @@ export function ReportBlockModal({
 
   // Block: keep existing behavior
   const handleBlock = async () => {
+    if (isSubmitting) return;
     logAction('block');
     if (isDemoMode) {
       useDemoStore.getState().blockUser(reportedUserId);
@@ -162,75 +200,139 @@ export function ReportBlockModal({
     }
 
     try {
-      if (!token) {
+      if (!token || !authUserId) {
         Alert.alert("Error", "Session expired. Please sign in again.");
         return;
       }
-      await blockMutation({
+      setIsSubmitting(true);
+      // P2-3: blockUser now returns a discriminated result; surface the
+      // failure reason instead of pretending the action succeeded.
+      const result = await blockMutation({
         token,
+        authUserId,
         blockedUserId: asUserId(reportedUserId),
       });
+      if (result?.success === false) {
+        setIsSubmitting(false);
+        if (result.error === 'cannot_block_self') {
+          Alert.alert("Can't block", "You can't block your own account.");
+          return;
+        }
+        if (result.error === 'unauthorized') {
+          Alert.alert("Error", "Session expired. Please sign in again.");
+          return;
+        }
+        Alert.alert("Error", "Failed to block user.");
+        return;
+      }
       resetAndClose();
       Toast.show(`${reportedUserName} blocked`);
       onBlockSuccess?.();
     } catch (error: unknown) {
+      setIsSubmitting(false);
       Alert.alert("Error", getErrorMessage(error, "Failed to block user."));
     }
   };
 
-  // Report reason: submit selected category to backend
-  const handleReportReason = async (reason: ReportReasonId) => {
-    logAction('report', reason);
+  // P2-3 / P2-8: Shared submit path for the picker reasons + Scam quick-action.
+  // Inspects the discriminated result from `users.reportUser` and surfaces
+  // rate-limit / dedupe / self-report errors honestly instead of showing a
+  // bogus success toast.
+  const submitReport = async (
+    reason: ReportReasonId,
+    description: string | undefined,
+    successToast: string,
+    analyticsAction: ActionType,
+  ) => {
+    if (isSubmitting) return;
+    logAction(analyticsAction, reason);
     if (isDemoMode) {
-      Toast.show("Report submitted");
+      Toast.show(successToast);
       resetAndClose();
+      onReportSuccess?.();
       return;
     }
 
     try {
-      if (!token) {
+      if (!token || !authUserId) {
         Alert.alert("Error", "Session expired. Please sign in again.");
         return;
       }
-      await reportMutation({
+      setIsSubmitting(true);
+      const result = await reportMutation({
         token,
+        authUserId,
         reportedUserId: asUserId(reportedUserId),
         reason,
+        description,
+        // P1-6: This modal is launched from in-chat / match overflow / Phase-1
+        // discover profile sheet menus.
+        source: 'chat',
       });
-      Toast.show("Report submitted");
+
+      if (result?.success === false) {
+        setIsSubmitting(false);
+        if (result.error === 'rate_limited') {
+          // P2-3: Surface the actionable retry-after window from the backend.
+          Toast.show(formatRateLimitMessage(result.retryAfterMs));
+          return;
+        }
+        if (result.error === 'duplicate_recent_report') {
+          Toast.show("You've already reported this user recently.");
+          resetAndClose();
+          // Treat dedupe as effectively successful for deck-removal purposes
+          // so the profile still drops out of view.
+          onReportSuccess?.();
+          return;
+        }
+        if (result.error === 'cannot_report_self') {
+          Alert.alert("Can't report", "You can't report your own account.");
+          return;
+        }
+        if (result.error === 'description_too_long') {
+          Alert.alert("Too long", "Please keep the description under 500 characters.");
+          return;
+        }
+        Alert.alert("Error", "Failed to submit report.");
+        return;
+      }
+
+      Toast.show(successToast);
       resetAndClose();
+      onReportSuccess?.();
     } catch (error: unknown) {
+      setIsSubmitting(false);
       Alert.alert("Error", getErrorMessage(error, "Failed to submit report."));
     }
+  };
+
+  // P2-6: 'Other' opens the description sub-view instead of submitting
+  // immediately. All other reasons submit straight away.
+  const handleReportReason = (reason: ReportReasonId) => {
+    if (reason === 'other') {
+      setViewState('other_description');
+      return;
+    }
+    // P2-8: success toast updated to the friendlier review-acknowledgement copy.
+    void submitReport(reason, undefined, "Thanks — we'll review this report.", 'report');
+  };
+
+  // P2-6: Submit handler for the 'Other' description sub-view. Requires a
+  // minimum description length so moderators have something actionable.
+  const handleSubmitOtherDescription = () => {
+    const trimmed = otherDescription.trim();
+    if (trimmed.length < OTHER_DESCRIPTION_MIN) {
+      Alert.alert("Add a bit more", `Please describe the issue (at least ${OTHER_DESCRIPTION_MIN} characters).`);
+      return;
+    }
+    void submitReport('other', trimmed, "Thanks — we'll review this report.", 'report');
   };
 
   // Scam: frontend-only mapping to backend `other` reason with description.
   // No new backend literal is added — the `reports` audit row just records
   // `reason: 'other'` + description so moderators can see the user-facing label.
-  const handleScam = async () => {
-    logAction('scam');
-    if (isDemoMode) {
-      Toast.show("Reported as scam");
-      resetAndClose();
-      return;
-    }
-
-    try {
-      if (!token) {
-        Alert.alert("Error", "Session expired. Please sign in again.");
-        return;
-      }
-      await reportMutation({
-        token,
-        reportedUserId: asUserId(reportedUserId),
-        reason: 'other',
-        description: 'Scam/fraudulent behavior',
-      });
-      Toast.show("Reported as scam");
-      resetAndClose();
-    } catch (error: unknown) {
-      Alert.alert("Error", getErrorMessage(error, "Failed to submit report."));
-    }
+  const handleScam = () => {
+    void submitReport('other', 'Scam/fraudulent behavior', "Reported as scam", 'scam');
   };
 
   // Main action sheet — Unmatch / Block / Report / Scam / Cancel
@@ -278,7 +380,8 @@ export function ReportBlockModal({
     </View>
   );
 
-  // Report reason sub-view — 4 reasons (no Spam, no Other)
+  // P2-6: Report reason sub-view — now reconciled with backend reasons
+  // (fake_profile, inappropriate_photos, harassment, spam, underage, other).
   const renderReportReasons = () => (
     <View style={styles.content}>
       <View style={styles.reportHeader}>
@@ -295,9 +398,16 @@ export function ReportBlockModal({
           <TouchableOpacity
             style={styles.actionRow}
             onPress={() => handleReportReason(reason.id)}
+            disabled={isSubmitting}
           >
             <Ionicons name={reason.icon} size={20} color={COLORS.textLight} />
             <Text style={styles.actionText}>{reason.label}</Text>
+            {reason.id === 'other' ? (
+              <>
+                <View style={{ flex: 1 }} />
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textLight} />
+              </>
+            ) : null}
           </TouchableOpacity>
         </React.Fragment>
       ))}
@@ -307,6 +417,64 @@ export function ReportBlockModal({
       </TouchableOpacity>
     </View>
   );
+
+  // P2-6: 'Other' description sub-view — collects a short free-text
+  // description before submitting `reason: 'other'` to the backend.
+  const renderOtherDescription = () => {
+    const trimmedLength = otherDescription.trim().length;
+    const submitDisabled = isSubmitting || trimmedLength < OTHER_DESCRIPTION_MIN;
+    return (
+      <View style={styles.content}>
+        <View style={styles.reportHeader}>
+          <TouchableOpacity
+            onPress={() => setViewState('report')}
+            hitSlop={8}
+            disabled={isSubmitting}
+          >
+            <Ionicons name="chevron-back" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.reportTitle}>Other</Text>
+          <View style={{ width: 22 }} />
+        </View>
+
+        <Text style={styles.otherHelperText}>
+          Briefly describe the issue so our team can review it.
+        </Text>
+        <TextInput
+          style={styles.otherInput}
+          value={otherDescription}
+          onChangeText={setOtherDescription}
+          placeholder="What happened?"
+          placeholderTextColor={COLORS.textLight}
+          multiline
+          maxLength={OTHER_DESCRIPTION_MAX}
+          editable={!isSubmitting}
+          autoFocus
+        />
+        <Text style={styles.otherCounter}>
+          {trimmedLength}/{OTHER_DESCRIPTION_MAX}
+        </Text>
+
+        <TouchableOpacity
+          style={[styles.submitButton, submitDisabled && styles.submitButtonDisabled]}
+          onPress={handleSubmitOtherDescription}
+          disabled={submitDisabled}
+        >
+          <Text style={styles.submitButtonText}>Submit report</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.cancelButton} onPress={resetAndClose}>
+          <Text style={styles.cancelText}>Cancel</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  const renderActiveView = () => {
+    if (viewState === 'other_description') return renderOtherDescription();
+    if (viewState === 'report') return renderReportReasons();
+    return renderMain();
+  };
 
   return (
     <Modal
@@ -327,7 +495,7 @@ export function ReportBlockModal({
           onPress={() => {}}
         >
           <View style={styles.handle} />
-          {viewState === 'report' ? renderReportReasons() : renderMain()}
+          {renderActiveView()}
         </TouchableOpacity>
       </TouchableOpacity>
     </Modal>
@@ -417,5 +585,49 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "700",
     color: COLORS.text,
+  },
+  // P2-6: 'Other' description sub-view styles.
+  otherHelperText: {
+    fontSize: 13.5,
+    color: COLORS.textLight,
+    marginTop: 4,
+    marginBottom: 10,
+    lineHeight: 19,
+  },
+  otherInput: {
+    minHeight: 96,
+    maxHeight: 180,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 10,
+    fontSize: 15,
+    color: COLORS.text,
+    textAlignVertical: 'top',
+    backgroundColor: COLORS.background,
+  },
+  otherCounter: {
+    alignSelf: 'flex-end',
+    marginTop: 4,
+    marginBottom: 10,
+    fontSize: 11.5,
+    color: COLORS.textLight,
+  },
+  submitButton: {
+    paddingVertical: 13,
+    alignItems: 'center',
+    backgroundColor: COLORS.warning,
+    borderRadius: 12,
+  },
+  submitButtonDisabled: {
+    opacity: 0.5,
+  },
+  submitButtonText: {
+    fontSize: 15.5,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 0.2,
   },
 });

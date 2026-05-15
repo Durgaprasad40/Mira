@@ -16,6 +16,7 @@ import {
   Alert,
   ActivityIndicator,
   Keyboard,
+  TextInput,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
@@ -25,16 +26,28 @@ import { Toast } from '@/components/ui/Toast';
 import { trackEvent } from '@/lib/analytics';
 import { useAuthStore } from '@/stores/authStore';
 
-// MENU-CLEANUP: Final 4 report reasons only.
+// P2-3: Friendly rate-limit copy derived from backend retryAfterMs.
+const formatRateLimitMessage = (retryAfterMs?: number): string => {
+  const seconds = Math.min(60, Math.max(1, Math.ceil((retryAfterMs ?? 0) / 1000)));
+  return `Slow down. Please try again in ${seconds}s.`;
+};
+
+// P2-6: Reasons reconciled with backend `users.reportUser` literal union.
+// Spam and Other were missing from the UI; Other requires a free-text
+// description (collected in a sub-view) before submission.
 const REPORT_REASONS = [
   { id: 'fake_profile', label: 'Fake profile', icon: 'person-remove-outline' as const },
   { id: 'inappropriate_photos', label: 'Inappropriate photos', icon: 'warning-outline' as const },
   { id: 'harassment', label: 'Harassment', icon: 'hand-left-outline' as const },
+  { id: 'spam', label: 'Spam', icon: 'mail-unread-outline' as const },
   { id: 'underage', label: 'Underage', icon: 'alert-circle-outline' as const },
+  { id: 'other', label: 'Other', icon: 'ellipsis-horizontal-outline' as const },
 ] as const;
 
 type ReportReason = typeof REPORT_REASONS[number]['id'];
-type ViewState = 'main' | 'report';
+type ViewState = 'main' | 'report' | 'other_description';
+const OTHER_DESCRIPTION_MIN = 5;
+const OTHER_DESCRIPTION_MAX = 500;
 
 interface ReportModalProps {
   visible: boolean;
@@ -73,6 +86,8 @@ export function ReportModal({
   const hasBackendIntegration = !!(targetUserId && token);
   const [viewState, setViewState] = useState<ViewState>('main');
   const [isLoading, setIsLoading] = useState(false);
+  // P2-6: Free-text description for the 'Other' reason. Cleared on reset.
+  const [otherDescription, setOtherDescription] = useState('');
 
   // Backend mutations (Phase-2 isolation: privateSwipes / privateConversations
   // for the match graph; api.users for shared block/report tables).
@@ -107,6 +122,7 @@ export function ReportModal({
     Keyboard.dismiss();
     setViewState('main');
     setIsLoading(false);
+    setOtherDescription('');
     onClose();
   };
 
@@ -134,15 +150,34 @@ export function ReportModal({
             setIsLoading(true);
 
             try {
-              if (!token) {
+              if (!token || !userId) {
                 Alert.alert('Error', 'Please log in to block users.');
                 setIsLoading(false);
                 return;
               }
-              await blockMutation({
+              // P1-3: backend now requires (token, authUserId).
+              // P2-3: blockUser returns a discriminated result — handle
+              // failure shapes explicitly instead of always treating the
+              // call as successful.
+              const result = await blockMutation({
                 token,
+                authUserId: userId,
                 blockedUserId: targetUserId as any,
               });
+
+              if (result?.success === false) {
+                setIsLoading(false);
+                if (result.error === 'cannot_block_self') {
+                  Alert.alert("Can't block", "You can't block your own account.");
+                  return;
+                }
+                if (result.error === 'unauthorized') {
+                  Alert.alert('Error', 'Session expired. Please sign in again.');
+                  return;
+                }
+                Alert.alert('Error', 'Failed to block user.');
+                return;
+              }
 
               // Update local block store for immediate UI feedback
               const { useBlockStore } = await import('@/stores/blockStore');
@@ -229,37 +264,94 @@ export function ReportModal({
 
   // ═══════════════════════════════════════════════════════════════════════════
   // REPORT: Persist to backend with reason (Phase 1 parity) or use legacy callback
+  // P2-3 / P2-6 / P2-8: Shared submit path for picker reasons + Scam quick
+  // action. Inspects the discriminated result from `users.reportUser` to
+  // honestly surface rate-limit / dedupe / self-report errors instead of
+  // pretending success.
   // ═══════════════════════════════════════════════════════════════════════════
-  const handleReportReason = async (reasonId: ReportReason) => {
-    // Legacy mode: use callback if no backend integration
+  const submitReport = async (
+    reason: ReportReason,
+    description: string | undefined,
+    successToast: string,
+    analyticsAction: 'report' | 'scam',
+  ) => {
+    if (isLoading) return;
     if (!hasBackendIntegration) {
-      onReport?.(reasonId);
-      Toast.show('Report submitted. Thank you.');
+      onReport?.(analyticsAction === 'scam' ? 'scam' : reason);
+      Toast.show(successToast);
       resetAndClose();
       return;
     }
 
-    logAction('report', reasonId);
+    logAction(analyticsAction, reason);
     setIsLoading(true);
 
     try {
-      if (!token) {
+      if (!token || !userId) {
         Alert.alert('Error', 'Please log in to report users.');
         setIsLoading(false);
         return;
       }
-      await reportMutation({
+      // P1-3 / P1-6: pass authUserId + source.
+      const result = await reportMutation({
         token,
+        authUserId: userId,
         reportedUserId: targetUserId as any,
-        reason: reasonId,
+        reason,
+        description,
+        source: 'chat',
       });
 
-      Toast.show('Report submitted. Thank you.');
+      if (result?.success === false) {
+        setIsLoading(false);
+        if (result.error === 'rate_limited') {
+          Toast.show(formatRateLimitMessage(result.retryAfterMs));
+          return;
+        }
+        if (result.error === 'duplicate_recent_report') {
+          Toast.show("You've already reported this user recently.");
+          resetAndClose();
+          return;
+        }
+        if (result.error === 'cannot_report_self') {
+          Alert.alert("Can't report", "You can't report your own account.");
+          return;
+        }
+        if (result.error === 'description_too_long') {
+          Alert.alert('Too long', 'Please keep the description under 500 characters.');
+          return;
+        }
+        Alert.alert('Error', 'Failed to submit report.');
+        return;
+      }
+
+      Toast.show(successToast);
       resetAndClose();
     } catch (error: any) {
       setIsLoading(false);
       Alert.alert('Error', error.message || 'Failed to submit report.');
     }
+  };
+
+  // P2-6: 'Other' opens the description sub-view; all other reasons submit
+  // immediately.
+  const handleReportReason = (reasonId: ReportReason) => {
+    if (reasonId === 'other') {
+      setViewState('other_description');
+      return;
+    }
+    // P2-8: friendlier review-acknowledgement copy.
+    void submitReport(reasonId, undefined, "Thanks — we'll review this report.", 'report');
+  };
+
+  // P2-6: Submit handler for the 'Other' description sub-view.
+  const handleSubmitOtherDescription = () => {
+    const trimmed = otherDescription.trim();
+    if (trimmed.length < OTHER_DESCRIPTION_MIN) {
+      Alert.alert('Add a bit more', `Please describe the issue (at least ${OTHER_DESCRIPTION_MIN} characters).`);
+      return;
+    }
+    void submitReport('other', trimmed, "Thanks — we'll review this report.", 'report');
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -267,43 +359,18 @@ export function ReportModal({
   // description so no new backend literal is required. Moderators see the
   // descriptive label in the audit row.
   // ═══════════════════════════════════════════════════════════════════════════
-  const handleScam = async () => {
-    // Legacy mode: surface as a generic report callback
-    if (!hasBackendIntegration) {
-      onReport?.('scam');
-      Toast.show('Reported as scam');
-      resetAndClose();
-      return;
-    }
-
-    logAction('scam');
-    setIsLoading(true);
-
-    try {
-      if (!token) {
-        Alert.alert('Error', 'Please log in to report users.');
-        setIsLoading(false);
-        return;
-      }
-      await reportMutation({
-        token,
-        reportedUserId: targetUserId as any,
-        reason: 'other',
-        description: 'Scam/fraudulent behavior',
-      });
-
-      Toast.show('Reported as scam');
-      resetAndClose();
-    } catch (error: any) {
-      setIsLoading(false);
-      Alert.alert('Error', error.message || 'Failed to submit report.');
-    }
+  const handleScam = () => {
+    void submitReport('other', 'Scam/fraudulent behavior', 'Reported as scam', 'scam');
   };
 
   const handleBack = () => {
     Keyboard.dismiss();
     if (viewState === 'report') {
       setViewState('main');
+    } else if (viewState === 'other_description') {
+      // P2-6: return to the reasons list so the user can pick a different
+      // reason without losing the modal.
+      setViewState('report');
     }
   };
 
@@ -420,11 +487,66 @@ export function ReportModal({
     </View>
   );
 
+  // P2-6: 'Other' description sub-view. Requires a short non-empty
+  // description before submission so moderators have something actionable.
+  const renderOtherDescription = () => {
+    const trimmedLength = otherDescription.trim().length;
+    const submitDisabled = isLoading || trimmedLength < OTHER_DESCRIPTION_MIN;
+    return (
+      <View style={styles.content}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleBack} hitSlop={8} disabled={isLoading}>
+            <Ionicons name="chevron-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.title}>Other</Text>
+          <View style={{ width: 24 }} />
+        </View>
+
+        <Text style={styles.subtitle}>
+          Briefly describe the issue so our team can review it.
+        </Text>
+
+        <TextInput
+          style={styles.otherInput}
+          value={otherDescription}
+          onChangeText={setOtherDescription}
+          placeholder="What happened?"
+          placeholderTextColor={C.textLight}
+          multiline
+          maxLength={OTHER_DESCRIPTION_MAX}
+          editable={!isLoading}
+          autoFocus
+        />
+        <Text style={styles.otherCounter}>
+          {trimmedLength}/{OTHER_DESCRIPTION_MAX}
+        </Text>
+
+        <TouchableOpacity
+          style={[styles.submitButton, submitDisabled && styles.submitButtonDisabled]}
+          onPress={handleSubmitOtherDescription}
+          disabled={submitDisabled}
+        >
+          {isLoading ? (
+            <ActivityIndicator size="small" color="#FFFFFF" />
+          ) : (
+            <Text style={styles.submitButtonText}>Submit report</Text>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.cancelButton} onPress={resetAndClose}>
+          <Text style={styles.cancelText}>Cancel</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
   // Render current view
   const renderCurrentView = () => {
     switch (viewState) {
       case 'report':
         return renderReportReasons();
+      case 'other_description':
+        return renderOtherDescription();
       default:
         return renderMain();
     }
@@ -436,7 +558,10 @@ export function ReportModal({
       transparent
       animationType="slide"
       onRequestClose={() => {
-        if (viewState === 'report') {
+        // P2-6: also walk back from the Other description sub-view via the
+        // existing handleBack chain instead of dumping the user to the main
+        // sheet on Android hardware-back.
+        if (viewState === 'report' || viewState === 'other_description') {
           handleBack();
         } else {
           resetAndClose();
@@ -558,5 +683,41 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: C.textLight,
     fontWeight: '500',
+  },
+  // P2-6: 'Other' description sub-view styles.
+  otherInput: {
+    minHeight: 96,
+    maxHeight: 180,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.surface,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 10,
+    fontSize: 15,
+    color: C.text,
+    textAlignVertical: 'top',
+  },
+  otherCounter: {
+    alignSelf: 'flex-end',
+    marginTop: 4,
+    marginBottom: 10,
+    fontSize: 11.5,
+    color: C.textLight,
+  },
+  submitButton: {
+    paddingVertical: 13,
+    alignItems: 'center',
+    backgroundColor: '#FF9500',
+    borderRadius: 12,
+  },
+  submitButtonDisabled: {
+    opacity: 0.5,
+  },
+  submitButtonText: {
+    fontSize: 15.5,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 0.2,
   },
 });

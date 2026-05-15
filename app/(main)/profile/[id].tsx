@@ -1546,7 +1546,18 @@ export default function ViewProfileScreen() {
         reportedUserId={userId || ''}
         reportedUserName={profile?.name || 'this user'}
         currentUserId={currentUserId || ''}
-        onBlockSuccess={goBackSafely}
+        onBlockSuccess={() => {
+          // P2-4: Drop the blocked profile from the in-memory Phase-1 deck
+          // so it doesn't reappear before the next backend fetch. Reuses the
+          // existing 'pass' deck-removal signal — the discover deck simply
+          // consumes the id and advances the queue.
+          syncPhase1DiscoverAction('pass');
+          goBackSafely();
+        }}
+        onReportSuccess={() => {
+          // P2-4: Same in-memory deck invalidation on a successful report.
+          syncPhase1DiscoverAction('pass');
+        }}
       />
     </View>
   );

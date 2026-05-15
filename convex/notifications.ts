@@ -5,6 +5,37 @@ import type { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 import { bellNotificationCountsForPhase } from './notificationBellPhase';
 
+/**
+ * P0-2: Resolve a notification-read identity ONLY when the caller proves
+ * ownership of the requested userId. Rejects (returns null) if:
+ *   - token is missing/empty
+ *   - token does not validate to a real session
+ *   - the requested userId does not resolve to a real Convex user
+ *   - the session owner is not the same Convex user as the requested userId
+ *
+ * The previous implementation accepted `userId` raw and resolved it via
+ * `resolveUserIdByAuthId()` alone, which let any caller pass an arbitrary
+ * authUserId/Convex Id and read another user's notifications.
+ */
+async function resolveOwnedUserIdForNotificationRead(
+  ctx: QueryCtx,
+  token: string,
+  requestedUserId: string,
+): Promise<Id<'users'> | null> {
+  const trimmed = (token ?? '').trim();
+  if (!trimmed) return null;
+
+  const tokenOwnerId = await validateSessionToken(ctx, trimmed);
+  if (!tokenOwnerId) return null;
+
+  const requestedConvexId = await resolveUserIdByAuthId(ctx, requestedUserId);
+  if (!requestedConvexId) return null;
+
+  if (tokenOwnerId !== requestedConvexId) return null;
+
+  return tokenOwnerId;
+}
+
 // Server-side Phase-1 row guard. A row is Phase-1 iff:
 //   - phase is undefined (legacy rows) AND type is not a legacy phase2_* type, OR
 //   - phase === 'phase1'
@@ -84,8 +115,12 @@ const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Get notifications for a user
 // 4-3: Filters out expired notifications server-side to prevent render race
+// P0-2: `token` is now required; the requested userId must resolve to the
+// session owner. Without ownership the query returns [] without leaking
+// whether the user exists.
 export const getNotifications = query({
   args: {
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     limit: v.optional(v.number()),
     unreadOnly: v.optional(v.boolean()),
@@ -93,10 +128,14 @@ export const getNotifications = query({
   handler: async (ctx, args) => {
     const { limit = 50, unreadOnly = false } = args;
 
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    // P0-2: token-bound identity resolution. Replaces the previous
+    // resolveUserIdByAuthId-only path which allowed cross-user reads.
+    const userId = await resolveOwnedUserIdForNotificationRead(
+      ctx,
+      args.token,
+      args.userId as string,
+    );
     if (!userId) {
-      console.log('[getNotifications] User not found for authUserId:', args.userId);
       return [];
     }
 
@@ -133,15 +172,19 @@ export const getNotifications = query({
 
 // Get unread notification count
 // 4-3: Filters out expired notifications server-side
+// P0-2: `token` required; cross-user counts now return 0 without disclosure.
 export const getUnreadCount = query({
   args: {
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveOwnedUserIdForNotificationRead(
+      ctx,
+      args.token,
+      args.userId as string,
+    );
     if (!userId) {
-      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
       return 0;
     }
 
@@ -174,14 +217,20 @@ export const getUnreadCount = query({
 
 // Get bell notification unread count (for tab badge) - PHASE-1 ONLY.
 // Phase-2 callers must use `api.privateNotifications.getPrivateBellUnreadCount` instead.
+// P0-2: `token` required; cross-user counts now return 0 without disclosure.
 export const getBellUnreadCount = query({
   args: {
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()),
     // Argument retained for backwards compatibility; this query is Phase-1 only.
     phase: v.optional(v.union(v.literal('phase1'), v.literal('phase2'))),
   },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    const userId = await resolveOwnedUserIdForNotificationRead(
+      ctx,
+      args.token,
+      args.userId as string,
+    );
     if (!userId) {
       return 0;
     }
