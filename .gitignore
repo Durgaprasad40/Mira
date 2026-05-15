@@ -46,3 +46,6 @@ convex/_generated
 
 # Dev-only tooling (developer-local; not for source control)
 convex/devResetPhase2TestState.ts
+
+# Local debug logs
+logs/
