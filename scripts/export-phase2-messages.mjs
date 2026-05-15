@@ -35,23 +35,68 @@ function csvEscape(value) {
   return stringValue;
 }
 
-const convexArgs = ["convex", "run", "privateConversations:exportAllPhase2Messages", ...passthroughArgs];
+// P1-002: exportAllPhase2Messages is now paginated. Loop until `nextCursor`
+// is null (i.e. isDone === true) so we still produce a single CSV covering
+// every row, without ever asking the server for an unbounded scan.
+const PAGE_SIZE = 1000;
+const MAX_PAGES = 10000; // hard safety cap (~10M rows) to avoid runaway loops
 
-const rawOutput = execFileSync("npx", convexArgs, {
-  cwd: process.cwd(),
-  encoding: "utf8",
-  stdio: ["ignore", "pipe", "pipe"],
-});
+const aggregatedRows = [];
+let cursor = null;
+let pageCount = 0;
+let lastExportedAt = null;
 
-const payload = extractJsonObject(rawOutput);
-if (!payload || !Array.isArray(payload.rows)) {
-  throw new Error("Convex export did not return a rows array.");
+while (pageCount < MAX_PAGES) {
+  pageCount += 1;
+
+  const pageArgs = { pageSize: PAGE_SIZE };
+  if (cursor !== null) pageArgs.cursor = cursor;
+
+  const convexArgs = [
+    "convex",
+    "run",
+    "privateConversations:exportAllPhase2Messages",
+    JSON.stringify(pageArgs),
+    ...passthroughArgs,
+  ];
+
+  const rawOutput = execFileSync("npx", convexArgs, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const payload = extractJsonObject(rawOutput);
+  if (!payload || !Array.isArray(payload.rows)) {
+    throw new Error("Convex export did not return a rows array.");
+  }
+
+  for (const row of payload.rows) {
+    aggregatedRows.push({
+      ...row,
+      conversation_participants: JSON.stringify(row.conversation_participants ?? []),
+    });
+  }
+
+  if (typeof payload.exportedAt === "string") {
+    lastExportedAt = payload.exportedAt;
+  }
+
+  if (payload.isDone === true || payload.nextCursor === null || payload.nextCursor === undefined) {
+    break;
+  }
+  cursor = payload.nextCursor;
 }
 
-const rows = payload.rows.map((row) => ({
-  ...row,
-  conversation_participants: JSON.stringify(row.conversation_participants ?? []),
-}));
+if (pageCount >= MAX_PAGES) {
+  throw new Error(`Export aborted: exceeded MAX_PAGES (${MAX_PAGES}).`);
+}
+
+const payload = {
+  exportedAt: lastExportedAt ?? new Date().toISOString(),
+  rowCount: aggregatedRows.length,
+};
+const rows = aggregatedRows;
 
 const headers = [
   "message_id",

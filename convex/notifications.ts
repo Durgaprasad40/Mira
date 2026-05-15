@@ -14,6 +14,12 @@ const PHASE2_LEGACY_TYPES = new Set<string>([
   'phase2_like',
   'phase2_private_message',
   'phase2_deep_connect',
+  // I-002 RESERVED/DEPRECATED — `phase2_chat_room` has NO writer anywhere.
+  // It is kept in this Phase-2 type set so that if a legacy `phase2_chat_room`
+  // row ever shows up in the Phase-1 `notifications` table, it is correctly
+  // classified as Phase-2 (and therefore filtered out of every Phase-1
+  // surface). Chat Room DMs stay bounded inside Chat Rooms; do NOT add a
+  // writer for this type.
   'phase2_chat_room',
 ]);
 

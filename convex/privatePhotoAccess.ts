@@ -5,15 +5,58 @@
  * - Check if photo is blurred for owner
  * - Check viewer's access status to owner's photos
  * - Request access to view unblurred photos
+ *
+ * P2-001: Auth pattern hardening — Phase-2 callsites pass `token` plus an
+ * optional `authUserId` hint and the server resolves the actor exclusively
+ * from the session token via the local `requirePhotoAccessActor` helper.
+ * `authUserId` is only used as a paranoid cross-check (when provided) to
+ * reject swapped token/authUserId pairs — it is never trusted on its own.
+ * The legacy `ctx.auth.getUserIdentity()` + `resolveUserIdByAuthId` flow
+ * trusted Convex JWT identity alone, which is not consistent with the
+ * rest of the Phase-2 private surface (privateConversations, etc.).
+ * Keeping all request/approve/decline business logic byte-identical —
+ * only the auth plumbing changes.
  */
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
-import { resolveUserIdByAuthId } from './helpers';
-import { Id } from './_generated/dataModel';
+import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
+import type { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+
+/**
+ * P2-001: Local actor-resolver — mirrors the `requirePrivateConversationActor`
+ * pattern in `convex/privateConversations.ts`. We deliberately duplicate this
+ * (instead of importing) so this module does not couple to the conversation
+ * module's internals. Behavior is byte-identical:
+ *   1. session token MUST resolve to a userId
+ *   2. if the optional `authUserId` hint is provided, it MUST resolve back
+ *      to the same userId (rejects swapped token/authUserId pairs)
+ *   3. throws 'UNAUTHORIZED' on any mismatch
+ */
+async function requirePhotoAccessActor(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  authUserId: string | undefined,
+): Promise<Id<'users'>> {
+  const userId = await validateSessionToken(ctx, token.trim());
+  if (!userId) throw new Error('UNAUTHORIZED');
+  const authHint = authUserId?.trim();
+  if (authHint) {
+    const assertedUserId = await resolveUserIdByAuthId(ctx, authHint);
+    if (!assertedUserId || String(assertedUserId) !== String(userId)) {
+      throw new Error('UNAUTHORIZED');
+    }
+  }
+  return userId;
+}
 
 /**
  * Check if the profile owner has blurred photos enabled.
  * Used to determine if blur UI should be shown.
+ *
+ * Note: This query intentionally has NO auth — the "is photo blur on"
+ * signal is needed by viewers before they have any session context
+ * (and the field itself does not leak private content; it only says
+ * whether the owner has chosen to gate their photos).
  */
 export const isPhotoBlurredForOwner = query({
   args: {
@@ -39,22 +82,19 @@ export const isPhotoBlurredForOwner = query({
  */
 export const getPrivatePhotoAccessStatus = query({
   args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     ownerUserId: v.id('users'),
   },
-  handler: async (ctx, { ownerUserId }) => {
-    // Get current user from auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return {
-        canViewClear: false,
-        status: 'none' as const,
-        canRequest: false,
-      };
-    }
-
-    // Resolve viewer's user ID
-    const viewerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!viewerUserId) {
+  handler: async (ctx, { token, authUserId, ownerUserId }) => {
+    // P2-001: resolve the viewer via the standard Phase-2 actor pattern.
+    // Queries on the private surface degrade gracefully on auth failure
+    // so the UI shows the blurred state + a "sign in to request"
+    // affordance instead of an error toast.
+    let viewerUserId: Id<'users'>;
+    try {
+      viewerUserId = await requirePhotoAccessActor(ctx, token, authUserId);
+    } catch {
       return {
         canViewClear: false,
         status: 'none' as const,
@@ -139,19 +179,20 @@ export const getPrivatePhotoAccessStatus = query({
  */
 export const requestPrivatePhotoAccess = mutation({
   args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     ownerUserId: v.id('users'),
   },
-  handler: async (ctx, { ownerUserId }) => {
-    // Get current user from auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  handler: async (ctx, { token, authUserId, ownerUserId }) => {
+    // P2-001: Standard Phase-2 actor resolution. Mutations actually
+    // create rows so we surface the auth failure to the caller via
+    // success:false rather than throwing — matches existing photo-
+    // access error-shape contract.
+    let viewerUserId: Id<'users'>;
+    try {
+      viewerUserId = await requirePhotoAccessActor(ctx, token, authUserId);
+    } catch {
       return { success: false, error: 'Unauthorized' };
-    }
-
-    // Resolve viewer's user ID
-    const viewerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!viewerUserId) {
-      return { success: false, error: 'User not found' };
     }
 
     // Cannot request access to own photos
@@ -205,20 +246,18 @@ export const requestPrivatePhotoAccess = mutation({
  */
 export const respondToPhotoAccessRequest = mutation({
   args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
     requestId: v.id('privatePhotoAccessRequests'),
     response: v.union(v.literal('approved'), v.literal('declined')),
   },
-  handler: async (ctx, { requestId, response }) => {
-    // Get current user from auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  handler: async (ctx, { token, authUserId, requestId, response }) => {
+    // P2-001: same standard actor resolution as requestPrivatePhotoAccess.
+    let userId: Id<'users'>;
+    try {
+      userId = await requirePhotoAccessActor(ctx, token, authUserId);
+    } catch {
       return { success: false, error: 'Unauthorized' };
-    }
-
-    // Resolve user ID
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!userId) {
-      return { success: false, error: 'User not found' };
     }
 
     // Get the request
@@ -248,17 +287,18 @@ export const respondToPhotoAccessRequest = mutation({
  * Get pending photo access requests for the current user (as owner).
  */
 export const getPendingPhotoAccessRequests = query({
-  args: {},
-  handler: async (ctx) => {
-    // Get current user from auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return { requests: [] };
-    }
-
-    // Resolve user ID
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!userId) {
+  args: {
+    token: v.string(),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { token, authUserId }) => {
+    // P2-001: query-side soft validation — return an empty result for
+    // unauthenticated callers so the UI can render a benign empty
+    // state instead of an error toast.
+    let userId: Id<'users'>;
+    try {
+      userId = await requirePhotoAccessActor(ctx, token, authUserId);
+    } catch {
       return { requests: [] };
     }
 

@@ -263,6 +263,27 @@ async function usersShareActivePrivateConversation(
   return false;
 }
 
+// I-001 DEFENSE-IN-DEPTH:
+// The `privateConversations.connectionSource` schema enum still allows the
+// literal "room" (used by legacy chat-room private DM rows that lived on
+// this table before chat-room DMs were moved to `chatRoomPrivateConversations`).
+// Today no live writer in Phase-2 produces `connectionSource: "room"`, but
+// the enum is still open and migrations/backfills could in theory reintroduce
+// such rows. To guarantee a hard wall between Phase-2 Messages and Chat Room
+// DMs, every Phase-2-facing query in this file MUST exclude rows where
+// `connectionSource === "room"` from:
+//   - the Phase-2 Messages list,
+//   - the Phase-2 unread badge / total unread count,
+//   - direct opens of a Phase-2 conversation,
+//   - Phase-2 message reads.
+// Valid Phase-2 sources ("tod", "desire_match", "desire_super_like",
+// "desire", "friend", undefined, …) are unaffected.
+function isRoomSourcedPrivateConversation(
+  conversation: Doc<'privateConversations'> | null | undefined
+): boolean {
+  return conversation?.connectionSource === 'room';
+}
+
 function buildClosedPrivateConversationPayload(
   conversation: Doc<'privateConversations'>,
   otherParticipantId: Id<'users'> | null
@@ -428,6 +449,10 @@ export const getUserPrivateConversations = query({
       participations.map(async (p, idx) => {
         const conversation = conversations[idx];
         if (!conversation) return null;
+
+        // I-001: Defense-in-depth — never surface room-sourced rows in the
+        // Phase-2 Messages list. See `isRoomSourcedPrivateConversation`.
+        if (isRoomSourcedPrivateConversation(conversation)) return null;
 
         // Find the other participant
         const otherParticipantId = conversation.participants.find(
@@ -616,6 +641,14 @@ export const getPrivateMessages = query({
       return [];
     }
 
+    // I-001: Defense-in-depth — never expose messages of a room-sourced row
+    // through the Phase-2 message reader. Room-DMs live on a separate table;
+    // a `privateConversations` row with `connectionSource === "room"` is
+    // legacy/leakage and must be invisible to Phase-2 callers.
+    if (isRoomSourcedPrivateConversation(conversation)) {
+      return [];
+    }
+
     // SECURITY: Verify user is part of this conversation (IDOR prevention)
     if (!conversation.participants.includes(userId)) {
       return [];
@@ -775,17 +808,26 @@ export const getPrivateMessages = query({
 export const markPrivateMessagesRead = mutation({
   args: {
     token: v.string(),
+    // P2-005: authUserId added as optional defense-in-depth cross-check
+    // to bring this mutation into parity with every other Phase-2
+    // conversation mutation in this file (which all accept
+    // `authUserId: v.optional(v.string())` and resolve via
+    // `requirePrivateConversationActor`). Strictly additive — pre-
+    // existing token-only clients keep working because the field is
+    // optional, and the cross-check only runs when the client supplies
+    // a hint.
+    authUserId: v.optional(v.string()),
     conversationId: v.id('privateConversations'),
   },
   handler: async (ctx, args) => {
-    const { token, conversationId } = args;
+    const { token, authUserId, conversationId } = args;
     const now = Date.now();
 
-    // Validate session and get current user
-    const userId = await validateSessionToken(ctx, token);
-    if (!userId) {
-      throw new Error('Unauthorized: invalid or expired session');
-    }
+    // P2-005: switch to the shared Phase-2 actor resolver so the
+    // token/authUserId cross-check matches the rest of the file.
+    // `requirePrivateConversationActor` throws on bad auth, so we no
+    // longer need the explicit if-null branch.
+    const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
     // Get conversation and verify user is participant
     const conversation = await ctx.db.get(conversationId);
@@ -1157,6 +1199,14 @@ export const getPrivateConversation = query({
       return null;
     }
 
+    // I-001: Defense-in-depth — never open a room-sourced row through the
+    // Phase-2 conversation reader. Returning null mirrors the "conversation
+    // not found" branch above so the client treats it as not-found instead
+    // of surfacing a noisy error.
+    if (isRoomSourcedPrivateConversation(conversation)) {
+      return null;
+    }
+
     // SECURITY: Verify user is participant (IDOR prevention)
     const isParticipant = conversation.participants.includes(userId);
     if (!isParticipant) {
@@ -1314,6 +1364,11 @@ export const getTotalUnreadCount = query({
       if (!conversation || !conversation.participants.includes(userId)) {
         continue;
       }
+      // I-001: Defense-in-depth — exclude room-sourced rows from the
+      // Phase-2 total unread badge tally.
+      if (isRoomSourcedPrivateConversation(conversation)) {
+        continue;
+      }
       const otherParticipantId = conversation.participants.find(
         (pid) => pid !== userId
       );
@@ -1356,6 +1411,9 @@ export const getPrivateUnreadConversationCount = query({
 
       const conversation = await ctx.db.get(participation.conversationId);
       if (!conversation) continue;
+      // I-001: Defense-in-depth — exclude room-sourced rows from the Phase-2
+      // unread-conversation count badge.
+      if (isRoomSourcedPrivateConversation(conversation)) continue;
       if (!conversation.participants.includes(userId)) continue;
 
       const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
@@ -2051,26 +2109,37 @@ export const markPrivateSecureMediaExpired = mutation({
  * Wired from `convex/crons.ts` at 1-minute interval, satisfying the
  * "within ~1 minute after expiry" cleanup expectation for Phase-2.
  */
+// P1-002: Per-cron-tick batch limit for the protected-media expiry sweep.
+// At 1 tick / minute, 500 redactions / tick is enough headroom for steady
+// state while keeping each cron invocation well within Convex limits.
+const PROTECTED_MEDIA_CLEANUP_BATCH = 500;
+
 export const cleanupExpiredPrivateProtectedMedia = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    const messages = await ctx.db.query('privateMessages').collect();
 
     let scannedCount = 0;
     let redactedCount = 0;
     let storageDeletedCount = 0;
     let storageDeleteFailures = 0;
+    const seen = new Set<string>();
 
-    for (const m of messages) {
-      if (!m.isProtected) continue;
-      if (!m.imageStorageId) continue; // already redacted in a previous sweep
+    const processCandidate = async (
+      m: Doc<'privateMessages'>
+    ): Promise<void> => {
+      const key = String(m._id);
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      if (!m.isProtected) return;
+      if (!m.imageStorageId) return; // already redacted in a previous sweep
       scannedCount += 1;
 
       const timerEnded =
         typeof m.timerEndsAt === 'number' && m.timerEndsAt <= now;
       const eligible = !!m.isExpired || timerEnded;
-      if (!eligible) continue;
+      if (!eligible) return;
 
       // Best-effort storage deletion; mirrors Phase-1 finalizeExpiredMedia.
       try {
@@ -2095,6 +2164,49 @@ export const cleanupExpiredPrivateProtectedMedia = internalMutation({
         expiredAt: m.expiredAt ?? (timerEnded ? m.timerEndsAt : now),
       });
       redactedCount += 1;
+    };
+
+    // P1-002: replaced unbounded `.collect()` with three bounded indexed
+    // queries that together cover every redaction-eligible row:
+    //   (a) already-expired protected rows (isExpired === true)
+    //   (b) timer elapsed AND isExpired === false (the steady-state case)
+    //   (c) timer elapsed AND isExpired never set (legacy / undefined)
+    // Each lookup is capped at PROTECTED_MEDIA_CLEANUP_BATCH so a single cron
+    // tick can never iterate the whole privateMessages table.
+    const expiredFlagged = await ctx.db
+      .query('privateMessages')
+      .withIndex('by_protected_expiry', (q) =>
+        q.eq('isProtected', true).eq('isExpired', true)
+      )
+      .take(PROTECTED_MEDIA_CLEANUP_BATCH);
+    for (const m of expiredFlagged) {
+      await processCandidate(m);
+    }
+
+    const timerElapsedFalse = await ctx.db
+      .query('privateMessages')
+      .withIndex('by_protected_expiry', (q) =>
+        q
+          .eq('isProtected', true)
+          .eq('isExpired', false)
+          .lte('timerEndsAt', now)
+      )
+      .take(PROTECTED_MEDIA_CLEANUP_BATCH);
+    for (const m of timerElapsedFalse) {
+      await processCandidate(m);
+    }
+
+    const timerElapsedUnset = await ctx.db
+      .query('privateMessages')
+      .withIndex('by_protected_expiry', (q) =>
+        q
+          .eq('isProtected', true)
+          .eq('isExpired', undefined)
+          .lte('timerEndsAt', now)
+      )
+      .take(PROTECTED_MEDIA_CLEANUP_BATCH);
+    for (const m of timerElapsedUnset) {
+      await processCandidate(m);
     }
 
     return {
@@ -2306,12 +2418,32 @@ export const getPrivateTypingStatus = query({
  * It is meant for developer/admin use via the Convex CLI when preparing
  * forensic datasets or offline audits.
  */
-export const exportAllPhase2Messages = internalQuery({
-  args: {},
-  handler: async (ctx) => {
-    const messages = await ctx.db.query('privateMessages').collect();
+// P1-002: Hard ceiling on a single export page so the internal query can
+// never run unbounded over privateMessages. The CLI script loops on the
+// returned `nextCursor` until it sees `nextCursor === null`.
+const PHASE2_EXPORT_DEFAULT_PAGE_SIZE = 1000;
+const PHASE2_EXPORT_MAX_PAGE_SIZE = 5000;
 
-    const sortedMessages = [...messages].sort((a, b) => {
+export const exportAllPhase2Messages = internalQuery({
+  args: {
+    cursor: v.optional(v.union(v.string(), v.null())),
+    pageSize: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const requestedPageSize = args.pageSize ?? PHASE2_EXPORT_DEFAULT_PAGE_SIZE;
+    const pageSize = Math.max(
+      1,
+      Math.min(requestedPageSize, PHASE2_EXPORT_MAX_PAGE_SIZE)
+    );
+
+    // Convex opaque-cursor pagination; bounded by `numItems` per call so we
+    // never iterate the whole privateMessages table in a single query.
+    const page = await ctx.db.query('privateMessages').paginate({
+      cursor: args.cursor ?? null,
+      numItems: pageSize,
+    });
+
+    const sortedMessages = [...page.page].sort((a, b) => {
       const createdDiff = a.createdAt - b.createdAt;
       if (createdDiff !== 0) return createdDiff;
       return String(a._id).localeCompare(String(b._id));
@@ -2428,6 +2560,11 @@ export const exportAllPhase2Messages = internalQuery({
       exportedAt: new Date().toISOString(),
       rowCount: rows.length,
       rows,
+      // P1-002: pagination metadata. Callers loop until `nextCursor === null`.
+      // `isDone === true` mirrors Convex's pagination semantics.
+      nextCursor: page.isDone ? null : page.continueCursor,
+      isDone: page.isDone,
+      pageSize,
     };
   },
 });

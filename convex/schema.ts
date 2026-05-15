@@ -864,7 +864,11 @@ export default defineSchema({
     .index('by_conversation', ['conversationId'])
     .index('by_conversation_created', ['conversationId', 'createdAt'])
     .index('by_conversation_system_event', ['conversationId', 'systemEventKey'])
-    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId'])
+    // P1-002: Bounded protected-media expiry sweep. Allows the cron to query
+    // only rows that need redaction (isProtected=true and either flagged
+    // expired or timer elapsed) instead of full-table .collect().
+    .index('by_protected_expiry', ['isProtected', 'isExpired', 'timerEndsAt']),
 
   privateMessageMediaUploads: defineTable({
     storageId: v.id('_storage'),
@@ -1099,6 +1103,15 @@ export default defineSchema({
       v.literal('phase2_like'),
       v.literal('phase2_private_message'),
       v.literal('phase2_deep_connect'),
+      // I-002 RESERVED/DEPRECATED — `phase2_chat_room` is intentionally kept
+      // in the schema enum so any historical rows (if they exist) remain
+      // type-valid, but it has NO writer anywhere in the codebase. Product
+      // decision: Chat Room one-on-one DMs stay bounded inside Chat Rooms;
+      // they do NOT produce out-of-room notifications, do NOT contribute to
+      // the Phase-2 Messages badge, and do NOT route into Phase-2 Messages.
+      // Do NOT add a writer for this type. Do NOT add push routing. If you
+      // need to remove this literal in a future cleanup, audit
+      // `privateNotifications` for any legacy rows first.
       v.literal('phase2_chat_room')
     ),
     title: v.string(),

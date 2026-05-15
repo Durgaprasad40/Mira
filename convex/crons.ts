@@ -159,6 +159,19 @@ crons.daily(
   internal.auth.finalizeExpiredSoftDeletedAccounts
 );
 
+// Phase-2 private data deletion: mirror of the Phase-1 finalizer above.
+// Hard-deletes private data (Phase-2 Messages tables, T/D rows, profile
+// blobs, ...) for users whose 30-day recovery window has elapsed. The
+// cascade is bounded per-run; if it does not finish for a user this run
+// the deletion-state stays in `pending_deletion` and the next daily tick
+// resumes the work. Offset slightly so Phase-1 + Phase-2 finalizers do
+// not contend for the same scheduler slot.
+crons.daily(
+  'cleanup-expired-private-deletions',
+  { hourUTC: 2, minuteUTC: 10 },
+  internal.privateDeletion.cleanupExpiredDeletions
+);
+
 // Nearby/Crossed Paths: Cleanup expired crossed path history every 6 hours
 // Removes history entries past their 30-day expiration
 crons.interval(

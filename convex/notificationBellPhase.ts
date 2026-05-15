@@ -21,6 +21,11 @@ export const PHASE2_ONLY_TYPES = new Set<string>([
   'phase2_like',
   'phase2_private_message',
   'phase2_deep_connect',
+  // I-002 RESERVED/DEPRECATED — `phase2_chat_room` has NO writer. It is kept
+  // here only so the Phase-1 bell never accidentally picks up a legacy
+  // `phase2_chat_room` row (the Phase-1 bell excludes everything in this
+  // set). Chat Room DMs stay bounded inside Chat Rooms and must not produce
+  // out-of-room notifications. Do NOT add a writer for this type.
   'phase2_chat_room',
 ]);
 

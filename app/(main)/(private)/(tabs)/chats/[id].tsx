@@ -676,8 +676,12 @@ export default function Phase2ChatThread() {
   useEffect(() => {
     if (!id || !token) return;
     if (isConversationClosed) return;
-    markRead({ conversationId: id as any, token }).catch(() => {});
-  }, [id, token, isConversationClosed, markRead, messages?.length]);
+    // P2-005: pass authUserId as an optional defense-in-depth hint so the
+    // backend can cross-check it against the session-resolved userId. The
+    // backend arg is optional — pre-existing callers continue to work
+    // without it.
+    markRead({ conversationId: id as any, token, authUserId: userId ?? undefined }).catch(() => {});
+  }, [id, token, userId, isConversationClosed, markRead, messages?.length]);
 
   // Auto-open game modal when game becomes active AND has actually started
   // (i.e. inviter pressed start). Phase-1 parity: ChatScreenInner doesn't
