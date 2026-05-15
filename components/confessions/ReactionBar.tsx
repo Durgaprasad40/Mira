@@ -1,12 +1,11 @@
-import React, { useState, useCallback } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Modal, Pressable } from 'react-native';
+import React, { useState, useCallback, useRef } from 'react';
+import { View, Text, StyleSheet, Modal, Pressable } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
   withSequence,
   withTiming,
-  runOnJS,
 } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/lib/constants';
@@ -17,6 +16,13 @@ const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
 // Standard reaction emojis for confessions
 export const CONFESSION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢'];
+const REACTION_TAP_DEBOUNCE_MS = 250;
+const MAX_REACTION_COUNT_LABEL = 999;
+
+function formatReactionCountLabel(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) return '0';
+  return count > MAX_REACTION_COUNT_LABEL ? `${MAX_REACTION_COUNT_LABEL}+` : String(count);
+}
 
 export interface EmojiCount {
   emoji: string;
@@ -90,7 +96,7 @@ function AnimatedChip({ emoji, count, isSelected, onPress, size }: AnimatedChipP
           isSelected && styles.chipCountSelected,
         ]}
       >
-        {count}
+        {formatReactionCountLabel(count)}
       </Text>
     </AnimatedPressable>
   );
@@ -161,10 +167,24 @@ export default function ReactionBar({
   size = 'compact',
 }: ReactionBarProps) {
   const [showQuickPicker, setShowQuickPicker] = useState(false);
+  const lastReactionTapAtRef = useRef<Record<string, number>>({});
 
   const validEmojis = topEmojis.filter((e) => isProbablyEmoji(e.emoji));
   const visibleCount = validEmojis.reduce((sum, e) => sum + e.count, 0);
-  const remaining = reactionCount - visibleCount;
+  const remaining = Math.max(0, reactionCount - visibleCount);
+
+  const runDebouncedEmojiToggle = useCallback((emoji: string) => {
+    const now = Date.now();
+    const lastTapAt = lastReactionTapAtRef.current[emoji] ?? 0;
+    if (now - lastTapAt < REACTION_TAP_DEBOUNCE_MS) return;
+    lastReactionTapAtRef.current[emoji] = now;
+
+    if (onToggleEmoji) {
+      onToggleEmoji(emoji);
+    } else {
+      onReact();
+    }
+  }, [onToggleEmoji, onReact]);
 
   const handleQuickSelect = useCallback((emoji: string) => {
     // Haptic feedback on reaction selection (meaningful action)
@@ -173,12 +193,8 @@ export default function ReactionBar({
     } catch {}
 
     setShowQuickPicker(false);
-    if (onToggleEmoji) {
-      onToggleEmoji(emoji);
-    } else {
-      onReact();
-    }
-  }, [onToggleEmoji, onReact]);
+    runDebouncedEmojiToggle(emoji);
+  }, [runDebouncedEmojiToggle]);
 
   const handleOpenPicker = useCallback(() => {
     // No haptic for opening picker (minor action)
@@ -193,13 +209,13 @@ export default function ReactionBar({
           emoji={e.emoji}
           count={e.count}
           isSelected={userEmoji === e.emoji}
-          onPress={() => onToggleEmoji ? onToggleEmoji(e.emoji) : onReact()}
+          onPress={() => runDebouncedEmojiToggle(e.emoji)}
           size={size}
         />
       ))}
 
       {remaining > 0 && validEmojis.length > 0 && (
-        <Text style={styles.moreCount}>+{remaining}</Text>
+        <Text style={styles.moreCount}>+{formatReactionCountLabel(remaining)}</Text>
       )}
 
       <AnimatedAddButton

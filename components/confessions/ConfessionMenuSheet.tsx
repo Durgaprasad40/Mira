@@ -11,6 +11,7 @@
  */
 import React from 'react';
 import {
+  ActivityIndicator,
   Modal,
   Platform,
   Pressable,
@@ -24,6 +25,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { COLORS, FONT_SIZE, FONT_WEIGHT, SPACING, lineHeight } from '@/lib/constants';
+import { resolveStableName } from '@/lib/identity';
 
 interface ConfessionMenuSheetProps {
   visible: boolean;
@@ -32,6 +34,10 @@ interface ConfessionMenuSheetProps {
   onEdit?: () => void;
   onDelete?: () => void;
   onReport?: () => void;
+  onBlock?: () => void | Promise<void>;
+  isBlockSubmitting?: boolean;
+  displayName?: string;
+  displayNameKey?: string;
 }
 
 export function ConfessionMenuSheet({
@@ -41,13 +47,31 @@ export function ConfessionMenuSheet({
   onEdit,
   onDelete,
   onReport,
+  onBlock,
+  isBlockSubmitting = false,
+  displayName,
+  displayNameKey,
 }: ConfessionMenuSheetProps) {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const cardWidth = Math.min(330, Math.max(280, width - SPACING.xl * 2));
+  const stableDisplayNameRef = React.useRef<{ key?: string; name?: string }>({});
+  if (stableDisplayNameRef.current.key !== displayNameKey) {
+    stableDisplayNameRef.current = { key: displayNameKey };
+  }
+  const stableDisplayName = displayName
+    ? resolveStableName(displayName, stableDisplayNameRef.current.name)
+    : undefined;
+  if (stableDisplayName) {
+    stableDisplayNameRef.current = { key: displayNameKey, name: stableDisplayName };
+  }
 
-  const title = isOwner ? 'Your confession' : 'Report this confession';
-  const subtitle = isOwner ? null : 'Choose an action.';
+  const title = isOwner ? 'Your confession' : onBlock ? 'Confession actions' : 'Report this confession';
+  const subtitle = isOwner
+    ? null
+    : stableDisplayName
+      ? `Choose an action for ${stableDisplayName}.`
+      : 'Choose an action.';
 
   // CRITICAL: call action handler FIRST, then close, so the parent has a
   // chance to capture menuTargetConfession before it is cleared.
@@ -66,17 +90,24 @@ export function ConfessionMenuSheet({
     onClose();
   };
 
+  const handleBlock = () => {
+    if (isBlockSubmitting) return;
+    void onBlock?.();
+  };
+
   return (
     <Modal
       visible={visible}
       transparent
       animationType="fade"
       statusBarTranslucent={Platform.OS === 'android'}
-      onRequestClose={onClose}
+      onRequestClose={() => {
+        if (!isBlockSubmitting) onClose();
+      }}
     >
       <Pressable
         style={styles.overlay}
-        onPress={onClose}
+        onPress={isBlockSubmitting ? undefined : onClose}
         accessibilityRole="button"
         accessibilityLabel="Close confession options"
       >
@@ -173,6 +204,7 @@ export function ConfessionMenuSheet({
                 <TouchableOpacity
                   style={[styles.rowButton, styles.rowButtonNeutral]}
                   onPress={onClose}
+                  disabled={isBlockSubmitting}
                   activeOpacity={0.8}
                   accessibilityRole="button"
                   accessibilityLabel="Cancel"
@@ -185,6 +217,7 @@ export function ConfessionMenuSheet({
                 <TouchableOpacity
                   style={[styles.rowButton, styles.rowButtonPrimary]}
                   onPress={handleReport}
+                  disabled={isBlockSubmitting}
                   activeOpacity={0.85}
                   accessibilityRole="button"
                   accessibilityLabel="Report confession"
@@ -194,6 +227,26 @@ export function ConfessionMenuSheet({
                     Report
                   </Text>
                 </TouchableOpacity>
+
+                {onBlock ? (
+                  <TouchableOpacity
+                    style={[styles.rowButton, styles.rowButtonPrimary]}
+                    onPress={handleBlock}
+                    disabled={isBlockSubmitting}
+                    activeOpacity={0.85}
+                    accessibilityRole="button"
+                    accessibilityLabel="Block author"
+                  >
+                    {isBlockSubmitting ? (
+                      <ActivityIndicator size="small" color={COLORS.white} />
+                    ) : (
+                      <Ionicons name="ban-outline" size={16} color={COLORS.white} />
+                    )}
+                    <Text maxFontSizeMultiplier={1.2} style={styles.rowButtonPrimaryText}>
+                      Block
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
               </View>
             )}
           </Pressable>

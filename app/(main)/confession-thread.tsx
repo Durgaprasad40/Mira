@@ -67,6 +67,8 @@ const IDENTITY_OPTIONS: IdentityOption[] = [
   { key: 'open',       label: 'Open to all',  description: 'Name and photo visible', icon: 'person-outline' },
 ];
 
+const CONFESSION_REPLY_PAGE_LIMIT = 50;
+
 type Reply = {
   _id: string;
   confessionId: string;
@@ -86,6 +88,14 @@ type Reply = {
   createdAt: number;
   isOwnReply?: boolean;
 };
+
+type RepliesQueryResult =
+  | Reply[]
+  | {
+      replies?: Reply[];
+      hasMore?: boolean;
+      limit?: number;
+    };
 
 type Confession = {
   _id: string;
@@ -254,6 +264,7 @@ export default function ConfessionThreadScreen() {
       ? {
           confessionId: confessionId as any,
           token,
+          limit: CONFESSION_REPLY_PAGE_LIMIT,
         }
       : 'skip'
   );
@@ -367,6 +378,16 @@ export default function ConfessionThreadScreen() {
     : convexConfession ?? null;
 
   // Get replies
+  const liveRepliesResult = convexReplies as RepliesQueryResult | undefined;
+  const liveReplies = Array.isArray(liveRepliesResult)
+    ? liveRepliesResult
+    : liveRepliesResult?.replies ?? [];
+  const repliesHasMore =
+    !isDemoMode &&
+    !!liveRepliesResult &&
+    !Array.isArray(liveRepliesResult) &&
+    liveRepliesResult.hasMore === true;
+
   const replies: Reply[] = isDemoMode
     ? (demoReplies[confessionId ?? ''] ?? []).map((r: any) => ({
         _id: r.id,
@@ -380,7 +401,7 @@ export default function ConfessionThreadScreen() {
         voiceDurationSec: r.voiceDurationSec,
         createdAt: r.createdAt,
       }))
-    : ((convexReplies ?? []) as Reply[]);
+    : liveReplies;
 
   const myExistingReply: Reply | null = isDemoMode
     ? (replies.find((r) => r.userId === currentUserId && !r.parentReplyId) ?? null)
@@ -807,7 +828,6 @@ export default function ConfessionThreadScreen() {
   const handleSubmitReplyReport = useCallback(async (reason: ReportReasonKey) => {
     const targetId = reportingReplyId;
     if (!currentUserId || !targetId || isThreadClosed) return;
-    setReportingReplyId(null);
     try {
       if (isDemoMode) {
         Alert.alert('Reported', "Thanks. We'll review this comment.");
@@ -822,6 +842,8 @@ export default function ConfessionThreadScreen() {
       Alert.alert('Reported', "Thanks. We'll review this comment.");
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'Failed to report comment');
+    } finally {
+      setReportingReplyId(null);
     }
   }, [currentUserId, isDemoMode, isThreadClosed, reportReplyMutation, reportingReplyId, token]);
 
@@ -890,7 +912,6 @@ export default function ConfessionThreadScreen() {
   const handleSubmitMainConfessionReport = useCallback(async (reason: ReportReasonKey) => {
     const targetId = reportingMainConfessionId;
     if (!targetId) return;
-    setReportingMainConfessionId(null);
     try {
       if (isDemoMode) {
         demoReportConfession(targetId);
@@ -907,6 +928,8 @@ export default function ConfessionThreadScreen() {
       Alert.alert('Reported', "Thanks. We'll review this confession.");
     } catch (error: any) {
       Alert.alert('Error', error?.message || 'Unable to report right now');
+    } finally {
+      setReportingMainConfessionId(null);
     }
   }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation, reportingMainConfessionId, token]);
 
@@ -1604,6 +1627,18 @@ export default function ConfessionThreadScreen() {
     );
   }, [closedThreadMessage, isLoading, isThreadClosed]);
 
+  const renderRepliesLimitFooter = useCallback(() => {
+    if (!repliesHasMore) return null;
+    return (
+      <View style={styles.repliesLimitNotice}>
+        <Ionicons name="chatbubble-ellipses-outline" size={14} color={COLORS.textMuted} />
+        <Text maxFontSizeMultiplier={1.2} style={styles.repliesLimitText}>
+          Showing the first {CONFESSION_REPLY_PAGE_LIMIT} replies.
+        </Text>
+      </View>
+    );
+  }, [repliesHasMore]);
+
   // ────────────────────────────────────────────────────────────
   // Loading / not-found states
   // ────────────────────────────────────────────────────────────
@@ -1833,6 +1868,13 @@ export default function ConfessionThreadScreen() {
     footer = renderActiveComposer();
   }
 
+  const confessionMenuVisibility =
+    confession.authorVisibility || (confession.isAnonymous ? 'anonymous' : 'open');
+  const confessionMenuDisplayName =
+    !isOwner && confessionMenuVisibility === 'open'
+      ? confession.authorName
+      : undefined;
+
   // ────────────────────────────────────────────────────────────
   // Main render
   // ────────────────────────────────────────────────────────────
@@ -1857,6 +1899,7 @@ export default function ConfessionThreadScreen() {
           renderItem={renderReplyItem}
           ListHeaderComponent={renderHeader}
           ListEmptyComponent={renderEmpty}
+          ListFooterComponent={renderRepliesLimitFooter}
           contentContainerStyle={[
             styles.listContent,
             { paddingBottom: insets.bottom + 96 },
@@ -1967,6 +2010,8 @@ export default function ConfessionThreadScreen() {
         onEdit={handleConfessionMenuEdit}
         onDelete={handleConfessionMenuDelete}
         onReport={handleConfessionMenuReport}
+        displayName={confessionMenuDisplayName}
+        displayNameKey={String(confession._id)}
       />
 
       <ReportConfessionSheet
@@ -2481,6 +2526,19 @@ const styles = StyleSheet.create({
     lineHeight: lineHeight(moderateScale(15, 0.4), 1.35),
     color: COLORS.textLight,
     textAlign: 'center',
+  },
+  repliesLimitNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.xs,
+    paddingTop: SPACING.md,
+    paddingHorizontal: SPACING.md,
+  },
+  repliesLimitText: {
+    fontSize: FONT_SIZE.caption,
+    color: COLORS.textMuted,
+    lineHeight: lineHeight(FONT_SIZE.caption, 1.25),
   },
 
   // Owner notice

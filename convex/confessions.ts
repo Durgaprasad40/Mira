@@ -5,6 +5,7 @@ import { Doc, Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from './helpers';
 import { moderationStatusForCount } from './lib/confessionModeration';
 import { ensureActiveMatchForPair } from './matches';
+import { reserveActionSlots } from './actionRateLimits';
 import type { ConfessionModerationStatus } from './lib/confessionModeration';
 
 // Phone number & email patterns for server-side validation
@@ -16,6 +17,18 @@ const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 const CONFESSION_CONNECT_EXPIRY_MS = 24 * 60 * 60 * 1000;
 const CONFESSION_CONNECT_LIST_LIMIT = 50;
 const CONFESSION_CONNECT_EXPIRY_CLEANUP_BATCH = 100;
+// Safety-only per-recipient cap for Confess engagement notifications.
+// Subscription status must not bypass this flood guard.
+const CONFESSION_ENGAGEMENT_NOTIFICATION_DAILY_CAP = 20;
+const CONFESSION_REPLIES_PAGE_LIMIT = 50;
+// Reply caps cover top-level comments and owner threaded replies so a single
+// thread cannot be used for high-volume write/read amplification.
+const CONFESSION_REPLY_PER_MINUTE_CAP = 5;
+const CONFESSION_REPLY_DAILY_CAP = 200;
+const CONFESSION_CONNECT_REQUEST_DAILY_CAP = 10;
+// Cross-target report spam guard. Per-target idempotency still returns success
+// before this cap is reserved.
+const CONFESSION_REPORT_DAILY_CAP = 20;
 
 // P1-01: Server-side rate limit (5 confessions per 24 hours)
 const CONFESSION_RATE_LIMIT = 5;
@@ -998,6 +1011,40 @@ async function hasReportBetweenUsers(
   return !!reportBToA;
 }
 
+async function hasPositiveConfessLike(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  fromUserId: Id<'users'>,
+  toUserId: Id<'users'>
+): Promise<boolean> {
+  const likeRecord = await ctx.db
+    .query('likes')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', fromUserId).eq('toUserId', toUserId)
+    )
+    .filter((q) =>
+      q.or(
+        q.eq(q.field('action'), 'like'),
+        q.eq(q.field('action'), 'super_like'),
+        q.eq(q.field('action'), 'text')
+      )
+    )
+    .first();
+
+  return !!likeRecord;
+}
+
+async function hasMutualConfessLike(
+  ctx: Parameters<typeof validateSessionToken>[0],
+  userA: Id<'users'>,
+  userB: Id<'users'>
+): Promise<boolean> {
+  const [aLikedB, bLikedA] = await Promise.all([
+    hasPositiveConfessLike(ctx, userA, userB),
+    hasPositiveConfessLike(ctx, userB, userA),
+  ]);
+  return aLikedB && bLikedA;
+}
+
 function confessionIsConnectable(confession: Doc<'confessions'>, now: number): boolean {
   return isConfessionActive(confession, now) && !isHiddenByReports(confession);
 }
@@ -1077,7 +1124,7 @@ async function pairCanUseConfessionConnect(
     ownerId,
     options
   );
-  return eligibility.ok;
+  return eligibility.ok && (await hasMutualConfessLike(ctx, requesterId, ownerId));
 }
 
 async function canViewerUseConfessionTaggedProfile(
@@ -1311,6 +1358,20 @@ async function upsertConfessionEngagementNotification(
     });
     return;
   }
+
+  const cap = await reserveActionSlots(
+    ctx,
+    args.confession.userId,
+    'confession_engagement_notification',
+    [
+      {
+        kind: '1day',
+        windowMs: 24 * 60 * 60 * 1000,
+        max: CONFESSION_ENGAGEMENT_NOTIFICATION_DAILY_CAP,
+      },
+    ],
+  );
+  if (!cap.accept) return;
 
   await ctx.db.insert('notifications', {
     userId: args.confession.userId,
@@ -1620,6 +1681,9 @@ async function ensureMutualConfessionConversation(
   if (!confessionAllowsConnectPromotion(confession, connect, now, beingMarkedMutual)) {
     throw new Error('Connect request unavailable');
   }
+  if (!(await hasMutualConfessLike(ctx, connect.fromUserId, connect.toUserId))) {
+    throw new Error('Connect request unavailable');
+  }
   const eligibility = await evaluateConfessionConnectEligibility(
     ctx,
     connect.fromUserId,
@@ -1727,6 +1791,8 @@ export const createConfession = mutation({
     authorPhotoUrl: v.optional(v.string()),
     authorAge: v.optional(v.number()),
     authorGender: v.optional(v.string()),
+    // Single tagged user only. Bulk tagging is intentionally unsupported; the
+    // create caps already bound tag volume below the optional 10/day audit note.
     taggedUserId: v.optional(v.union(v.id('users'), v.string())), // User being confessed to
     // Optional client-suggested tagged user display name. The backend prefers
     // the canonical name fetched from the users table when available; this
@@ -1773,21 +1839,13 @@ export const createConfession = mutation({
     // If taggedUserId provided, verify the current user has liked them
     let resolvedTaggedUserName: string | undefined;
     if (taggedUserId) {
-      const likeRecord = await ctx.db
-        .query('likes')
-        .withIndex('by_from_to', (q) =>
-          q.eq('fromUserId', userId).eq('toUserId', taggedUserId!)
-        )
-        .filter((q) =>
-          q.or(
-            q.eq(q.field('action'), 'like'),
-            q.eq(q.field('action'), 'super_like'),
-            q.eq(q.field('action'), 'text')
-          )
-        )
-        .first();
+      const taggedUserDoc = await ctx.db.get(taggedUserId);
+      if (!taggedUserDoc || taggedUserDoc.isBanned === true || !!taggedUserDoc.deletedAt) {
+        throw new Error('This tag is unavailable.');
+      }
 
-      if (!likeRecord) {
+      const hasLikedTaggedUser = await hasPositiveConfessLike(ctx, userId, taggedUserId);
+      if (!hasLikedTaggedUser) {
         throw new Error('You can only confess to users you have liked.');
       }
 
@@ -1795,7 +1853,6 @@ export const createConfession = mutation({
       // string. Falls back to the trimmed/sanitised client value only if the
       // backend lookup yields no usable name (defensive — user docs always have
       // a name in this app's schema).
-      const taggedUserDoc = await ctx.db.get(taggedUserId);
       const canonicalName = taggedUserDoc?.name?.trim();
       if (canonicalName && canonicalName.length > 0) {
         resolvedTaggedUserName = canonicalName.slice(0, 64);
@@ -1805,6 +1862,16 @@ export const createConfession = mutation({
           resolvedTaggedUserName = fallback.slice(0, 64);
         }
       }
+    }
+
+    const minuteLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'confession_post_per_min',
+      [{ kind: '1min', windowMs: 60 * 1000, max: 1 }],
+    );
+    if (!minuteLimit.accept) {
+      throw new Error('Slow down. Please wait a minute before posting again.');
     }
 
     const effectiveVisibility = effectiveConfessionAuthorVisibility(
@@ -1937,6 +2004,14 @@ export const listConfessions = query({
       reportedConfessionIds: reportedIds,
       requireNormalModeration: sortBy === 'trending',
     });
+
+    if (sortBy === 'latest') {
+      confessions = confessions.filter(
+        (confession) =>
+          getConfessionModerationStatus(confession) !== 'under_review' ||
+          confession.userId === resolvedViewerId
+      );
+    }
 
     if (sortBy === 'trending') {
       // Improved trending scoring with time decay.
@@ -2189,6 +2264,26 @@ export const createReply = mutation({
     const replyPayload = normalizeConfessionReplyPayload(args);
     const replyType = replyPayload.replyType;
 
+    const minuteLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'confession_reply_per_min',
+      [{ kind: '1min', windowMs: 60 * 1000, max: CONFESSION_REPLY_PER_MINUTE_CAP }],
+    );
+    if (!minuteLimit.accept) {
+      throw new Error('Slow down. Please try again in a minute.');
+    }
+
+    const dailyLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'confession_reply_per_day',
+      [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: CONFESSION_REPLY_DAILY_CAP }],
+    );
+    if (!dailyLimit.accept) {
+      throw new Error('You have reached the daily reply limit. Please try again later.');
+    }
+
     const replyId = await ctx.db.insert('confessionReplies', {
       confessionId: args.confessionId,
       userId: userId,
@@ -2364,30 +2459,40 @@ export const deleteReply = mutation({
 });
 
 // Get replies for a confession
-// Fail closed — returns [] if parent missing, deleted, expired, blocked, or unavailable.
+// Fail closed with an empty payload if parent is missing/deleted/expired/blocked.
 // If viewerId is supplied, each reply carries isOwnReply for convenient client gating.
 // Author identity fields are only returned for non-anonymous rows.
+// Reply fetch is intentionally bounded to protect hot threads. Full cursor /
+// load-more pagination is deferred; do not remove this cap without adding
+// pagination over confessionReplies.by_confession or a stronger equivalent.
 export const getReplies = query({
   args: {
     confessionId: v.id('confessions'),
     viewerId: v.optional(v.union(v.id('users'), v.string())),
     token: v.optional(v.string()),
+    limit: v.optional(v.number()),
   },
-  handler: async (ctx, { confessionId, viewerId, token }) => {
+  handler: async (ctx, { confessionId, viewerId, token, limit }) => {
+    const safeLimit = Math.min(
+      CONFESSION_REPLIES_PAGE_LIMIT,
+      Math.max(1, Math.floor(limit ?? CONFESSION_REPLIES_PAGE_LIMIT))
+    );
     const parent = await ctx.db.get(confessionId);
-    if (!parent) return [];
+    if (!parent) return { replies: [], hasMore: false, limit: safeLimit };
 
     const resolvedViewerId = await resolveConfessionReadViewer(ctx, token, viewerId);
     const now = Date.now();
     if (!(await canViewerSeeConfession(ctx, resolvedViewerId, parent, { now }))) {
-      return [];
+      return { replies: [], hasMore: false, limit: safeLimit };
     }
 
-    const replies = await ctx.db
+    const page = await ctx.db
       .query('confessionReplies')
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .order('asc')
-      .collect();
+      .take(safeLimit + 1);
+    const hasMore = page.length > safeLimit;
+    const replies = page.slice(0, safeLimit);
     const visibleReplies = await filterVisibleReplies(ctx, resolvedViewerId, replies);
     const visibleTopLevelReplyIds = new Set(
       visibleReplies
@@ -2407,12 +2512,16 @@ export const getReplies = query({
       visibleThreadReplies.map((r) => r.userId)
     );
 
-    return visibleThreadReplies.map((reply) =>
-      serializeReply(reply, {
-        viewerId: resolvedViewerId,
-        livePhotoUrlByUserId,
-      })
-    );
+    return {
+      replies: visibleThreadReplies.map((reply) =>
+        serializeReply(reply, {
+          viewerId: resolvedViewerId,
+          livePhotoUrlByUserId,
+        })
+      ),
+      hasMore,
+      limit: safeLimit,
+    };
   },
 });
 
@@ -2689,6 +2798,16 @@ export const reportConfession = mutation({
       throw new Error(CONFESSION_UNAVAILABLE);
     }
 
+    const reportLimit = await reserveActionSlots(
+      ctx,
+      reporterId,
+      'confession_report_confession',
+      [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: CONFESSION_REPORT_DAILY_CAP }],
+    );
+    if (!reportLimit.accept) {
+      throw new Error('Slow down. Please try again later.');
+    }
+
     // Create report record
     await ctx.db.insert('confessionReports', {
       confessionId: args.confessionId,
@@ -2771,6 +2890,17 @@ export const reportReply = mutation({
       return { success: true, alreadyReported: true };
     }
 
+    const reportLimit = await reserveActionSlots(
+      ctx,
+      reporterId,
+      'confession_report_reply',
+      [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: CONFESSION_REPORT_DAILY_CAP }],
+    );
+    if (!reportLimit.accept) {
+      throw new Error('Slow down. Please try again later.');
+    }
+
+    const now = Date.now();
     await ctx.db.insert('confessionReplyReports', {
       replyId: args.replyId,
       confessionId: reply.confessionId,
@@ -2786,7 +2916,7 @@ export const reportReply = mutation({
       reason: args.reason,
       description: args.description,
       status: 'pending',
-      createdAt: Date.now(),
+      createdAt: now,
     });
 
     return { success: true, alreadyReported: false };
@@ -3112,6 +3242,10 @@ export const requestConfessionConnect = mutation({
       throw new Error('Connect unavailable');
     }
 
+    if (!(await hasMutualConfessLike(ctx, confession.userId, viewerId))) {
+      throw new Error('Connect unavailable');
+    }
+
     const eligibility = await evaluateConfessionConnectEligibility(
       ctx,
       viewerId,
@@ -3166,6 +3300,16 @@ export const requestConfessionConnect = mutation({
         viewerId,
         matchId: existingConversation?.matchId,
       });
+    }
+
+    const requestLimit = await reserveActionSlots(
+      ctx,
+      viewerId,
+      'confession_connect_request',
+      [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: CONFESSION_CONNECT_REQUEST_DAILY_CAP }],
+    );
+    if (!requestLimit.accept) {
+      throw new Error('Slow down. Please try again later.');
     }
 
     const connectId = await ctx.db.insert('confessionConnects', {
@@ -3600,7 +3744,9 @@ export const getConfessionConnectStatus = query({
         confession.taggedUserId,
         confession.userId
       );
-      const pairSafe = eligibility.ok;
+      const pairSafe =
+        eligibility.ok &&
+        (await hasMutualConfessLike(ctx, confession.taggedUserId, confession.userId));
       if (!eligibility.ok) {
         ineligibleReason = eligibility.reason;
         existingConversationId = eligibility.conversationId;

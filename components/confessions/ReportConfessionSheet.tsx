@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Modal,
   Platform,
   Pressable,
@@ -49,15 +50,29 @@ export function ReportConfessionSheet({
   onSubmit,
 }: ReportConfessionSheetProps) {
   const insets = useSafeAreaInsets();
+  const [submittingReason, setSubmittingReason] = useState<ReportReasonKey | null>(null);
   const bottomPadding = Math.max(insets.bottom, SPACING.md);
   const title = mode === 'reply' ? 'Report comment' : 'Report confession';
   const subtitle =
     mode === 'reply'
       ? "What's wrong with this comment?"
       : "What's wrong with this confession?";
+  const isSubmitting = submittingReason !== null;
 
-  const handleSubmit = (reason: ReportReasonKey) => {
-    void onSubmit(reason);
+  useEffect(() => {
+    if (!visible) {
+      setSubmittingReason(null);
+    }
+  }, [visible]);
+
+  const handleSubmit = async (reason: ReportReasonKey) => {
+    if (isSubmitting) return;
+    setSubmittingReason(reason);
+    try {
+      await onSubmit(reason);
+    } finally {
+      setSubmittingReason(null);
+    }
   };
 
   return (
@@ -66,12 +81,14 @@ export function ReportConfessionSheet({
       transparent
       animationType="slide"
       statusBarTranslucent={Platform.OS === 'android'}
-      onRequestClose={onClose}
+      onRequestClose={() => {
+        if (!isSubmitting) onClose();
+      }}
     >
       <View style={styles.modalRoot}>
         <Pressable
           style={styles.backdrop}
-          onPress={onClose}
+          onPress={isSubmitting ? undefined : onClose}
           accessibilityRole="button"
           accessibilityLabel="Close report options"
         />
@@ -91,8 +108,9 @@ export function ReportConfessionSheet({
             {REPORT_REASONS.map((reason) => (
               <TouchableOpacity
                 key={reason.key}
-                style={styles.optionRow}
-                onPress={() => handleSubmit(reason.key)}
+                style={[styles.optionRow, isSubmitting && styles.optionRowDisabled]}
+                onPress={() => { void handleSubmit(reason.key); }}
+                disabled={isSubmitting}
                 activeOpacity={0.78}
                 accessibilityRole="button"
                 accessibilityLabel={reason.label}
@@ -103,7 +121,11 @@ export function ReportConfessionSheet({
                 <Text maxFontSizeMultiplier={1.2} style={styles.optionText}>
                   {reason.label}
                 </Text>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                {submittingReason === reason.key ? (
+                  <ActivityIndicator size="small" color={COLORS.primary} />
+                ) : (
+                  <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                )}
               </TouchableOpacity>
             ))}
           </View>
@@ -111,6 +133,7 @@ export function ReportConfessionSheet({
           <TouchableOpacity
             style={styles.cancelRow}
             onPress={onClose}
+            disabled={isSubmitting}
             activeOpacity={0.8}
             accessibilityRole="button"
             accessibilityLabel="Cancel report"
@@ -185,6 +208,9 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
+  },
+  optionRowDisabled: {
+    opacity: 0.65,
   },
   iconWrap: {
     width: 36,

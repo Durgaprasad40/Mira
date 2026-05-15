@@ -146,6 +146,7 @@ export default function ConfessionsScreen() {
 
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const blockUserLocal = useBlockStore((s) => s.blockUser);
+  const unblockUserLocal = useBlockStore((s) => s.unblockUser);
 
   const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
@@ -186,8 +187,13 @@ export default function ConfessionsScreen() {
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [showMenuSheet, setShowMenuSheet] = useState(false);
-  const [menuTargetConfession, setMenuTargetConfession] = useState<{ id: string; authorId: string } | null>(null);
+  const [menuTargetConfession, setMenuTargetConfession] = useState<{
+    id: string;
+    authorId: string;
+    displayName?: string;
+  } | null>(null);
   const [reportingConfessionId, setReportingConfessionId] = useState<string | null>(null);
+  const [blockingAuthorId, setBlockingAuthorId] = useState<string | null>(null);
   const [countdownMs, setCountdownMs] = useState(0);
   const toastOpacity = useRef(new Animated.Value(0)).current;
   const pendingBlockAuthorsRef = useRef<Set<string>>(new Set());
@@ -694,6 +700,7 @@ export default function ConfessionsScreen() {
     confessionId: string,
     reason: ReportReasonKey
   ) => {
+    const previousHiddenConfessionIds = hiddenConfessionIds;
     if (isDemoMode) {
       demoReportConfession(confessionId);
       setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
@@ -703,6 +710,7 @@ export default function ConfessionsScreen() {
 
     if (!currentUserId) return;
 
+    setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
     try {
       await reportConfessionMutation({
         confessionId: confessionId as any,
@@ -710,28 +718,36 @@ export default function ConfessionsScreen() {
         reporterId: currentUserId,
         reason,
       });
-      setHiddenConfessionIds((current) => current.includes(confessionId) ? current : [...current, confessionId]);
       showToastMessage("Thanks. We'll review this confession.");
     } catch {
+      setHiddenConfessionIds(previousHiddenConfessionIds);
       Alert.alert('Unable to report right now');
     }
-  }, [currentUserId, demoReportConfession, isDemoMode, reportConfessionMutation, showToastMessage, token]);
+  }, [currentUserId, demoReportConfession, hiddenConfessionIds, isDemoMode, reportConfessionMutation, showToastMessage, token]);
 
   const handleBlockAuthor = useCallback(async (authorId: string) => {
-    if (!currentUserId || !authorId) return;
+    if (!currentUserId || !authorId) return false;
 
     if (isDemoMode) {
       blockUserLocal(authorId);
-      return;
+      return true;
     }
 
-    if (pendingBlockAuthorsRef.current.has(authorId)) return;
+    if (pendingBlockAuthorsRef.current.has(authorId)) return false;
     pendingBlockAuthorsRef.current.add(authorId);
+    setBlockingAuthorId(authorId);
+    const alreadyBlocked = blockedUserIds.includes(authorId);
+    if (!alreadyBlocked) {
+      blockUserLocal(authorId);
+    }
 
     try {
       if (!token || !currentUserId) {
+        if (!alreadyBlocked) {
+          unblockUserLocal(authorId);
+        }
         Alert.alert('Unable to block user right now');
-        return;
+        return false;
       }
       // P1-3: backend now requires (token, authUserId).
       await blockUserMutation({
@@ -739,17 +755,22 @@ export default function ConfessionsScreen() {
         authUserId: currentUserId,
         blockedUserId: authorId as any,
       });
-      blockUserLocal(authorId);
+      return true;
     } catch {
+      if (!alreadyBlocked) {
+        unblockUserLocal(authorId);
+      }
       Alert.alert('Unable to block user right now');
+      return false;
     } finally {
       pendingBlockAuthorsRef.current.delete(authorId);
+      setBlockingAuthorId((current) => (current === authorId ? null : current));
     }
-  }, [blockUserLocal, blockUserMutation, currentUserId, isDemoMode, token]);
+  }, [blockUserLocal, blockUserMutation, blockedUserIds, currentUserId, isDemoMode, token, unblockUserLocal]);
 
   // Open the premium menu sheet instead of alert
-  const handleOpenMenuSheet = useCallback((confessionId: string, authorId: string) => {
-    setMenuTargetConfession({ id: confessionId, authorId });
+  const handleOpenMenuSheet = useCallback((confessionId: string, authorId: string, displayName?: string) => {
+    setMenuTargetConfession({ id: confessionId, authorId, displayName });
     setShowMenuSheet(true);
   }, []);
 
@@ -768,11 +789,22 @@ export default function ConfessionsScreen() {
     setReportingConfessionId(menuTargetConfession.id);
   }, [menuTargetConfession]);
 
+  const handleMenuBlock = useCallback(async () => {
+    if (!menuTargetConfession) return;
+    const blocked = await handleBlockAuthor(menuTargetConfession.authorId);
+    if (blocked) {
+      handleCloseMenuSheet();
+    }
+  }, [handleBlockAuthor, handleCloseMenuSheet, menuTargetConfession]);
+
   const handleSubmitReportSheet = useCallback(async (reason: ReportReasonKey) => {
     const confessionId = reportingConfessionId;
     if (!confessionId) return;
-    setReportingConfessionId(null);
-    await handleSubmitReport(confessionId, reason);
+    try {
+      await handleSubmitReport(confessionId, reason);
+    } finally {
+      setReportingConfessionId(null);
+    }
   }, [handleSubmitReport, reportingConfessionId]);
 
   const handleMenuEdit = useCallback(() => {
@@ -816,7 +848,15 @@ export default function ConfessionsScreen() {
           onPress={() => {
             handleOpenThread(trendingHero.id);
           }}
-          onLongPress={() => handleOpenMenuSheet(trendingHero.id, trendingHero.userId)}
+          onLongPress={() =>
+            handleOpenMenuSheet(
+              trendingHero.id,
+              trendingHero.userId,
+              !trendingIsAnonymous && !trendingIsBlurPhoto
+                ? trendingHero.authorName
+                : undefined
+            )
+          }
           delayLongPress={300}
         >
           {/* Trending badge */}
@@ -1128,6 +1168,10 @@ export default function ConfessionsScreen() {
           const isOwnerCard = item.userId === effectiveViewerId;
           const reviewStatus = isOwnerCard ? getReviewBadgeStatus(item) : undefined;
 
+          const itemVisibility = item.authorVisibility || (item.isAnonymous ? 'anonymous' : 'open');
+          const itemMenuDisplayName =
+            itemVisibility === 'open' ? item.authorName : undefined;
+
           return (
             <View>
               {reviewStatus ? (
@@ -1161,7 +1205,7 @@ export default function ConfessionsScreen() {
                 enableTapToOpenThread={true}
                 enableLongPressMenu={true}
                 onCardPress={() => handleOpenThread(item.id)}
-                onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId)}
+                onCardLongPress={() => handleOpenMenuSheet(item.id, item.userId, itemMenuDisplayName)}
                 onReact={() => handleOpenReactionPicker(item.id)}
                 onToggleEmoji={(emoji) => void toggleReaction(item.id, emoji)}
                 onTagPress={
@@ -1277,6 +1321,17 @@ export default function ConfessionsScreen() {
         onEdit={handleMenuEdit}
         onDelete={handleMenuDelete}
         onReport={handleMenuReport}
+        onBlock={
+          menuTargetConfession?.authorId !== effectiveViewerId
+            ? handleMenuBlock
+            : undefined
+        }
+        displayName={menuTargetConfession?.displayName}
+        displayNameKey={menuTargetConfession?.id}
+        isBlockSubmitting={
+          !!menuTargetConfession &&
+          blockingAuthorId === menuTargetConfession.authorId
+        }
       />
 
       <ReportConfessionSheet
@@ -1416,7 +1471,9 @@ export default function ConfessionsScreen() {
               }}
               ListEmptyComponent={
                 <View style={styles.taggedEmptyState}>
-                  <Text maxFontSizeMultiplier={1.2} style={styles.taggedEmptyText}>No tagged confessions yet</Text>
+                  <Text maxFontSizeMultiplier={1.2} style={styles.taggedEmptyText}>
+                    No tagged confessions yet. When someone tags you, it will appear here.
+                  </Text>
                 </View>
               }
             />
