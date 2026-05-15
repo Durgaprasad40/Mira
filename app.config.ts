@@ -162,5 +162,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     eas: {
       projectId: "1cd22b4e-8a76-49f1-8459-765d071fa24a",
     },
+    // Google OAuth client IDs. The actual identity verification happens on
+    // the Convex side (see convex/googleAuth.ts); these client IDs are only
+    // used by expo-auth-session to identify which OAuth client is asking
+    // Google for the ID token. Never include a client SECRET here.
+    googleAuth: {
+      webClientId: process.env.GOOGLE_WEB_CLIENT_ID || undefined,
+      androidClientId: process.env.GOOGLE_ANDROID_CLIENT_ID || undefined,
+      iosClientId: process.env.GOOGLE_IOS_CLIENT_ID || undefined,
+    },
   },
 });

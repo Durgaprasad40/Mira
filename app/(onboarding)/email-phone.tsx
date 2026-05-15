@@ -14,12 +14,13 @@ import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as AppleAuthentication from 'expo-apple-authentication';
-import { useMutation } from 'convex/react';
+import { useMutation, useAction } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useScreenTrace } from '@/lib/devTrace';
+import { useGoogleSignIn } from '@/lib/auth/googleSignIn';
 
 type AuthMethod = 'email' | 'phone' | 'apple' | 'google';
 
@@ -41,6 +42,11 @@ export default function EmailPhoneScreen() {
 
   // Convex mutations
   const socialAuth = useMutation(api.auth.socialAuth);
+  // Google sign-in: action verifies the ID token server-side (issuer,
+  // audience, expiry, email_verified, non-empty sub) and only THEN creates
+  // or links a Mira session. The client never claims an identity itself.
+  const signInWithGoogleIdToken = useAction(api.googleAuth.signInWithGoogleIdToken);
+  const { ready: googleReady, signIn: googleSignIn } = useGoogleSignIn();
 
   // =========================================================================
   // Apple Sign-In Handler (iOS only)
@@ -138,6 +144,96 @@ export default function EmailPhoneScreen() {
   };
 
   // =========================================================================
+  // Google Sign-In Handler
+  //
+  // The client only gets an ID token from Google. It is sent untouched to
+  // the Convex Node action, which verifies it and returns the same response
+  // shape the Apple path uses (success/isNewUser/token/userId/onboardingCompleted).
+  // We deliberately do NOT pass an externalId from the client.
+  // =========================================================================
+  const handleGoogleSignIn = async () => {
+    if (!googleReady) {
+      Alert.alert(
+        'Google Sign-In Unavailable',
+        'Google sign-in is not configured for this build.',
+      );
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const popup = await googleSignIn();
+
+      if (popup.type === 'cancel') {
+        if (__DEV__) console.log('[GoogleAuth] User cancelled');
+        setIsLoading(false);
+        return;
+      }
+
+      if (popup.type === 'error') {
+        console.error('[GoogleAuth] Popup error:', popup.message);
+        Alert.alert('Sign-In Failed', popup.message);
+        setIsLoading(false);
+        return;
+      }
+
+      if (__DEV__) {
+        console.log('[GoogleAuth] Got ID token, prefix:', popup.idToken.substring(0, 16) + '...');
+      }
+
+      // H7 FIX: Capture auth version before async operation
+      const capturedAuthVersion = useAuthStore.getState().authVersion;
+
+      try {
+        const result = await signInWithGoogleIdToken({ idToken: popup.idToken });
+
+        // H7 FIX: Check if logout happened during action (version changed)
+        if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
+          if (__DEV__) console.log('[AUTH] Logout detected during Google auth - ignoring result');
+          return;
+        }
+
+        // H8 FIX: Check if component unmounted during async auth
+        if (!mountedRef.current) {
+          if (__DEV__) console.log('[AUTH] Component unmounted during Google auth - ignoring result');
+          return;
+        }
+
+        if (!result || !result.token || !result.userId) {
+          throw new Error('Invalid response from server - missing required fields');
+        }
+
+        setAuth(
+          result.userId as string,
+          result.token,
+          result.onboardingCompleted || false,
+          capturedAuthVersion,
+        );
+
+        const { saveAuthBootCache } = require('@/stores/authBootCache');
+        await saveAuthBootCache(result.token, result.userId as string);
+
+        if (result.onboardingCompleted) {
+          router.replace('/(main)/(tabs)/home' as any);
+        } else {
+          // Onboarding not complete (likely a brand-new account). Send the
+          // user straight to basic-info in confirm mode, same as Apple.
+          router.replace('/(onboarding)/basic-info?confirm=true' as any);
+        }
+      } catch (backendError: any) {
+        console.error('[GoogleAuth] Backend error:', backendError?.message);
+        Alert.alert(
+          'Sign-In Error',
+          backendError?.message || 'Failed to authenticate with server.',
+        );
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // =========================================================================
   // Handle Auth Option Press
   // =========================================================================
   const handleOptionPress = (method: AuthMethod) => {
@@ -157,7 +253,7 @@ export default function EmailPhoneScreen() {
         }
         break;
       case 'google':
-        Alert.alert('Coming Soon', 'Google Sign-In will be available soon.');
+        handleGoogleSignIn();
         break;
     }
   };
@@ -230,8 +326,10 @@ export default function EmailPhoneScreen() {
           renderAuthOption('apple', 'logo-apple', 'Continue with Apple', true, 'iOS only')
         )}
 
-        {/* Google - Coming soon */}
-        {renderAuthOption('google', 'logo-google', 'Continue with Google', false, 'Coming soon')}
+        {/* Google */}
+        {googleReady
+          ? renderAuthOption('google', 'logo-google', 'Continue with Google')
+          : renderAuthOption('google', 'logo-google', 'Continue with Google', true, 'Unavailable')}
       </View>
 
       {/* Loading indicator */}

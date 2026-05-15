@@ -815,6 +815,19 @@ export const socialAuth = mutation({
     const { provider, externalId, email, name } = args;
     const now = Date.now();
 
+    // ---------------------------------------------------------------------
+    // SECURITY (2026-05): The Google branch of this mutation used to trust
+    // a client-supplied `externalId`, which means anyone with the public
+    // mutation name could mint a session for any Google account they could
+    // name. The verified, server-side replacement lives in
+    // `convex/googleAuth.signInWithGoogleIdToken`. Refuse Google here.
+    // ---------------------------------------------------------------------
+    if (provider === "google") {
+      throw new Error(
+        "socialAuth(google) is disabled. Use signInWithGoogleIdToken instead.",
+      );
+    }
+
     // Check if user already exists with this external ID
     let user = await ctx.db
       .query("users")
@@ -925,6 +938,15 @@ export const completeSocialAuth = mutation({
   handler: async (ctx, args) => {
     const { provider, externalId, email, name, dateOfBirth, gender } = args;
     const now = Date.now();
+
+    // SECURITY (2026-05): see `socialAuth` above. The Google branch is
+    // unsafe and is replaced by the server-verified flow.
+    if (provider === "google") {
+      throw new Error(
+        "completeSocialAuth(google) is disabled. Use signInWithGoogleIdToken instead.",
+      );
+    }
+
     // P0-008 FIX: Normalize email to prevent duplicate accounts with different casing
     const normalizedEmail = email?.toLowerCase().trim();
 
