@@ -1037,6 +1037,14 @@ export const updateDisplayNameByAuthId = mutation({
       .first();
 
     if (!existing) {
+      // P2-3: Skeleton-profile insert. The user has only chosen a nickname and
+      // has NOT completed Phase-2 setup (no bio, no photos, no intents). We
+      // defensively set BOTH `isPrivateEnabled: false` AND
+      // `isSetupComplete: false` so the row cannot surface in discovery,
+      // swipes, truth-or-dare, or any other Phase-2 reader even if a future
+      // reader forgets to check `isSetupComplete`. The user must complete the
+      // setup flow (which calls `setupPrivateProfile` / `enablePrivateProfile`)
+      // to flip both flags to `true`.
       const now = Date.now();
       const user = await ctx.db.get(userId);
       const derivedAge = ageFromUser(user);
@@ -1054,7 +1062,8 @@ export const updateDisplayNameByAuthId = mutation({
         privateIntentKeys: [],
         privatePhotoUrls: [],
         city: user?.city || '',
-        isPrivateEnabled: true,
+        // P2-3: skeleton row stays disabled until full setup completes.
+        isPrivateEnabled: false,
         ageConfirmed18Plus: adultAgeConfirmed,
         ...(adultAgeConfirmed ? { ageConfirmedAt: now } : {}),
         privatePhotosBlurred: [],
@@ -1734,7 +1743,26 @@ export const updatePhotoBlurSlots = mutation({
     if (existing) {
       const patch: Record<string, unknown> = { updatedAt: now };
       if (args.photoBlurSlots !== undefined) {
-        patch.photoBlurSlots = args.photoBlurSlots;
+        // P2-1: Reconcile incoming blur-slot array against the canonical
+        // private-photo count so a desync (slow client, photo deleted in
+        // another tab) cannot persist a slots array longer than the photos
+        // it controls. Truncate excess; pad missing trailing slots with
+        // `false` (unblurred) so the array length always matches.
+        const photoCount = Array.isArray(existing.privatePhotoUrls)
+          ? existing.privatePhotoUrls.length
+          : 0;
+        const incoming = args.photoBlurSlots;
+        let reconciled: boolean[];
+        if (incoming.length === photoCount) {
+          reconciled = incoming;
+        } else if (incoming.length > photoCount) {
+          reconciled = incoming.slice(0, photoCount);
+        } else {
+          reconciled = incoming.concat(
+            new Array(photoCount - incoming.length).fill(false),
+          );
+        }
+        patch.photoBlurSlots = reconciled;
       }
       if (args.photoBlurEnabled !== undefined) {
         patch.photoBlurEnabled = args.photoBlurEnabled;

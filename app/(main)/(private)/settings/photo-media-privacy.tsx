@@ -1,5 +1,5 @@
-import React, { useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Switch } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { Alert, View, Text, StyleSheet, TouchableOpacity, ScrollView, Switch, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMutation } from 'convex/react';
@@ -11,6 +11,16 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 
 const C = INCOGNITO_COLORS;
 
+type PhotoVisibility = 'public' | 'blurred' | 'private';
+type SecureMediaTimer = 0 | 10 | 30;
+type SecureMediaViewingMode = 'tap' | 'hold';
+type SavingField =
+  | 'defaultPhotoVisibility'
+  | 'allowUnblurRequests'
+  | 'defaultSecureMediaTimer'
+  | 'defaultSecureMediaViewingMode'
+  | null;
+
 export default function PhotoMediaPrivacyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -21,62 +31,116 @@ export default function PhotoMediaPrivacyScreen() {
   const defaultPhotoVisibility = usePrivateProfileStore((s) => s.defaultPhotoVisibility);
   const allowUnblurRequests = usePrivateProfileStore((s) => s.allowUnblurRequests);
   const defaultSecureMediaTimer = usePrivateProfileStore((s) => s.defaultSecureMediaTimer);
+  const defaultSecureMediaViewingMode = usePrivateProfileStore((s) => s.defaultSecureMediaViewingMode);
 
   const setDefaultPhotoVisibility = usePrivateProfileStore((s) => s.setDefaultPhotoVisibility);
   const setAllowUnblurRequests = usePrivateProfileStore((s) => s.setAllowUnblurRequests);
   const setDefaultSecureMediaTimer = usePrivateProfileStore((s) => s.setDefaultSecureMediaTimer);
+  const setDefaultSecureMediaViewingMode = usePrivateProfileStore((s) => s.setDefaultSecureMediaViewingMode);
 
-  const persistPhotoMediaPrivacy = useCallback(() => {
-    if (!authUserId || !token) return;
-    const {
-      defaultPhotoVisibility,
-      allowUnblurRequests,
-      defaultSecureMediaTimer,
-      defaultSecureMediaViewingMode,
-    } = usePrivateProfileStore.getState();
-    void updateFieldsByAuthId({
-      token,
-      authUserId,
-      defaultPhotoVisibility,
-      allowUnblurRequests,
-      defaultSecureMediaTimer,
-      defaultSecureMediaViewingMode,
-    })
-      .then((res) => {
-        if (res && !res.success && __DEV__) {
-          console.warn('[PhotoMediaPrivacy] updateFieldsByAuthId:', res.error);
+  const [savingField, setSavingField] = useState<SavingField>(null);
+
+  const showSaveErrorAlert = useCallback(() => {
+    Alert.alert('Could not save settings', 'Please try again.');
+  }, []);
+
+  /**
+   * Persist current store snapshot, with optimistic-update + rollback on failure.
+   * Mirrors the awaited pattern used in private-notifications.tsx.
+   */
+  const persistField = useCallback(
+    async (
+      field: Exclude<SavingField, null>,
+      rollback: () => void,
+    ) => {
+      if (!authUserId || !token) {
+        rollback();
+        showSaveErrorAlert();
+        return;
+      }
+
+      setSavingField(field);
+      try {
+        const {
+          defaultPhotoVisibility: nextVisibility,
+          allowUnblurRequests: nextAllowUnblur,
+          defaultSecureMediaTimer: nextTimer,
+          defaultSecureMediaViewingMode: nextViewingMode,
+        } = usePrivateProfileStore.getState();
+
+        const res = await updateFieldsByAuthId({
+          token,
+          authUserId,
+          defaultPhotoVisibility: nextVisibility,
+          allowUnblurRequests: nextAllowUnblur,
+          defaultSecureMediaTimer: nextTimer,
+          defaultSecureMediaViewingMode: nextViewingMode,
+        });
+
+        if (!res?.success) {
+          rollback();
+          showSaveErrorAlert();
+          if (__DEV__) {
+            console.warn('[PhotoMediaPrivacy] updateFieldsByAuthId:', res?.error);
+          }
         }
-      })
-      .catch((err) => {
+      } catch (err) {
+        rollback();
+        showSaveErrorAlert();
         if (__DEV__) {
           console.warn('[PhotoMediaPrivacy] updateFieldsByAuthId failed', err);
         }
-      });
-  }, [authUserId, token, updateFieldsByAuthId]);
+      } finally {
+        setSavingField(null);
+      }
+    },
+    [authUserId, token, updateFieldsByAuthId, showSaveErrorAlert],
+  );
 
   const onVisibilityChange = useCallback(
-    (visibility: 'public' | 'blurred' | 'private') => {
+    (visibility: PhotoVisibility) => {
+      if (savingField || visibility === defaultPhotoVisibility) return;
+      const prev = defaultPhotoVisibility;
       setDefaultPhotoVisibility(visibility);
-      persistPhotoMediaPrivacy();
+      void persistField('defaultPhotoVisibility', () => setDefaultPhotoVisibility(prev));
     },
-    [setDefaultPhotoVisibility, persistPhotoMediaPrivacy]
+    [savingField, defaultPhotoVisibility, setDefaultPhotoVisibility, persistField],
   );
 
   const onAllowUnblurChange = useCallback(
     (allow: boolean) => {
+      if (savingField || allow === allowUnblurRequests) return;
+      const prev = allowUnblurRequests;
       setAllowUnblurRequests(allow);
-      persistPhotoMediaPrivacy();
+      void persistField('allowUnblurRequests', () => setAllowUnblurRequests(prev));
     },
-    [setAllowUnblurRequests, persistPhotoMediaPrivacy]
+    [savingField, allowUnblurRequests, setAllowUnblurRequests, persistField],
   );
 
   const onSecureMediaTimerChange = useCallback(
-    (timer: 0 | 10 | 30) => {
+    (timer: SecureMediaTimer) => {
+      if (savingField || timer === defaultSecureMediaTimer) return;
+      const prev = defaultSecureMediaTimer;
       setDefaultSecureMediaTimer(timer);
-      persistPhotoMediaPrivacy();
+      void persistField('defaultSecureMediaTimer', () => setDefaultSecureMediaTimer(prev));
     },
-    [setDefaultSecureMediaTimer, persistPhotoMediaPrivacy]
+    [savingField, defaultSecureMediaTimer, setDefaultSecureMediaTimer, persistField],
   );
+
+  const onViewingModeChange = useCallback(
+    (mode: SecureMediaViewingMode) => {
+      if (savingField || mode === defaultSecureMediaViewingMode) return;
+      const prev = defaultSecureMediaViewingMode;
+      setDefaultSecureMediaViewingMode(mode);
+      void persistField('defaultSecureMediaViewingMode', () => setDefaultSecureMediaViewingMode(prev));
+    },
+    [savingField, defaultSecureMediaViewingMode, setDefaultSecureMediaViewingMode, persistField],
+  );
+
+  const renderSavingIndicator = (field: Exclude<SavingField, null>) =>
+    savingField === field ? (
+      <ActivityIndicator size="small" color={C.primary} style={styles.savingIndicator} />
+    ) : null;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -92,7 +156,10 @@ export default function PhotoMediaPrivacyScreen() {
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
         {/* Default Photo Visibility */}
         <View style={styles.settingSection}>
-          <Text style={styles.settingLabel}>Default Photo Visibility</Text>
+          <View style={styles.labelRow}>
+            <Text style={styles.settingLabel}>Default Photo Visibility</Text>
+            {renderSavingIndicator('defaultPhotoVisibility')}
+          </View>
           <Text style={styles.settingDescription}>
             How your photos appear to others by default
           </Text>
@@ -100,6 +167,7 @@ export default function PhotoMediaPrivacyScreen() {
             <TouchableOpacity
               style={[styles.segment, defaultPhotoVisibility === 'public' && styles.segmentActive]}
               onPress={() => onVisibilityChange('public')}
+              disabled={savingField !== null}
             >
               <Text style={[styles.segmentText, defaultPhotoVisibility === 'public' && styles.segmentTextActive]}>
                 Public
@@ -108,6 +176,7 @@ export default function PhotoMediaPrivacyScreen() {
             <TouchableOpacity
               style={[styles.segment, defaultPhotoVisibility === 'blurred' && styles.segmentActive]}
               onPress={() => onVisibilityChange('blurred')}
+              disabled={savingField !== null}
             >
               <Text style={[styles.segmentText, defaultPhotoVisibility === 'blurred' && styles.segmentTextActive]}>
                 Blurred
@@ -116,6 +185,7 @@ export default function PhotoMediaPrivacyScreen() {
             <TouchableOpacity
               style={[styles.segment, defaultPhotoVisibility === 'private' && styles.segmentActive]}
               onPress={() => onVisibilityChange('private')}
+              disabled={savingField !== null}
             >
               <Text style={[styles.segmentText, defaultPhotoVisibility === 'private' && styles.segmentTextActive]}>
                 Private
@@ -133,18 +203,26 @@ export default function PhotoMediaPrivacyScreen() {
                 Let others request to see blurred photos
               </Text>
             </View>
-            <Switch
-              value={allowUnblurRequests}
-              onValueChange={onAllowUnblurChange}
-              trackColor={{ false: C.border, true: C.primary }}
-              thumbColor="#FFF"
-            />
+            {savingField === 'allowUnblurRequests' ? (
+              <ActivityIndicator size="small" color={C.primary} />
+            ) : (
+              <Switch
+                value={allowUnblurRequests}
+                onValueChange={onAllowUnblurChange}
+                trackColor={{ false: C.border, true: C.primary }}
+                thumbColor="#FFF"
+                disabled={savingField !== null}
+              />
+            )}
           </View>
         </View>
 
         {/* Default Secure Media Timer */}
         <View style={styles.settingSection}>
-          <Text style={styles.settingLabel}>Default Secure Media Timer</Text>
+          <View style={styles.labelRow}>
+            <Text style={styles.settingLabel}>Default Secure Media Timer</Text>
+            {renderSavingIndicator('defaultSecureMediaTimer')}
+          </View>
           <Text style={styles.settingDescription}>
             Auto-delete secure photos/videos after viewing
           </Text>
@@ -152,6 +230,7 @@ export default function PhotoMediaPrivacyScreen() {
             <TouchableOpacity
               style={[styles.segment, defaultSecureMediaTimer === 0 && styles.segmentActive]}
               onPress={() => onSecureMediaTimerChange(0)}
+              disabled={savingField !== null}
             >
               <Text style={[styles.segmentText, defaultSecureMediaTimer === 0 && styles.segmentTextActive]}>
                 Off
@@ -160,6 +239,7 @@ export default function PhotoMediaPrivacyScreen() {
             <TouchableOpacity
               style={[styles.segment, defaultSecureMediaTimer === 10 && styles.segmentActive]}
               onPress={() => onSecureMediaTimerChange(10)}
+              disabled={savingField !== null}
             >
               <Text style={[styles.segmentText, defaultSecureMediaTimer === 10 && styles.segmentTextActive]}>
                 10s
@@ -168,9 +248,41 @@ export default function PhotoMediaPrivacyScreen() {
             <TouchableOpacity
               style={[styles.segment, defaultSecureMediaTimer === 30 && styles.segmentActive]}
               onPress={() => onSecureMediaTimerChange(30)}
+              disabled={savingField !== null}
             >
               <Text style={[styles.segmentText, defaultSecureMediaTimer === 30 && styles.segmentTextActive]}>
                 30s
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Default Secure Media Viewing Mode */}
+        <View style={styles.settingSection}>
+          <View style={styles.labelRow}>
+            <Text style={styles.settingLabel}>Secure Media Viewing</Text>
+            {renderSavingIndicator('defaultSecureMediaViewingMode')}
+          </View>
+          <Text style={styles.settingDescription}>
+            How secure photos/videos are revealed when you open them
+          </Text>
+          <View style={styles.segmentedControl}>
+            <TouchableOpacity
+              style={[styles.segment, defaultSecureMediaViewingMode === 'tap' && styles.segmentActive]}
+              onPress={() => onViewingModeChange('tap')}
+              disabled={savingField !== null}
+            >
+              <Text style={[styles.segmentText, defaultSecureMediaViewingMode === 'tap' && styles.segmentTextActive]}>
+                Tap to reveal
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.segment, defaultSecureMediaViewingMode === 'hold' && styles.segmentActive]}
+              onPress={() => onViewingModeChange('hold')}
+              disabled={savingField !== null}
+            >
+              <Text style={[styles.segmentText, defaultSecureMediaViewingMode === 'hold' && styles.segmentTextActive]}>
+                Hold to reveal
               </Text>
             </TouchableOpacity>
           </View>
@@ -212,6 +324,12 @@ const styles = StyleSheet.create({
   settingSection: {
     gap: 12,
   },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
   settingLabel: {
     fontSize: 15,
     fontWeight: '600',
@@ -231,6 +349,7 @@ const styles = StyleSheet.create({
   segment: {
     flex: 1,
     paddingVertical: 8,
+    paddingHorizontal: 4,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 8,
@@ -239,9 +358,10 @@ const styles = StyleSheet.create({
     backgroundColor: C.primary,
   },
   segmentText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     color: C.textLight,
+    textAlign: 'center',
   },
   segmentTextActive: {
     color: '#FFF',
@@ -255,5 +375,8 @@ const styles = StyleSheet.create({
   toggleInfo: {
     flex: 1,
     gap: 4,
+  },
+  savingIndicator: {
+    marginLeft: 4,
   },
 });

@@ -751,11 +751,47 @@ export default function EditProfileScreen() {
   const [didFirstPaint, setDidFirstPaint] = useState(false);
   const [renderAllPhotos, setRenderAllPhotos] = useState(false);
 
+  // P2-7: Track storage IDs that have been uploaded + tracked in
+  // `pendingUploads` but have not yet been confirmed by a successful
+  // `persistProfileUpdate`. If the user navigates away mid-flight we will
+  // best-effort cleanup these rows on unmount so they do not become orphans.
+  const inflightUploadsRef = useRef<Set<string>>(new Set());
+  // Latest auth context for the unmount-only cleanup effect (which captures
+  // its closure once at mount time).
+  const cleanupAuthCtxRef = useRef<{ token: string | null; userId: string | null }>({
+    token: null,
+    userId: null,
+  });
+  useEffect(() => {
+    cleanupAuthCtxRef.current = { token: token ?? null, userId: userId ?? null };
+  }, [token, userId]);
+
   useEffect(() => {
     return () => {
       mountedRef.current = false;
     };
   }, []);
+
+  // P2-7: Best-effort cleanup of any pendingUploads rows we created but never
+  // committed. Runs ONLY on unmount. Intentionally fire-and-forget — the
+  // component is going away and the user has already left the screen.
+  useEffect(() => {
+    return () => {
+      const ctx = cleanupAuthCtxRef.current;
+      const ids = Array.from(inflightUploadsRef.current);
+      inflightUploadsRef.current.clear();
+      if (!ctx.token || !ctx.userId || ids.length === 0) return;
+      for (const storageId of ids) {
+        cleanupPendingUpload({
+          token: ctx.token,
+          userId: ctx.userId,
+          storageId: storageId as Id<'_storage'>,
+        }).catch(() => {
+          // Best-effort cleanup only.
+        });
+      }
+    };
+  }, [cleanupPendingUpload]);
 
   // Mark after-first-paint to avoid heavy visual work on initial render (e.g., blur).
   useEffect(() => {
@@ -965,6 +1001,10 @@ export default function EditProfileScreen() {
           const storageId = await uploadPhotoToConvex(asset.uri, () => generateUploadUrl({ token }));
           uploadedStorageId = storageId;
           await trackPendingUpload({ token, userId, storageId });
+          // P2-7: Mark this storage ID as in-flight so the unmount cleanup
+          // effect knows to delete it if the user leaves before the
+          // persistProfileUpdate below succeeds.
+          inflightUploadsRef.current.add(storageId as unknown as string);
           const permanentUrl = await getStorageUrl({ token, storageId });
           if (!permanentUrl) throw new Error('Failed to get URL');
           backendUrl = permanentUrl;
@@ -1009,8 +1049,17 @@ export default function EditProfileScreen() {
             } catch {
               // Best-effort cleanup only.
             }
+            // P2-7: Cleanup attempted (success or fail). Drop from in-flight
+            // set so the unmount effect does not double-fire.
+            inflightUploadsRef.current.delete(uploadedStorageId as unknown as string);
           }
           return;
+        }
+        // P2-7: Persist succeeded — the storage row is now referenced by the
+        // private profile and is no longer "pending". Drop from in-flight set
+        // so the unmount effect does not delete a now-live photo.
+        if (uploadedStorageId) {
+          inflightUploadsRef.current.delete(uploadedStorageId as unknown as string);
         }
       }
     } catch {

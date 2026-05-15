@@ -130,6 +130,7 @@ export default function PrivateSupportScreen() {
   // Backend mutations - using api.support (not supportTickets)
   const createSupportRequest = useMutation(api.support.createSupportRequest);
   const generateUploadUrl = useMutation(api.support.generateUploadUrl);
+  const cleanupSupportAttachment = useMutation(api.support.cleanupSupportAttachment);
 
   const toggleTopic = (topicKey: string) => {
     setExpandedTopic(expandedTopic === topicKey ? null : topicKey);
@@ -189,9 +190,30 @@ export default function PrivateSupportScreen() {
 
     setIsSubmitting(true);
 
-    try {
-      let uploadedAttachments: { storageId: Id<'_storage'>; type: 'photo' }[] = [];
+    // P3-1: Track every storageId we successfully uploaded so we can
+    // best-effort orphan-clean on any failure path before submit succeeds.
+    const uploadedAttachments: { storageId: Id<'_storage'>; type: 'photo' }[] = [];
 
+    // P3-1: Best-effort cleanup of orphaned support uploads. The backend
+    // refuses to delete anything that is already linked to a submitted
+    // ticket, so this is safe to call on any failure path. We never let
+    // cleanup itself crash the submit handler.
+    const cleanupUploadedAttachments = async () => {
+      if (uploadedAttachments.length === 0) return;
+      for (const att of uploadedAttachments) {
+        try {
+          await cleanupSupportAttachment({
+            token,
+            authUserId: userId,
+            storageId: att.storageId,
+          });
+        } catch (cleanupError) {
+          console.error('[SUPPORT] cleanup failed for storageId', att.storageId, cleanupError);
+        }
+      }
+    };
+
+    try {
       if (attachments.length > 0) {
         setUploadProgress(`Uploading ${attachments.length} file(s)...`);
 
@@ -199,29 +221,61 @@ export default function PrivateSupportScreen() {
           const attachment = attachments[i];
           setUploadProgress(`Uploading ${i + 1} of ${attachments.length}...`);
 
-          const storageId = await uploadMediaToConvex(
-            attachment.uri,
-            () => generateUploadUrl({ token }),
-            'photo'
-          );
+          try {
+            const storageId = await uploadMediaToConvex(
+              attachment.uri,
+              () => generateUploadUrl({ token }),
+              'photo'
+            );
 
-          uploadedAttachments.push({
-            storageId,
-            type: 'photo',
-          });
+            uploadedAttachments.push({
+              storageId,
+              type: 'photo',
+            });
+          } catch (uploadError) {
+            // P3-1: One upload failed mid-loop. Roll back any already-uploaded
+            // siblings before surfacing the error to the user.
+            await cleanupUploadedAttachments();
+            throw uploadError;
+          }
         }
 
         setUploadProgress(null);
       }
 
-      // Note: Backend categories are safety-focused. Map general support to 'other_safety'
-      // Attachments are not yet supported by createSupportRequest - message only
-      await createSupportRequest({
-        authUserId: userId,
-        category: 'other_safety',
-        description: `[Deep Connect - ${selectedCategory}] ${message.trim()}${uploadedAttachments.length > 0 ? ` (${uploadedAttachments.length} attachment(s) pending)` : ''}`,
-      });
+      // Note: Backend categories are safety-focused. Map general support to 'other_safety'.
+      // Uploaded photos are persisted on the support request via the `attachments` arg.
+      let submitResult: { success?: boolean; error?: string; message?: string } | undefined;
+      try {
+        submitResult = await createSupportRequest({
+          token,
+          authUserId: userId,
+          category: 'other_safety',
+          description: `[Deep Connect - ${selectedCategory}] ${message.trim()}`,
+          attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
+        });
+      } catch (submitError) {
+        // P3-1: Submit threw after uploads succeeded. Orphan-clean the
+        // uploaded storageIds (backend refuses to delete linked ones).
+        await cleanupUploadedAttachments();
+        throw submitError;
+      }
 
+      // P3-1: createSupportRequest returns { success: false, error } for soft
+      // failures (e.g. unauthorized, rate_limited) instead of throwing. Clean
+      // up orphaned attachments in that case too.
+      if (!submitResult || submitResult.success !== true) {
+        await cleanupUploadedAttachments();
+        const errorMessage =
+          submitResult?.message ||
+          (submitResult?.error === 'rate_limited'
+            ? 'Maximum 5 support requests per 24 hours'
+            : 'Failed to submit request. Please try again.');
+        throw new Error(errorMessage);
+      }
+
+      // Submit succeeded - DO NOT clean up; attachments are now linked to the
+      // newly created supportRequest row.
       Toast.show('Support request submitted successfully');
       setMessage('');
       setSelectedCategory('other');

@@ -50,12 +50,12 @@ const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
 export default function MyReportsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
-  // Fetch user's reports
+  // Fetch user's reports (P0: requires token + authUserId)
   const reportsData = useQuery(
     api.users.getMyReports,
-    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   const formatDate = (timestamp: number) => {

@@ -6,7 +6,11 @@ type Phase2PhotoCtx = Pick<QueryCtx | MutationCtx, 'db' | 'storage'>;
 export const PHASE2_MIN_PRIVATE_PHOTOS = 2;
 export const PHASE2_MAX_PRIVATE_PHOTOS = 9;
 
-const SAFE_PRIVATE_PHOTO_SCAN_LIMIT = 50;
+// P2-2: Raised from 50 → 200 so users near PHASE2_MAX_PRIVATE_PHOTOS (9) plus
+// historical/pending uploads still match against the full owned-photo set.
+// 200 stays well below Convex page limits while accommodating long-lived
+// accounts with stale `photos` rows that were never garbage-collected.
+const SAFE_PRIVATE_PHOTO_SCAN_LIMIT = 200;
 
 type PrivatePhotoValidationResult =
   | { ok: true; urls: string[] }
@@ -25,7 +29,10 @@ function normalizeHttpsPhotoUrl(value: unknown): string | null {
 
   try {
     const parsed = new URL(trimmed);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    // P2-4: HTTPS-only. Plain http:// was previously accepted; that allowed
+    // a non-TLS URL to pass owner validation and be persisted as a "private"
+    // photo URL. Phase-2 secure media must always be served over TLS.
+    if (parsed.protocol !== 'https:') return null;
   } catch {
     return null;
   }

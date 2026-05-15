@@ -6,7 +6,7 @@
  */
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken, validateOwnership } from './helpers';
 import { Id } from './_generated/dataModel';
 
 // Category type for type safety
@@ -21,20 +21,31 @@ const SUPPORT_CATEGORY = v.union(
 
 /**
  * Create a new support request (escalation ticket).
- * Auth-safe: uses authUserId parameter.
+ * Auth-safe: requires session token + authUserId (validateOwnership).
  */
 export const createSupportRequest = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     category: SUPPORT_CATEGORY,
     description: v.string(),
     relatedUserId: v.optional(v.id('users')),
     relatedReportId: v.optional(v.id('reports')),
+    attachments: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id('_storage'),
+          type: v.union(v.literal('photo'), v.literal('video')),
+        }),
+      ),
+    ),
   },
   handler: async (ctx, args) => {
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!resolvedUserId) {
-      return { success: false, error: 'user_not_found' };
+    let resolvedUserId: Id<'users'>;
+    try {
+      resolvedUserId = await validateOwnership(ctx, args.token, args.authUserId);
+    } catch {
+      return { success: false, error: 'unauthorized' as const };
     }
 
     const now = Date.now();
@@ -55,14 +66,19 @@ export const createSupportRequest = mutation({
       };
     }
 
+    // Normalize attachments: only persist when caller actually sent at least one.
+    const attachments =
+      args.attachments && args.attachments.length > 0 ? args.attachments : undefined;
+
     // Create the support request
     const requestId = await ctx.db.insert('supportRequests', {
-      userId: resolvedUserId as any,
+      userId: resolvedUserId,
       category: args.category,
       description: args.description,
       status: 'submitted',
       relatedUserId: args.relatedUserId,
       relatedReportId: args.relatedReportId,
+      attachments,
       createdAt: now,
     });
 
@@ -382,6 +398,66 @@ export const generateUploadUrl = mutation({
       throw new Error('Unauthorized: authentication required');
     }
     return await ctx.storage.generateUploadUrl();
+  },
+});
+
+/**
+ * P3-1: Clean up an orphaned support attachment storageId.
+ *
+ * Support attachments are uploaded via `generateUploadUrl` (which writes
+ * directly to Convex storage with no `pendingUploads` row), so the generic
+ * `api.photos.cleanupPendingUpload` cannot reach them. If `createSupportRequest`
+ * fails after one or more uploads succeed, those storageIds are orphaned.
+ *
+ * This mutation is best-effort cleanup: callers fire it for each uploaded
+ * storageId on the failure path. It refuses to delete any storageId that is
+ * already linked to a submitted `supportRequests` row.
+ *
+ * Auth-safe: requires session token + authUserId (validateOwnership).
+ */
+export const cleanupSupportAttachment = mutation({
+  args: {
+    token: v.string(),
+    authUserId: v.string(),
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, args) => {
+    let resolvedUserId: Id<'users'>;
+    try {
+      resolvedUserId = await validateOwnership(ctx, args.token, args.authUserId);
+    } catch {
+      return { success: false as const, error: 'unauthorized' as const };
+    }
+
+    // Only scan this user's own support requests. We never need to look at
+    // other users' attachments - if the storageId is referenced by another
+    // user's ticket, the ownership check above would already have prevented
+    // a legitimate caller from reaching it (uploads are scoped per session),
+    // and we still refuse to delete on any link we find below.
+    const ownRequests = await ctx.db
+      .query('supportRequests')
+      .withIndex('by_user', (q: any) => q.eq('userId', resolvedUserId))
+      .collect();
+
+    for (const req of ownRequests) {
+      const attachments = req.attachments;
+      if (!Array.isArray(attachments)) continue;
+      for (const att of attachments) {
+        if (att?.storageId === args.storageId) {
+          // Already attached to a submitted ticket - never delete.
+          return { success: false as const, error: 'already_linked' as const };
+        }
+      }
+    }
+
+    try {
+      await ctx.storage.delete(args.storageId);
+    } catch (err) {
+      console.error('[cleanupSupportAttachment] storage.delete failed:', err);
+      return { success: false as const, error: 'cleanup_failed' as const };
+    }
+
+    return { success: true as const };
   },
 });
 

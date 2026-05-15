@@ -280,7 +280,12 @@ export default function PrivateProfileScreen() {
     gender?: string;
   };
 
-  // Full completion items (14 total) - weight & religion are hidden from display but count toward %
+  // P3-3: Completion checklist. The 12 `hidden: false` items are the ones
+  // shown to the user, used for the % bar, the "Missing: …" nudge, and the
+  // `isProfileReady` gate. Weight + Religion are kept here as `hidden: true`
+  // so the data is still tracked for analytics, but they do NOT count toward
+  // % and do NOT block readiness (otherwise the visible checklist would say
+  // "complete" while readiness silently failed on hidden fields).
   const completionItems = useMemo(() => ([
     // Core identity (always complete after onboarding)
     {
@@ -359,7 +364,7 @@ export default function PrivateProfileScreen() {
       detail: (profileWithDetails?.hobbies?.length ?? 0) > 0 ? `${profileWithDetails?.hobbies?.length} selected` : 'Add your interests',
       hidden: false,
     },
-    // Hidden details (count toward % but NOT shown in DeepConnect profile)
+    // Hidden details (kept for analytics; do NOT count toward % or readiness)
     {
       label: 'Weight',
       complete: typeof profileWithDetails?.weight === 'number' && profileWithDetails.weight > 0,
@@ -383,15 +388,11 @@ export default function PrivateProfileScreen() {
     promptSectionStatus,
   ]);
 
-  // Visible missing items (for nudge display)
+  // P3-3: Single source of truth for "missing" — visible items only. Hidden
+  // items (weight/religion) are intentionally excluded from %, readiness, and
+  // the "Missing: …" nudge so they all stay consistent with the visible list.
   const visibleMissingItems = useMemo(
     () => completionItems.filter((item) => !item.complete && !item.hidden),
-    [completionItems]
-  );
-
-  // All missing items (for edit checklist)
-  const missingCompletionItems = useMemo(
-    () => completionItems.filter((item) => !item.complete),
     [completionItems]
   );
 
@@ -424,20 +425,21 @@ export default function PrivateProfileScreen() {
       case 'Nickname':
         return 'Add a nickname to personalize your profile';
       default:
-        // Hidden fields (weight, religion) - show generic message
-        if (missingCompletionItems.length > 0) {
-          return 'Complete your profile for better matches';
-        }
+        // P3-3: All visible items complete. Hidden items (weight/religion)
+        // don't affect % or readiness, so the user is done.
         return 'Your private profile is ready';
     }
-  }, [visibleMissingItems, missingCompletionItems.length, photoCount]);
+  }, [visibleMissingItems, photoCount]);
 
   const isProfileReady = useMemo(() => {
     if (isDemoMode) {
       return true;
     }
-    return Boolean(backendProfile?.isSetupComplete) && missingCompletionItems.length === 0;
-  }, [backendProfile?.isSetupComplete, isDemoMode, missingCompletionItems.length]);
+    // P3-3: Readiness must match the visible checklist. The % bar already
+    // ignores hidden items, so requiring hidden items here would let users
+    // hit "100% complete" yet stay flagged as not-ready.
+    return Boolean(backendProfile?.isSetupComplete) && visibleMissingItems.length === 0;
+  }, [backendProfile?.isSetupComplete, isDemoMode, visibleMissingItems.length]);
 
   // Navigate to Edit Profile
   const handleEditProfile = () => {
@@ -609,15 +611,16 @@ export default function PrivateProfileScreen() {
             />
           </View>
 
-          {!isProfileReady && missingCompletionItems.length > 0 ? (
+          {!isProfileReady && visibleMissingItems.length > 0 ? (
             <View>
               <Text style={styles.completionHint} numberOfLines={1}>
                 Tap to edit your private profile
               </Text>
-              {/* Show what's still needed (including hidden items like weight/religion) */}
-              {missingCompletionItems.length <= 4 && (
+              {/* P3-3: Only list visible items so the "Missing: …" copy stays
+                  consistent with the % bar and the visible checklist. */}
+              {visibleMissingItems.length <= 4 && (
                 <Text style={styles.completionMissingList} numberOfLines={2}>
-                  Missing: {missingCompletionItems.map((i) => i.label).join(', ')}
+                  Missing: {visibleMissingItems.map((i) => i.label).join(', ')}
                 </Text>
               )}
             </View>

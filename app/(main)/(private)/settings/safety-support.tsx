@@ -130,7 +130,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
 export default function SafetySupportScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
   const [showNewCaseForm, setShowNewCaseForm] = useState(false);
   const [showPersonPicker, setShowPersonPicker] = useState(false);
@@ -162,7 +162,7 @@ export default function SafetySupportScreen() {
   const isPersonRequired = selectedCategory && PERSON_REQUIRED_CATEGORIES.includes(selectedCategory);
 
   const handleCreateCase = async () => {
-    if (!selectedCategory || !description.trim() || !userId || isSubmitting) return;
+    if (!selectedCategory || !description.trim() || !userId || !token || isSubmitting) return;
 
     // Check if person is required but not selected
     if (isPersonRequired && !selectedPerson) {
@@ -185,6 +185,7 @@ export default function SafetySupportScreen() {
     try {
       if (!isDemoMode) {
         const result = await createSupportRequest({
+          token,
           authUserId: userId,
           category: selectedCategory,
           description: description.trim(),

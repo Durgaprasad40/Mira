@@ -64,11 +64,22 @@ export default function PrivatePrivacyScreen() {
 
     setSavingField(field);
     try {
-      await updatePrivateProfile({
+      // P2-5: `updateFieldsByAuthId` returns `{ success: false, error }` for
+      // server-side validation failures (deletion_pending, profile_not_found,
+      // invalid_bio, etc.) instead of throwing. Without checking the return
+      // shape we would silently treat those as success and the local store
+      // would be flipped to a value that was never persisted. Always honor
+      // `res?.success === true` before committing the local state.
+      const res = await updatePrivateProfile({
         token,
         authUserId: userId,
         [field]: value,
       });
+      if (!res || (res as any).success !== true) {
+        if (__DEV__) console.warn('[PrivatePrivacy] Backend rejected update:', res);
+        Toast.show('Failed to save setting. Please try again.');
+        return false;
+      }
       return true;
     } catch (error) {
       if (__DEV__) console.error('[PrivatePrivacy] Backend sync failed:', error);

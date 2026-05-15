@@ -2115,17 +2115,20 @@ export const blockUser = mutation({
 // Unblock user
 export const unblockUser = mutation({
   args: {
-    // C2 SECURITY: Use authUserId for server-side validation
+    // P0: token + authUserId double-validation (validateOwnership)
+    token: v.string(),
     authUserId: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { authUserId, blockedUserId } = args;
+    const { token, authUserId, blockedUserId } = args;
 
-    // C2 SECURITY: Resolve auth ID to Convex user ID
-    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!blockerId) {
-      return { success: false, error: 'unauthorized' };
+    // P0: token + authUserId ownership check (replaces authUserId-only resolution)
+    let blockerId;
+    try {
+      blockerId = await validateOwnership(ctx, token, authUserId);
+    } catch {
+      return { success: false, error: 'unauthorized' as const };
     }
 
     const block = await ctx.db
@@ -3712,16 +3715,19 @@ export const devWipeMyTestUserData = mutation({
 /**
  * Get list of users blocked by the current user.
  * Returns basic info for display in Blocked Users settings screen.
- * Auth-safe: uses authUserId parameter instead of ctx.auth.
+ * Auth-safe: requires session token + authUserId (validateOwnership).
  */
 export const getMyBlockedUsers = query({
   args: {
+    token: v.string(),
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!resolvedUserId) {
-      return { success: false, error: 'user_not_found', blockedUsers: [] };
+    let resolvedUserId;
+    try {
+      resolvedUserId = await validateOwnership(ctx, args.token, args.authUserId);
+    } catch {
+      return { success: false, error: 'unauthorized' as const, blockedUsers: [] };
     }
 
     // Get all blocks where this user is the blocker
@@ -3754,16 +3760,19 @@ export const getMyBlockedUsers = query({
 /**
  * Get reports submitted by the current user (last 30 days).
  * Does NOT expose any info about who reported the current user.
- * Auth-safe: uses authUserId parameter instead of ctx.auth.
+ * Auth-safe: requires session token + authUserId (validateOwnership).
  */
 export const getMyReports = query({
   args: {
+    token: v.string(),
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!resolvedUserId) {
-      return { success: false, error: 'user_not_found', reports: [] };
+    let resolvedUserId;
+    try {
+      resolvedUserId = await validateOwnership(ctx, args.token, args.authUserId);
+    } catch {
+      return { success: false, error: 'unauthorized' as const, reports: [] };
     }
 
     // 30-day window

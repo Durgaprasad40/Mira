@@ -27,18 +27,28 @@ import { Toast } from '@/components/ui/Toast';
 
 const C = INCOGNITO_COLORS;
 
+// P3-2: Local type for the unified blocked-user shape produced by both the
+// demo-mode mapper and the `getMyBlockedUsers` query. Replaces a previous
+// `(user: any)` callback annotation in the list `.map(...)`.
+type BlockedUserRow = {
+  blockId: string;
+  blockedUserId: string;
+  displayName: string;
+  blockedAt: number;
+};
+
 export default function BlockedUsersScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
   const unblockUserMutation = useMutation(api.users.unblockUser);
   const [pendingUnblockId, setPendingUnblockId] = useState<string | null>(null);
 
-  // Fetch blocked users
+  // Fetch blocked users (P0: requires token + authUserId)
   const blockedData = useQuery(
     api.users.getMyBlockedUsers,
-    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   const formatDate = (timestamp: number) => {
@@ -50,15 +60,15 @@ export default function BlockedUsersScreen() {
     });
   };
 
-  const blockedUsers = isDemoMode
+  const blockedUsers: BlockedUserRow[] = isDemoMode
     ? blockedUsersInfo.map((user) => ({
         blockId: user.id,
         blockedUserId: user.id,
         displayName: 'Blocked user',
         blockedAt: user.blockedAt,
       }))
-    : blockedData?.blockedUsers || [];
-  const isLoading = !isDemoMode && userId ? blockedData === undefined : false;
+    : ((blockedData?.blockedUsers as BlockedUserRow[] | undefined) ?? []);
+  const isLoading = !isDemoMode && userId && token ? blockedData === undefined : false;
 
   const handleUnblock = (blockedUserId: string, displayName: string) => {
     if (pendingUnblockId) return;
@@ -80,12 +90,13 @@ export default function BlockedUsersScreen() {
                 return;
               }
 
-              if (!userId) {
+              if (!userId || !token) {
                 Toast.show('Please log in to manage blocked users');
                 return;
               }
 
               const result = await unblockUserMutation({
+                token,
                 authUserId: userId,
                 blockedUserId: blockedUserId as Id<'users'>,
               });
@@ -152,7 +163,7 @@ export default function BlockedUsersScreen() {
         {/* Blocked Users List */}
         {!isLoading && blockedUsers.length > 0 && (
           <View style={styles.listContainer}>
-            {blockedUsers.map((user: any) => (
+            {blockedUsers.map((user) => (
               <View key={user.blockId} style={styles.userRow}>
                 <View style={styles.userInfo}>
                   <View style={styles.avatar}>

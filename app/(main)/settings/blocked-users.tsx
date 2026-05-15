@@ -37,7 +37,7 @@ export default function BlockedUsersScreen() {
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
   const blockedUsersQuery = useQuery(
     api.users.getMyBlockedUsers,
-    !isDemo && userId ? { authUserId: userId } : 'skip'
+    !isDemo && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   const unblockUserMutation = useMutation(api.users.unblockUser);
@@ -60,7 +60,7 @@ export default function BlockedUsersScreen() {
         unavailable: false,
       }));
 
-  const isLoading = !isDemo && token ? blockedUsersQuery === undefined : false;
+  const isLoading = !isDemo && userId && token ? blockedUsersQuery === undefined : false;
 
   const handleUnblock = (blockedUserId: string, displayName: string) => {
     if (pendingActionKey) return;
@@ -82,12 +82,13 @@ export default function BlockedUsersScreen() {
                 return;
               }
 
-              if (!userId) {
+              if (!userId || !token) {
                 Toast.show('Please log in to manage blocked users');
                 return;
               }
 
               const result = await unblockUserMutation({
+                token,
                 authUserId: userId,
                 blockedUserId: blockedUserId as Id<'users'>,
               });

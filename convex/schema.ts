@@ -1444,6 +1444,15 @@ export default defineSchema({
     // Optional context
     relatedUserId: v.optional(v.id('users')),
     relatedReportId: v.optional(v.id('reports')),
+    // Optional attachments uploaded with the initial request (mirrors Phase-1 supportTickets shape)
+    attachments: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id('_storage'),
+          type: v.union(v.literal('photo'), v.literal('video')),
+        }),
+      ),
+    ),
     // Timestamps
     createdAt: v.number(),
     updatedAt: v.optional(v.number()),
