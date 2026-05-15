@@ -40,6 +40,7 @@ import {
   qualifiesForFallback,
   DISCOVER_RANKING_CONFIG,
 } from './discoverRanking';
+import { reserveActionSlots } from './actionRateLimits';
 
 // Phase 3: Shadow mode imports
 import { shouldRunShadowComparison } from './ranking/rankingConfig';
@@ -83,6 +84,24 @@ const MAX_EXPLORE_SUPPRESSION_READS = 500;
 // mutation will accept in a single batch. Keeps mutation cost predictable
 // and matches the maximum page size the client typically requests.
 const MAX_EXPLORE_IMPRESSION_BATCH = 100;
+
+// P1 scraping guard for Vibes category pagination. The app requests pages of
+// 50 profiles; keeping the backend to that page size plus a shallow offset
+// window limits category/offset rotation without changing normal browsing.
+// Full cursor/session pagination is intentionally deferred; do not remove
+// this cap unless replacing it with cursor/session anti-scraping protection.
+const MAX_EXPLORE_CATEGORY_PAGE_SIZE = 50;
+const MAX_EXPLORE_CATEGORY_OFFSET = 500;
+
+const VIBES_FEED_FETCH_RATE_WINDOWS = [
+  { kind: '1min', windowMs: 60 * 1000, max: 30 },
+  { kind: '1hour', windowMs: 60 * 60 * 1000, max: 600 },
+];
+
+const VIBES_IMPRESSION_RATE_WINDOWS = [
+  { kind: '1min', windowMs: 60 * 1000, max: 60 },
+  { kind: '1hour', windowMs: 60 * 60 * 1000, max: 1500 },
+];
 
 function isActiveDiscoverConversationPartner(
   conversation: Doc<'conversations'>,
@@ -1864,6 +1883,7 @@ async function buildExploreCandidates(
 
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned || user.deletedAt || user.onboardingCompleted !== true) continue;
+      if (user.discoverShadowBanned === true) continue;
       if (isEffectivelyHiddenFromDiscover(user)) continue;
       if ((user.verificationStatus || 'unverified') !== 'verified') continue;
       if (user.verificationEnforcementLevel === 'security_only') continue;
@@ -2097,9 +2117,16 @@ export const getExploreCategoryProfiles = query({
     const {
       token, genderFilter, minAge, maxAge, maxDistance,
       relationshipIntent, activities, sortByInterests,
-      limit = 20, offset = 0,
       categoryId,
     } = args;
+    const normalizedCategoryId = normalizePublicExploreCategoryId(categoryId);
+    const requestedLimit = getFiniteNumber(args.limit) ?? 20;
+    const requestedOffset = getFiniteNumber(args.offset) ?? 0;
+    const limit = Math.min(
+      Math.max(1, Math.floor(requestedLimit)),
+      MAX_EXPLORE_CATEGORY_PAGE_SIZE,
+    );
+    const offset = Math.max(0, Math.floor(requestedOffset));
 
     const sessionToken = typeof token === 'string' ? token.trim() : '';
     if (sessionToken.length === 0) {
@@ -2119,8 +2146,27 @@ export const getExploreCategoryProfiles = query({
       };
     }
 
+    // Shallow offset cap: safe no-more page for the current offset model.
+    // Cursor/session-backed pagination can replace this later, but raw deep
+    // offsets must not be reopened without equivalent scrape resistance.
+    if (offset > MAX_EXPLORE_CATEGORY_OFFSET) {
+      return {
+        profiles: [],
+        totalCount: 0,
+        status: 'ok' as const,
+      };
+    }
+
+    if (categoryId && !normalizedCategoryId) {
+      return {
+        profiles: [],
+        totalCount: 0,
+        status: 'invalid_category' as const,
+      };
+    }
+
     const baseWindow = Math.max(offset + limit, 24);
-    const fetchMultiplier = categoryId ? 30 : ((relationshipIntent && relationshipIntent.length > 0) || (activities && activities.length > 0) || sortByInterests ? 24 : 16);
+    const fetchMultiplier = normalizedCategoryId ? 30 : ((relationshipIntent && relationshipIntent.length > 0) || (activities && activities.length > 0) || sortByInterests ? 24 : 16);
     // Bounded candidate fan-out: existing heuristic floored at 140, then
     // capped at MAX_EXPLORE_CANDIDATES so the per-gender scan cannot grow
     // unbounded with offset / multiplier. Ranking/filter behavior is
@@ -2139,7 +2185,7 @@ export const getExploreCategoryProfiles = query({
       maxDistance,
       relationshipIntent,
       activities,
-      categoryId,
+      categoryId: normalizedCategoryId,
       maxPerGender,
     });
 
@@ -2170,7 +2216,7 @@ export const getExploreCategoryProfiles = query({
     // Suppression is gated on a categoryId being present (the table key
     // requires it). Without a categoryId we fall through unchanged.
     let orderedCandidates: typeof rankedCandidates = rankedCandidates;
-    if (categoryId && built.currentUser?._id) {
+    if (normalizedCategoryId && built.currentUser?._id) {
       const suppressionCutoff = Date.now() - EXPLORE_SUPPRESSION_WINDOW_MS;
       const viewerId = built.currentUser._id as Id<'users'>;
       const recentImpressions = await ctx.db
@@ -2178,7 +2224,7 @@ export const getExploreCategoryProfiles = query({
         .withIndex('by_viewer_category_lastSeenAt', (q) =>
           q
             .eq('viewerId', viewerId)
-            .eq('categoryId', categoryId)
+            .eq('categoryId', normalizedCategoryId)
             .gt('lastSeenAt', suppressionCutoff)
         )
         .take(MAX_EXPLORE_SUPPRESSION_READS);
@@ -2231,7 +2277,10 @@ export const recordExploreImpression = mutation({
     categoryId: v.string(),
   },
   handler: async (ctx, args) => {
-    if (!args.categoryId || args.categoryId.trim().length === 0) return;
+    const categoryId = normalizePublicExploreCategoryId(args.categoryId);
+    if (!categoryId) {
+      return { success: false as const, error: 'invalid_category' as const };
+    }
 
     const sessionToken = typeof args.token === 'string' ? args.token.trim() : '';
     if (sessionToken.length === 0) return;
@@ -2245,6 +2294,35 @@ export const recordExploreImpression = mutation({
       .slice(0, MAX_EXPLORE_IMPRESSION_BATCH);
     if (dedupedIds.length === 0) return;
 
+    const feedFetchLimit = await reserveActionSlots(
+      ctx,
+      resolvedViewerId,
+      'vibes_feed_fetch',
+      VIBES_FEED_FETCH_RATE_WINDOWS,
+    );
+    if (!feedFetchLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: feedFetchLimit.retryAfterMs,
+      };
+    }
+
+    const impressionLimit = await reserveActionSlots(
+      ctx,
+      resolvedViewerId,
+      'vibes_impression',
+      VIBES_IMPRESSION_RATE_WINDOWS,
+      dedupedIds.length,
+    );
+    if (!impressionLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: impressionLimit.retryAfterMs,
+      };
+    }
+
     const now = Date.now();
 
     for (const viewedUserId of dedupedIds) {
@@ -2254,7 +2332,7 @@ export const recordExploreImpression = mutation({
           q
             .eq('viewerId', resolvedViewerId)
             .eq('viewedUserId', viewedUserId)
-            .eq('categoryId', args.categoryId)
+            .eq('categoryId', categoryId)
         )
         .collect();
 
@@ -2272,6 +2350,7 @@ export const recordExploreImpression = mutation({
         await ctx.db.patch(keeper._id, {
           lastSeenAt: now,
           seenCount: mergedSeenCount,
+          source: 'vibes',
         });
         for (const duplicate of duplicates) {
           await ctx.db.delete(duplicate._id);
@@ -2280,7 +2359,8 @@ export const recordExploreImpression = mutation({
         const insertedId = await ctx.db.insert('exploreViewerImpressions', {
           viewerId: resolvedViewerId,
           viewedUserId,
-          categoryId: args.categoryId,
+          categoryId,
+          source: 'vibes',
           lastSeenAt: now,
           seenCount: 1,
         });
@@ -2291,7 +2371,7 @@ export const recordExploreImpression = mutation({
             q
               .eq('viewerId', resolvedViewerId)
               .eq('viewedUserId', viewedUserId)
-              .eq('categoryId', args.categoryId)
+              .eq('categoryId', categoryId)
           )
           .collect();
 
@@ -2311,6 +2391,7 @@ export const recordExploreImpression = mutation({
           await ctx.db.patch(keeper._id, {
             lastSeenAt: now,
             seenCount: mergedSeenCount,
+            source: 'vibes',
           });
           for (const duplicate of rowsAfterInsert) {
             if (duplicate._id !== keeper._id) {
@@ -2320,6 +2401,8 @@ export const recordExploreImpression = mutation({
         }
       }
     }
+
+    return { success: true as const, recordedCount: dedupedIds.length };
   },
 });
 

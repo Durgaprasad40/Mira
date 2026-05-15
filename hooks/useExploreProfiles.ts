@@ -7,8 +7,14 @@ import { DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { useShallow } from 'zustand/react/shallow';
+import type { ExploreProfileLike } from '@/components/explore/exploreCategories';
 
-const EMPTY_PROFILES: any[] = [];
+type ExploreProfile = ExploreProfileLike & {
+  _id?: string;
+  id?: string;
+};
+
+const EMPTY_PROFILES: ExploreProfile[] = [];
 
 /**
  * Single source of truth for explore profiles.
@@ -20,8 +26,11 @@ const EMPTY_PROFILES: any[] = [];
  * - excluded users change (blocked, matches, swipes)
  * - Convex query returns new data
  */
-export function useExploreProfiles(options: { enabled?: boolean } = {}): any[] {
+export function useExploreProfiles(options: { enabled?: boolean } = {}): ExploreProfile[] {
   const { enabled = true } = options;
+  // Demo Vibes data is development-only. Production must never render demo
+  // profiles even if a demo env flag is accidentally present.
+  const canUseDemoMode = __DEV__ && isDemoMode;
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const demo = useDemoStore(useShallow((s) => ({
@@ -35,29 +44,29 @@ export function useExploreProfiles(options: { enabled?: boolean } = {}): any[] {
   // Derive excluded IDs as Set for O(1) lookup
   // Depends on matches, likes, and blocked users to stay fresh
   const excludedSet = useMemo(() => {
-    if (!isDemoMode) return new Set(blockedUserIds);
+    if (!canUseDemoMode) return new Set(blockedUserIds);
     return new Set(demo.getExcludedUserIds());
-  }, [blockedUserIds, demo.matchCount, demo.likesCount, demo.getExcludedUserIds]);
+  }, [blockedUserIds, canUseDemoMode, demo.matchCount, demo.likesCount, demo.getExcludedUserIds]);
 
   const queryArgs = useMemo(() => {
     const sessionToken = typeof token === 'string' ? token.trim() : '';
-    if (!enabled || isDemoMode || !userId || sessionToken.length === 0) return 'skip' as const;
+    if (!enabled || canUseDemoMode || !userId || sessionToken.length === 0) return 'skip' as const;
     return { token: sessionToken };
-  }, [enabled, userId, token]);
+  }, [canUseDemoMode, enabled, userId, token]);
 
   const result = useQuery(api.discover.getExploreCategoryProfiles, queryArgs);
 
   return useMemo(() => {
     // P0-004 FIX: Demo mode only available in __DEV__ builds
-    if (__DEV__ && isDemoMode) {
+    if (canUseDemoMode) {
       // Use demoStore.profiles if available (mutable), else fallback to static DEMO_PROFILES
       const sourceProfiles = demo.profiles.length > 0 ? demo.profiles : DEMO_PROFILES;
-      return (sourceProfiles as any[]).filter(
-        (p) => !excludedSet.has(p._id),
+      return (sourceProfiles as ExploreProfile[]).filter(
+        (p) => !p._id || !excludedSet.has(p._id),
       );
     }
     // getExploreCategoryProfiles returns { profiles: [], totalCount }
     if (result && Array.isArray(result.profiles)) return result.profiles;
     return EMPTY_PROFILES;
-  }, [result, excludedSet, demo.profiles]);
+  }, [canUseDemoMode, result, excludedSet, demo.profiles]);
 }

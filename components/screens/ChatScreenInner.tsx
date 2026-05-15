@@ -3431,6 +3431,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         reportedUserId={otherUserId || ''}
         reportedUserName={otherUserName}
         currentUserId={userId || getDemoUserId()}
+        source="chat"
         conversationId={conversationId}
         // matchId: For Convex mode, use conversation.matchId. For demo mode, derive from conversation if it's a match.
         matchId={

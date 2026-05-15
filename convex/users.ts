@@ -40,6 +40,7 @@ const PROFILE_CITY_MAX_LENGTH = 100;
 const PROFILE_PROMPT_QUESTION_MAX_LENGTH = 100;
 const PROFILE_PROMPT_ANSWER_MAX_LENGTH = 300;
 const REPORT_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const BLOCK_PAIR_TOGGLE_COOLDOWN_MS = 60 * 1000;
 const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
 const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
 const PHASE2_MIN_PRIVATE_INTENT_KEYS = 1;
@@ -431,13 +432,30 @@ function isPhase1ProfileSource(source: string | undefined): boolean {
   return (
     source === "phase1_discover" ||
     source === "phase1_explore" ||
+    source === "vibes" ||
     source === "discover" ||
-    source === "explore"
+    source === "explore" ||
+    source === "profile"
   );
 }
 
 function isPhase1ExploreProfileSource(source: string | undefined): boolean {
-  return source === "phase1_explore" || source === "explore";
+  return source === "phase1_explore" || source === "explore" || source === "vibes";
+}
+
+function shouldRateLimitPhase1ProfileOpen(source: string | undefined): boolean {
+  return (
+    source === "phase1_explore" ||
+    source === "vibes" ||
+    source === "explore" ||
+    source === "phase1_discover" ||
+    source === "discover" ||
+    source === "profile"
+  );
+}
+
+function getBlockPairToggleAction(blockedUserId: Id<'users'>): string {
+  return `block_pair_toggle:${blockedUserId}`;
 }
 
 function isNearbyCrossedPathProfileSource(source: string | undefined): boolean {
@@ -940,6 +958,56 @@ export const getUserById = query({
       photos: orderedPhotos,
       photoBlurred: user.photoBlurred === true,
     };
+  },
+});
+
+export const reservePhase1ProfileOpen = mutation({
+  args: {
+    token: v.string(),
+    profileUserId: v.union(v.id("users"), v.string()),
+    source: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Profile-open velocity is reserved in a mutation before callers run the
+    // Phase-1 profile query. Convex queries cannot mutate rate-limit counters,
+    // so future Vibes/Discover/profile entry points should call this first
+    // rather than trying to enforce the counter inside `getUserById`.
+    const sessionToken = args.token.trim();
+    if (!sessionToken.length) {
+      return { success: false as const, error: 'unauthorized' as const };
+    }
+
+    const viewerId = await validateSessionToken(ctx, sessionToken);
+    if (!viewerId) {
+      return { success: false as const, error: 'unauthorized' as const };
+    }
+
+    if (!shouldRateLimitPhase1ProfileOpen(args.source)) {
+      return { success: true as const };
+    }
+
+    const profileUserId = await resolveUserIdByAuthId(ctx, args.profileUserId as string);
+    if (!profileUserId) {
+      return { success: false as const, error: 'not_found' as const };
+    }
+
+    if (profileUserId === viewerId) {
+      return { success: true as const };
+    }
+
+    const profileOpenLimit = await reserveActionSlots(ctx, viewerId, 'phase1_profile_open', [
+      { kind: '1min', windowMs: 60 * 1000, max: 30 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 200 },
+    ]);
+    if (!profileOpenLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: profileOpenLimit.retryAfterMs,
+      };
+    }
+
+    return { success: true as const };
   },
 });
 
@@ -2092,6 +2160,18 @@ export const blockUser = mutation({
       return { success: false as const, error: 'cannot_block_self' };
     }
 
+    const blockLimit = await reserveActionSlots(ctx, blockerId, 'block_user', [
+      { kind: '1min', windowMs: 60 * 1000, max: 5 },
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 100 },
+    ]);
+    if (!blockLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: blockLimit.retryAfterMs,
+      };
+    }
+
     const now = Date.now();
 
     // Check if already blocked
@@ -2114,6 +2194,20 @@ export const blockUser = mutation({
       // remains for the pair.
       await deactivateActiveMatchForPair(ctx, blockerId, blockedUserId, now);
       return { success: true as const };
+    }
+
+    const pairToggleLimit = await reserveActionSlots(
+      ctx,
+      blockerId,
+      getBlockPairToggleAction(blockedUserId),
+      [{ kind: '60sec', windowMs: BLOCK_PAIR_TOGGLE_COOLDOWN_MS, max: 1 }],
+    );
+    if (!pairToggleLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: pairToggleLimit.retryAfterMs,
+      };
     }
 
     await ctx.db.insert("blocks", {
@@ -2198,6 +2292,17 @@ export const unblockUser = mutation({
       return { success: false, error: 'unauthorized' as const };
     }
 
+    const unblockLimit = await reserveActionSlots(ctx, blockerId, 'unblock_user', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 30 },
+    ]);
+    if (!unblockLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: unblockLimit.retryAfterMs,
+      };
+    }
+
     const block = await ctx.db
       .query("blocks")
       .withIndex("by_blocker_blocked", (q) =>
@@ -2206,6 +2311,20 @@ export const unblockUser = mutation({
       .first();
 
     if (block) {
+      const pairToggleLimit = await reserveActionSlots(
+        ctx,
+        blockerId,
+        getBlockPairToggleAction(blockedUserId),
+        [{ kind: '60sec', windowMs: BLOCK_PAIR_TOGGLE_COOLDOWN_MS, max: 1 }],
+      );
+      if (!pairToggleLimit.accept) {
+        return {
+          success: false as const,
+          error: 'rate_limited' as const,
+          retryAfterMs: pairToggleLimit.retryAfterMs,
+        };
+      }
+
       await ctx.db.delete(block._id);
 
       // Step 5: keep denormalized trust counter in sync (best-effort)
@@ -2248,6 +2367,7 @@ export const reportUser = mutation({
     // P1-6: Origin surface for the report (back-compat optional).
     source: v.optional(v.union(
       v.literal('discover'),
+      v.literal('vibes'),
       v.literal('profile'),
       v.literal('chat'),
       v.literal('media'),
@@ -2335,8 +2455,8 @@ export const reportUser = mutation({
       evidence: evidence && evidence.length > 0 ? evidence : undefined,
       status: "pending",
       createdAt: now,
-      // P1-6: Origin surface (chat / profile / discover / media / confession /
-      // unknown). Optional for back-compat with existing rows; new rows
+      // P1-6: Origin surface (chat / profile / discover / vibes / media /
+      // confession / unknown). Optional for back-compat with existing rows; new rows
       // default to 'unknown' if the caller did not pass it so moderators
       // always see *something* in the dashboard.
       source: source ?? 'unknown',

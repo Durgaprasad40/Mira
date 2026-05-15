@@ -10,6 +10,7 @@ import { getSafePhase1PrimaryPhoto } from './phase1Media';
 const DAILY_LIKE_LIMIT_FREE = 25;
 const DAILY_STANDOUT_LIMIT_FREE = 2; // stand-out == super_like in this codebase
 const PROFILE_UNAVAILABLE_ERROR = 'This profile is no longer available.';
+const LIKES_DEBUG_LOGS = false;
 
 function getUtcDayStartMs(nowMs: number): number {
   const d = new Date(nowMs);
@@ -77,6 +78,7 @@ type Phase1NotificationData = {
   conversationId?: string;
   userId?: string;
   likeType?: 'like' | 'super_like';
+  source?: string;
 };
 
 async function tryInsertPhase1Notification(
@@ -866,9 +868,22 @@ export const swipe = mutation({
     toUserId: v.id('users'),
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
+    // Attribution only: source separates Vibes/Discover/profile analytics and
+    // notification context. It must not create source-specific safety buckets;
+    // velocity, daily like, stand-out, text, and notification caps remain global.
+    source: v.optional(v.union(
+      v.literal('discover'),
+      v.literal('vibes'),
+      v.literal('profile'),
+      v.literal('messages'),
+      v.literal('match'),
+      v.literal('chat'),
+      v.literal('unknown'),
+    )),
   },
   handler: async (ctx, args) => {
-    const { token, toUserId, action, message } = args;
+    const { token, toUserId, action, message, source } = args;
+    const swipeSource = source ?? 'unknown';
     const now = Date.now();
 
     // P1-028 FIX: Validate session and derive user from trusted server context
@@ -1003,6 +1018,7 @@ export const swipe = mutation({
       toUserId,
       action,
       message,
+      source: swipeSource,
       createdAt: now,
     });
 
@@ -1092,7 +1108,7 @@ export const swipe = mutation({
         type: 'message',
         title: 'New Direct Message!',
         body: `${fromUser.name} sent you a message`,
-        data: { conversationId: conversationId, userId: fromUserId },
+        data: { conversationId: conversationId, userId: fromUserId, source: swipeSource },
         dedupeKey: `pre_match_text:${fromUserId}:${toUserId}`,
         createdAt: now,
         expiresAt: now + 24 * 60 * 60 * 1000,
@@ -1203,14 +1219,18 @@ export const swipe = mutation({
             // Our match lost the race - delete it and return winner's ID
             // Do NOT create conversation/notifications (winner mutation will do it)
             await ctx.db.delete(matchId);
-            console.log(`[LIKES] Match race detected: our match ${matchId} lost to ${winnerMatchId}, cleaned up`);
+            if (LIKES_DEBUG_LOGS) {
+              console.log(`[LIKES] Match race detected: our match ${matchId} lost to ${winnerMatchId}, cleaned up`);
+            }
             return { success: true, isMatch: true, matchId: winnerMatchId };
           }
 
           // We are the winner - delete the other duplicates
           for (let i = 1; i < allMatches.length; i++) {
             await ctx.db.delete(allMatches[i]._id);
-            console.log(`[LIKES] Match race detected: cleaned up duplicate ${allMatches[i]._id}`);
+            if (LIKES_DEBUG_LOGS) {
+              console.log(`[LIKES] Match race detected: cleaned up duplicate ${allMatches[i]._id}`);
+            }
           }
         }
 
@@ -1223,7 +1243,9 @@ export const swipe = mutation({
 
         if (finalMatches.length === 0) {
           // All matches were deleted (shouldn't happen, but guard anyway)
-          console.error('[LIKES] Race condition: all matches deleted, cannot proceed');
+          if (LIKES_DEBUG_LOGS) {
+            console.error('[LIKES] Race condition: all matches deleted, cannot proceed');
+          }
           return { success: false, isMatch: false };
         }
 
@@ -1234,7 +1256,9 @@ export const swipe = mutation({
         if (matchId !== finalWinnerId) {
           // We are NOT the winner after re-verification - do NOT proceed with downstream writes
           // The actual winner will handle conversation/notifications
-          console.log(`[LIKES] Race re-verify: ${matchId} is not winner (${finalWinnerId}), exiting`);
+          if (LIKES_DEBUG_LOGS) {
+            console.log(`[LIKES] Race re-verify: ${matchId} is not winner (${finalWinnerId}), exiting`);
+          }
           return { success: true, isMatch: true, matchId: finalWinnerId };
         }
 
@@ -1313,7 +1337,7 @@ export const swipe = mutation({
           type: 'match',
           title: 'New Match!',
           body: `You matched with ${toUser?.name || 'someone'}!`,
-          data: { matchId: matchId },
+          data: { matchId: matchId, source: swipeSource },
           dedupeKey: `match:${matchId}`,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
@@ -1323,7 +1347,7 @@ export const swipe = mutation({
           type: 'match',
           title: 'New Match!',
           body: `You matched with ${fromUser.name}!`,
-          data: { matchId: matchId },
+          data: { matchId: matchId, source: swipeSource },
           dedupeKey: `match:${matchId}`,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
@@ -1344,7 +1368,7 @@ export const swipe = mutation({
         type: 'like',
         title: `${senderName} liked you`,
         body: 'Check your likes to see their profile',
-        data: { userId: fromUserId, likeType: 'like' },
+        data: { userId: fromUserId, likeType: 'like', source: swipeSource },
         dedupeKey: `like:${fromUserId}`,
         createdAt: now,
         // No expiresAt - notification stays until acted on
@@ -1355,7 +1379,7 @@ export const swipe = mutation({
         type: 'super_like',
         title: `${senderName} super liked you`,
         body: 'Open your likes to view their profile',
-        data: { userId: fromUserId, likeType: 'super_like' },
+        data: { userId: fromUserId, likeType: 'super_like', source: swipeSource },
         dedupeKey: `super_like:${fromUserId}`,
         createdAt: now,
         // No expiresAt - notification stays until acted on
@@ -2084,12 +2108,13 @@ export const resetSwipeBetweenUsers = mutation({
       deletedCount++;
     }
 
-    // Test logging
-    console.log('[TEST] resetSwipeBetweenUsers executed', {
-      fromUserId,
-      targetUserId,
-      deletedCount,
-    });
+    if (LIKES_DEBUG_LOGS) {
+      console.log('[TEST] resetSwipeBetweenUsers executed', {
+        fromUserId,
+        targetUserId,
+        deletedCount,
+      });
+    }
 
     return {
       success: true,

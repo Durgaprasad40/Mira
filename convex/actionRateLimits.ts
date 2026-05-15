@@ -41,7 +41,7 @@ export type RateLimitResult =
  * Iterates each window in order. For each window:
  *   1. Loads (or creates) the (userId, action, windowKind) row.
  *   2. Resets the row if the window is stale (now - windowStartedAt > windowMs).
- *   3. Returns `{accept: false}` if count + 1 would exceed max.
+ *   3. Returns `{accept: false}` if count + requested slots would exceed max.
  *
  * If every window has headroom, persists the incremented counters and
  * returns `{accept: true}`.
@@ -56,8 +56,10 @@ export async function reserveActionSlots(
   userId: Id<'users'>,
   action: string,
   windows: RateLimitWindow[],
+  slots = 1,
 ): Promise<RateLimitResult> {
   if (windows.length === 0) return { accept: true };
+  const requestedSlots = Number.isFinite(slots) ? Math.max(1, Math.floor(slots)) : 1;
 
   const now = Date.now();
 
@@ -85,7 +87,7 @@ export async function reserveActionSlots(
       count = 0;
     }
 
-    if (count + 1 > spec.max) {
+    if (count + requestedSlots > spec.max) {
       const retryAfterMs = Math.max(0, spec.windowMs - (now - startedAt));
       return {
         accept: false,
@@ -95,7 +97,7 @@ export async function reserveActionSlots(
       };
     }
 
-    loaded.push({ spec, row, nextStartedAt: startedAt, nextCount: count + 1 });
+    loaded.push({ spec, row, nextStartedAt: startedAt, nextCount: count + requestedSlots });
   }
 
   // Phase 2: persist new counters (only after every window accepted).

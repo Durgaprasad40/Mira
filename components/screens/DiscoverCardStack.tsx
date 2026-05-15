@@ -3001,6 +3001,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 toUserId: swipedProfile.id as Id<'users'>,
                 action,
                 message,
+                // Attribution only. Safety limits live in likes.swipe and
+                // remain global across Discover and Vibes.
+                source: exploreCategoryId ? 'vibes' : 'discover',
               });
 
         let result;
@@ -3189,6 +3192,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       releaseSwipeLock,
       resetPosition,
       token,
+      exploreCategoryId,
       phase2TopCardReady,
     ],
   );

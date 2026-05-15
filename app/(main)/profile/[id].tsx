@@ -40,7 +40,7 @@ import { FlatList } from 'react-native';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES, getDemoCurrentUser, DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
-import { ReportBlockModal } from '@/components/security/ReportBlockModal';
+import { ReportBlockModal, type ReportBlockSource } from '@/components/security/ReportBlockModal';
 import { Toast } from '@/components/ui/Toast';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { useInteractionStore } from '@/stores/interactionStore';
@@ -93,6 +93,20 @@ import Animated, {
 } from 'react-native-reanimated';
 
 const PHASE1_OPEN_PROFILE_ACTION_LIFT = 30;
+
+const formatRetryAfterMessage = (retryAfterMs?: number): string => {
+  const seconds = Math.min(60, Math.max(1, Math.ceil((retryAfterMs ?? 0) / 1000)));
+  return `Slow down. Please try again in ${seconds}s.`;
+};
+
+type Phase1SwipeSource =
+  | 'discover'
+  | 'vibes'
+  | 'profile'
+  | 'messages'
+  | 'match'
+  | 'chat'
+  | 'unknown';
 
 function getVerificationBadgeState(profile: { isVerified?: boolean; verificationStatus?: string }) {
   const display = getVerificationDisplay(profile);
@@ -291,6 +305,46 @@ export default function ViewProfileScreen() {
   const normalizedSource = Array.isArray(source) ? source[0] : source;
   const normalizedActionScope = Array.isArray(actionScope) ? actionScope[0] : actionScope;
   const normalizedFromConfessionId = Array.isArray(fromConfessionId) ? fromConfessionId[0] : fromConfessionId;
+  const reportBlockSource: ReportBlockSource =
+    normalizedSource === 'phase1_explore' ||
+    normalizedSource === 'explore' ||
+    normalizedSource === 'vibes'
+      ? 'vibes'
+      : normalizedSource === 'phase1_discover' ||
+        normalizedSource === 'discover' ||
+        normalizedSource === 'home'
+      ? 'discover'
+      : normalizedSource === 'chat' ||
+        normalizedSource === 'match' ||
+        normalizedSource === 'messages' ||
+        normalizedSource === 'message' ||
+        normalizedSource === 'phase1_messages' ||
+        normalizedSource === 'phase1-message' ||
+        normalizedSource === 'phase1_chat' ||
+        normalizedSource === 'phase1-chat'
+      ? 'chat'
+      : 'profile';
+  const phase1SwipeSource: Phase1SwipeSource =
+    normalizedSource === 'phase1_explore' ||
+    normalizedSource === 'explore' ||
+    normalizedSource === 'vibes'
+      ? 'vibes'
+      : normalizedSource === 'phase1_discover' ||
+        normalizedSource === 'discover' ||
+        normalizedSource === 'home'
+      ? 'discover'
+      : normalizedSource === 'messages' ||
+        normalizedSource === 'message' ||
+        normalizedSource === 'phase1_messages' ||
+        normalizedSource === 'phase1-message'
+      ? 'messages'
+      : normalizedSource === 'match'
+      ? 'match'
+      : normalizedSource === 'chat' ||
+        normalizedSource === 'phase1_chat' ||
+        normalizedSource === 'phase1-chat'
+      ? 'chat'
+      : 'profile';
   // Phase-2.5: coarse Nearby recency chip. Only rendered for source=nearby with
   // a valid three-state label; never reveals minutes/hours/exact timestamp.
   //   'recent'  → "Recently here"  (<=24h)
@@ -328,6 +382,24 @@ export default function ViewProfileScreen() {
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
   const { userId: currentUserId, token } = useAuthStore();
+  const reservePhase1ProfileOpen = useMutation(api.users.reservePhase1ProfileOpen);
+  // Vibes/Discover/profile route opens reserve a backend slot before the
+  // profile query runs. Query-side enforcement is intentionally avoided:
+  // Convex queries cannot mutate counters, so new Phase-1 profile callers
+  // should use `reservePhase1ProfileOpen` before reading `getUserById`.
+  const shouldReservePhase1ProfileOpen =
+    !isDemoMode &&
+    !isPhase2 &&
+    !!userId &&
+    !!token &&
+    (normalizedSource === 'phase1_explore' ||
+      normalizedSource === 'vibes' ||
+      normalizedSource === 'explore' ||
+      normalizedSource === 'phase1_discover' ||
+      normalizedSource === 'discover' ||
+      normalizedSource === 'profile');
+  const [profileOpenGate, setProfileOpenGate] = useState<'idle' | 'checking' | 'allowed' | 'limited'>('idle');
+  const [profileOpenRetryAfterMs, setProfileOpenRetryAfterMs] = useState<number | undefined>(undefined);
   const currentViewer = useQuery(
     api.users.getCurrentUser,
     !isDemoMode && token ? { token } : 'skip'
@@ -392,6 +464,8 @@ export default function ViewProfileScreen() {
     isNearbyPrivacySource ||
     normalizedSource === 'phase1_discover' ||
     normalizedSource === 'phase1_explore' ||
+    normalizedSource === 'vibes' ||
+    normalizedSource === 'profile' ||
     normalizedSource === 'messages' ||
     normalizedSource === 'message' ||
     normalizedSource === 'phase1_messages' ||
@@ -404,7 +478,11 @@ export default function ViewProfileScreen() {
   // Phase-1: Use users.getUserById
   const convexPhase1Profile = useQuery(
     api.users.getUserById,
-    !isDemoMode && !isPhase2 && userId && token
+    !isDemoMode &&
+      !isPhase2 &&
+      userId &&
+      token &&
+      (!shouldReservePhase1ProfileOpen || profileOpenGate === 'allowed')
       ? {
           userId: userId as Id<'users'>,
           token,
@@ -577,6 +655,47 @@ export default function ViewProfileScreen() {
   const simulateMatch = useDemoStore((s) => s.simulateMatch);
 
   useEffect(() => {
+    if (!shouldReservePhase1ProfileOpen) {
+      setProfileOpenRetryAfterMs(undefined);
+      setProfileOpenGate('allowed');
+      return;
+    }
+
+    let cancelled = false;
+    setProfileOpenRetryAfterMs(undefined);
+    setProfileOpenGate('checking');
+    reservePhase1ProfileOpen({
+      token: token!,
+      profileUserId: userId as Id<'users'>,
+      source: normalizedSource ?? 'profile',
+    })
+      .then((result) => {
+        if (cancelled) return;
+        if (result?.success === false && result.error === 'rate_limited') {
+          setProfileOpenRetryAfterMs(result.retryAfterMs);
+          setProfileOpenGate('limited');
+          Toast.show(formatRetryAfterMessage(result.retryAfterMs));
+          return;
+        }
+        setProfileOpenRetryAfterMs(undefined);
+        setProfileOpenGate('allowed');
+      })
+      .catch((error) => {
+        if (__DEV__) {
+          console.warn('[PROFILE_OPEN_LIMIT_FAIL]', error instanceof Error ? error.message : String(error));
+        }
+        if (!cancelled) {
+          setProfileOpenRetryAfterMs(undefined);
+          setProfileOpenGate('allowed');
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [normalizedSource, reservePhase1ProfileOpen, shouldReservePhase1ProfileOpen, token, userId]);
+
+  useEffect(() => {
     if (currentPhotoIndex >= visiblePhotos.length && visiblePhotos.length > 0) {
       setCurrentPhotoIndex(visiblePhotos.length - 1);
     } else if (visiblePhotos.length === 0 && currentPhotoIndex !== 0) {
@@ -661,7 +780,7 @@ export default function ViewProfileScreen() {
       return;
     }
 
-    if (normalizedSource === 'phase1_explore' || normalizedSource === 'explore') {
+    if (normalizedSource === 'phase1_explore' || normalizedSource === 'explore' || normalizedSource === 'vibes') {
       router.replace('/(main)/(tabs)/explore' as any);
       return;
     }
@@ -686,7 +805,12 @@ export default function ViewProfileScreen() {
       return;
     }
 
-    if (normalizedSource === 'phase1_explore' && normalizedActionScope) {
+    if (
+      (normalizedSource === 'phase1_explore' ||
+        normalizedSource === 'explore' ||
+        normalizedSource === 'vibes') &&
+      normalizedActionScope
+    ) {
       setDiscoverProfileActionResult({
         profileId: userId,
         action,
@@ -738,8 +862,9 @@ export default function ViewProfileScreen() {
     try {
       const result = await swipe({
         token: token!,
-        toUserId: userId as any,
+        toUserId: userId as Id<'users'>,
         action,
+        source: phase1SwipeSource,
       });
 
       if (result.isMatch) {
@@ -785,8 +910,24 @@ export default function ViewProfileScreen() {
 
   // In demo mode, if profile is null, it means user not found (not loading)
   // In convex mode, undefined means loading, null means not found
-  const isLoading = !isDemoMode && convexProfile === undefined;
+  const isProfileOpenGatePending =
+    shouldReservePhase1ProfileOpen && (profileOpenGate === 'idle' || profileOpenGate === 'checking');
+  const isProfileOpenRateLimited = shouldReservePhase1ProfileOpen && profileOpenGate === 'limited';
+  const isLoading = !isDemoMode && (isProfileOpenGatePending || convexProfile === undefined);
   const isNotFound = isDemoMode ? !profile : convexProfile === null;
+
+  if (isProfileOpenRateLimited) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Ionicons name="time-outline" size={48} color={COLORS.textMuted} />
+        <Text style={styles.loadingText}>Profile temporarily unavailable</Text>
+        <Text style={styles.rateLimitText}>{formatRetryAfterMessage(profileOpenRetryAfterMs)}</Text>
+        <TouchableOpacity style={styles.backButtonAlt} onPress={goBackSafely}>
+          <Text style={styles.backButtonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   // P0-FIX: Profile skeleton loader (replaces plain text)
   if (isLoading) {
@@ -1546,6 +1687,7 @@ export default function ViewProfileScreen() {
         reportedUserId={userId || ''}
         reportedUserName={profile?.name || 'this user'}
         currentUserId={currentUserId || ''}
+        source={reportBlockSource}
         onBlockSuccess={() => {
           // P2-4: Drop the blocked profile from the in-memory Phase-1 deck
           // so it doesn't reappear before the next backend fetch. Reuses the
@@ -1729,6 +1871,12 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 16,
     color: COLORS.textLight,
+  },
+  rateLimitText: {
+    marginTop: 8,
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
   },
   header: {
     position: 'absolute',

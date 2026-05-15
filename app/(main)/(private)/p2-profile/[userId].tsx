@@ -1129,6 +1129,7 @@ export default function Phase2FullProfileScreen() {
         reportedUserId={targetUserId || ''}
         reportedUserName={targetUserName}
         currentUserId={currentUserId || ''}
+        source="profile"
         onBlockSuccess={() => {
           setShowReportBlock(false);
           router.replace('/(main)/(private)/(tabs)/deep-connect' as any);

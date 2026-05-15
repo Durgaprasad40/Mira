@@ -696,6 +696,15 @@ export default defineSchema({
     toUserId: v.id('users'),
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
+    source: v.optional(v.union(
+      v.literal('discover'),
+      v.literal('vibes'),
+      v.literal('profile'),
+      v.literal('messages'),
+      v.literal('match'),
+      v.literal('chat'),
+      v.literal('unknown'),
+    )),
     createdAt: v.number(),
     // Lifecycle tracking: when the recipient first opened/viewed this like
     // Unopened likes stay indefinitely; opened likes expire after 24h if no action
@@ -1427,10 +1436,12 @@ export default defineSchema({
     roomId: v.optional(v.string()),
     messageId: v.optional(v.string()),
     reportType: v.optional(v.union(v.literal('user'), v.literal('content'))),
-    // P1-6: Origin surface for the report (where the user filed it from).
+    // P1-6: Origin surface for the report (where the user filed it from,
+    // including Product "Vibes" / repo "Explore").
     // Optional for back-compat with existing rows that pre-date this field.
     source: v.optional(v.union(
       v.literal('discover'),
+      v.literal('vibes'),
       v.literal('profile'),
       v.literal('chat'),
       v.literal('media'),
@@ -2996,6 +3007,7 @@ export default defineSchema({
     viewerId: v.id('users'),       // Who was viewing
     viewedUserId: v.id('users'),   // Who was shown
     categoryId: v.string(),        // Explore/Vibes category id (e.g. 'nearby')
+    source: v.optional(v.literal('vibes')),
     lastSeenAt: v.number(),        // When last shown to this viewer in this category
     seenCount: v.number(),         // How many times shown to this viewer in this category
   })

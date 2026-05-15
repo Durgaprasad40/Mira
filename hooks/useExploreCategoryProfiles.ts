@@ -95,6 +95,9 @@ export function useExploreCategoryProfiles({
   offset = 0,
   refreshKey = 0,
 }: UseExploreCategoryProfilesOptions): UseExploreCategoryProfilesResult {
+  // Demo Vibes data is development-only. Production must never render demo
+  // profiles even if a demo env flag is accidentally present.
+  const canUseDemoMode = __DEV__ && isDemoMode;
   const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const sessionToken = typeof token === 'string' ? token.trim() : '';
@@ -103,7 +106,7 @@ export function useExploreCategoryProfiles({
     if (!currentDemoUserId) return EMPTY_INTENTS;
     return s.demoProfiles[currentDemoUserId]?.relationshipIntent ?? EMPTY_INTENTS;
   });
-  const allProfiles = useExploreProfiles({ enabled: isDemoMode });
+  const allProfiles = useExploreProfiles({ enabled: canUseDemoMode });
   const category = EXPLORE_CATEGORIES.find((c) => c.id === categoryId);
   const recordExploreImpression = useMutation(api.discover.recordExploreImpression);
 
@@ -118,7 +121,7 @@ export function useExploreCategoryProfiles({
   );
 
   const liveQueries = useMemo<RequestForQueries>(() => {
-    if (isDemoMode || !authReady || sessionToken.length === 0 || !categoryId || !category) {
+    if (canUseDemoMode || !authReady || sessionToken.length === 0 || !categoryId || !category) {
       return {};
     }
     const queries: RequestForQueries = {};
@@ -133,7 +136,7 @@ export function useExploreCategoryProfiles({
       },
     };
     return queries;
-  }, [authReady, category, categoryId, limit, offset, refreshKey, sessionToken]);
+  }, [authReady, canUseDemoMode, category, categoryId, limit, offset, refreshKey, sessionToken]);
 
   const liveQueryResult = useQueries(liveQueries);
   const liveQueryValue = liveQueryResult[LIVE_QUERY_KEY];
@@ -157,7 +160,7 @@ export function useExploreCategoryProfiles({
 
   useEffect(() => {
     if (
-      isDemoMode ||
+      canUseDemoMode ||
       !authReady ||
       sessionToken.length === 0 ||
       !categoryId ||
@@ -176,17 +179,25 @@ export function useExploreCategoryProfiles({
       token: sessionToken,
       viewedUserIds,
       categoryId,
-    }).catch((error) => {
-      if (__DEV__) {
-        console.warn(
-          '[EXPLORE_IMPRESSION_FAIL]',
-          error instanceof Error ? getExploreCategoryDebugError(error) : String(error),
-        );
-      }
-    });
-  }, [authReady, categoryId, liveProfiles, liveStatus, recordExploreImpression, sessionToken]);
+    })
+      .then((result) => {
+        if (!__DEV__ || !result || typeof result !== 'object') return;
+        const failure = result as { success?: boolean; error?: string };
+        if (failure.success === false && failure.error !== 'rate_limited') {
+          console.warn('[EXPLORE_IMPRESSION_SKIPPED]', failure.error ?? 'unknown');
+        }
+      })
+      .catch((error) => {
+        if (__DEV__) {
+          console.warn(
+            '[EXPLORE_IMPRESSION_FAIL]',
+            error instanceof Error ? getExploreCategoryDebugError(error) : String(error),
+          );
+        }
+      });
+  }, [authReady, canUseDemoMode, categoryId, liveProfiles, liveStatus, recordExploreImpression, sessionToken]);
 
-  if (isDemoMode) {
+  if (canUseDemoMode) {
     return {
       profiles: demoProfiles,
       totalCount: demoProfiles.length,

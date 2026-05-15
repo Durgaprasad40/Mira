@@ -29,12 +29,22 @@ const formatRateLimitMessage = (retryAfterMs?: number): string => {
   return `Slow down. Please try again in ${seconds}s.`;
 };
 
+export type ReportBlockSource =
+  | 'chat'
+  | 'profile'
+  | 'discover'
+  | 'vibes'
+  | 'media'
+  | 'confession'
+  | 'unknown';
+
 interface Props {
   visible: boolean;
   onClose: () => void;
   reportedUserId: string;
   reportedUserName: string;
   currentUserId: string;
+  source?: ReportBlockSource;
   conversationId?: string;
   matchId?: string; // For unmatch functionality
   onBlockSuccess?: () => void;
@@ -94,6 +104,7 @@ export function ReportBlockModal({
   onClose,
   reportedUserId,
   reportedUserName,
+  source = 'unknown',
   conversationId,
   matchId,
   onBlockSuccess,
@@ -222,6 +233,10 @@ export function ReportBlockModal({
           Alert.alert("Error", "Session expired. Please sign in again.");
           return;
         }
+        if (result.error === 'rate_limited') {
+          Toast.show(formatRateLimitMessage(result.retryAfterMs));
+          return;
+        }
         Alert.alert("Error", "Failed to block user.");
         return;
       }
@@ -265,9 +280,7 @@ export function ReportBlockModal({
         reportedUserId: asUserId(reportedUserId),
         reason,
         description,
-        // P1-6: This modal is launched from in-chat / match overflow / Phase-1
-        // discover profile sheet menus.
-        source: 'chat',
+        source,
       });
 
       if (result?.success === false) {

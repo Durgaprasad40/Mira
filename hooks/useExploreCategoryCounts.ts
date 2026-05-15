@@ -55,6 +55,9 @@ function normalizeExploreNearbyStatus(
  * P2-003: Empty {} is valid data (new user with no matches), not an error
  */
 export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsResult {
+  // Demo Vibes counts are development-only. Production must never render demo
+  // counts even if a demo env flag is accidentally present.
+  const canUseDemoMode = __DEV__ && isDemoMode;
   const token = useAuthStore((s) => s.token);
   const authReady = useAuthStore((s) => s.authReady);
   const sessionToken = typeof token === 'string' ? token.trim() : '';
@@ -63,7 +66,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
     if (!currentDemoUserId) return EMPTY_INTENTS;
     return s.demoProfiles[currentDemoUserId]?.relationshipIntent ?? EMPTY_INTENTS;
   });
-  const demoProfiles = useExploreProfiles({ enabled: isDemoMode });
+  const demoProfiles = useExploreProfiles({ enabled: canUseDemoMode });
   const demoCategoryCounts = useMemo(
     () => countDemoProfilesPerExploreCategory(demoProfiles, demoViewerRelationshipIntent),
     [demoProfiles, demoViewerRelationshipIntent],
@@ -75,7 +78,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
   // Determine if we should skip the query
   // Skip if: demo mode (legacy store mode) OR auth not ready OR session token missing
   // NOTE: isDemoAuthMode uses real Convex backend with token-based auth - do NOT skip
-  const shouldSkip = isDemoMode || !authReady || sessionToken.length === 0;
+  const shouldSkip = canUseDemoMode || !authReady || sessionToken.length === 0;
 
   // P1-001 FIX: Use useQuery() for reactive caching during the current Explore session.
   // refreshKey in args triggers re-fetch when changed (for manual refresh)
@@ -104,7 +107,7 @@ export function useExploreCategoryCounts(refreshKey = 0): ExploreCategoryCountsR
 
   // Legacy demo mode only: return mock counts (query was skipped above)
   // NOTE: isDemoAuthMode uses real Convex backend - NOT handled here
-  if (isDemoMode) {
+  if (canUseDemoMode) {
     return {
       data: demoCategoryCounts,
       status: 'ok',
