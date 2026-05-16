@@ -24,17 +24,20 @@ const CARD_ICON_SIZE = SIZES.icon.lg;
 
 export default function DaresScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const insets = useSafeAreaInsets();
 
+  // TOD-AUTH-1 FIX: token-bound queries. Backend resolves caller from token;
+  // authUserId is only sent as a defense-in-depth hint.
   const pendingDares = useQuery(
     api.dares.getPendingDares,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   const daresSent = useQuery(
     api.dares.getDaresSent,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId && token ? { token, authUserId: userId } : 'skip'
   );
 
   const acceptDare = useMutation(api.dares.acceptDare);
@@ -42,6 +45,10 @@ export default function DaresScreen() {
 
   const handleAccept = async (dareId: string) => {
     if (!userId) return;
+    if (!token) {
+      Alert.alert('Error', 'Please sign in again to accept this dare.');
+      return;
+    }
 
     Alert.alert(
       'Accept Dare?',
@@ -52,10 +59,11 @@ export default function DaresScreen() {
           text: 'Accept',
           onPress: async () => {
             try {
-              // TOD-002 FIX: Use authUserId for server-side verification
+              // TOD-AUTH-1 FIX: token-bound mutation.
               const result = await acceptDare({
+                token,
                 dareId: dareId as any,
-                authUserId: userId!,
+                authUserId: userId,
               });
               Alert.alert(
                 '🎉 It\'s a Match!',
@@ -78,6 +86,10 @@ export default function DaresScreen() {
 
   const handleDecline = async (dareId: string) => {
     if (!userId) return;
+    if (!token) {
+      Alert.alert('Error', 'Please sign in again to decline this dare.');
+      return;
+    }
 
     Alert.alert('Decline Dare?', 'Are you sure you want to decline this dare?', [
       { text: 'Cancel', style: 'cancel' },
@@ -86,10 +98,11 @@ export default function DaresScreen() {
         style: 'destructive',
         onPress: async () => {
           try {
-            // TOD-002 FIX: Use authUserId for server-side verification
+            // TOD-AUTH-1 FIX: token-bound mutation.
             await declineDare({
+              token,
               dareId: dareId as any,
-              authUserId: userId!,
+              authUserId: userId,
             });
           } catch (error: any) {
             Alert.alert('Error', error.message || 'Failed to decline dare');

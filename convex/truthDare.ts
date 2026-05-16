@@ -3,6 +3,7 @@ import { v } from 'convex/values';
 import { Doc, Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { reserveActionSlots, type RateLimitWindow } from './actionRateLimits';
 import {
   filterOwnedSafePrivatePhotoUrls,
   PHASE2_MIN_PRIVATE_PHOTOS,
@@ -158,6 +159,526 @@ async function getOptionalAuthenticatedTodUserId(
   await assertTodIdentityAssertions(ctx, tokenUserId, assertions);
 
   return tokenUserId;
+}
+
+// ============================================================
+// P0 HARDENING HELPERS (TOD-MEDIA-1..6, TOD-BIZ-1)
+// ============================================================
+
+// Maximum number of media upload attempts per (promptId, responder).
+// Counted in `todAnswerUploadAttempts` / `todPrivateMediaAttempts`.
+// MONOTONIC: incremented on every successful media upload acceptance.
+// NEVER decremented on remove-media / deleteMyAnswer / answer recreate —
+// so refresh / retry / reinstall / multi-device cannot bypass the cap.
+const MAX_TOD_MEDIA_UPLOAD_ATTEMPTS = 2;
+const TOD_MEDIA_ATTEMPTS_EXCEEDED_ERROR =
+  'Upload limit reached. You can upload media at most 2 times per answer.';
+const TOD_MEDIA_REPLACE_AFTER_VIEW_ERROR =
+  'This media has already been viewed and cannot be replaced.';
+
+/**
+ * Read the durable upload-attempt counter for the answer media path
+ * (TOD-MEDIA-1). Returns 0 when no row exists yet.
+ */
+async function getAnswerMediaUploadAttemptCount(
+  ctx: any,
+  promptId: string,
+  userId: string,
+): Promise<number> {
+  const row = await ctx.db
+    .query('todAnswerUploadAttempts')
+    .withIndex('by_prompt_user', (q: any) =>
+      q.eq('promptId', promptId).eq('userId', userId),
+    )
+    .first();
+  return row?.attemptCount ?? 0;
+}
+
+/**
+ * Increment the durable answer upload-attempt counter by 1. Creates the row
+ * on first call. Caller MUST have already checked the cap and called
+ * `assertAnswerMediaCapNotExceeded` first; this only writes.
+ *
+ * P0 SECURITY CONTRACT — DO NOT WEAKEN:
+ *   Rows in `todAnswerUploadAttempts` MUST NEVER be deleted when an answer
+ *   is deleted (see `deleteMyAnswer` and the cascade in
+ *   `runDeletePromptCascadeBounded`).  The 2-attempt cap survives
+ *   delete-and-recreate, which is the only thing that prevents an attacker
+ *   from burning unlimited fresh storage objects by spamming
+ *   `createOrEditAnswer` → `deleteMyAnswer` loops.  Resetting the counter
+ *   on delete silently downgrades the upload-attempt cap to "per current
+ *   answer existence" instead of "per (prompt, user) for all time".
+ */
+async function incrementAnswerMediaUploadAttempt(
+  ctx: any,
+  promptId: string,
+  userId: string,
+): Promise<void> {
+  const now = Date.now();
+  const row = await ctx.db
+    .query('todAnswerUploadAttempts')
+    .withIndex('by_prompt_user', (q: any) =>
+      q.eq('promptId', promptId).eq('userId', userId),
+    )
+    .first();
+  if (row) {
+    await ctx.db.patch(row._id, {
+      attemptCount: row.attemptCount + 1,
+      lastAttemptAt: now,
+    });
+  } else {
+    await ctx.db.insert('todAnswerUploadAttempts', {
+      promptId,
+      userId,
+      attemptCount: 1,
+      firstAttemptAt: now,
+      lastAttemptAt: now,
+    });
+  }
+}
+
+/**
+ * Throws if the responder has already used all permitted upload attempts.
+ * Convex serializes mutations so the read + later increment in the same
+ * mutation cannot race.
+ */
+async function assertAnswerMediaCapNotExceeded(
+  ctx: any,
+  promptId: string,
+  userId: string,
+): Promise<void> {
+  const count = await getAnswerMediaUploadAttemptCount(ctx, promptId, userId);
+  if (count >= MAX_TOD_MEDIA_UPLOAD_ATTEMPTS) {
+    throw new Error(TOD_MEDIA_ATTEMPTS_EXCEEDED_ERROR);
+  }
+}
+
+/**
+ * Throws if the existing answer's media has any view footprint:
+ *   - `mediaViewedAt` is set, OR
+ *   - `promptOwnerViewedAt` is set, OR
+ *   - any `todAnswerViews` row references this answer.
+ *
+ * Used by `createOrEditAnswer` (TOD-MEDIA-2) to block replacement-after-view.
+ * Once any non-author viewer has burned a one-time view, the author can never
+ * upload a replacement that the same viewer would see fresh.
+ */
+async function assertNoPriorAnswerView(
+  ctx: any,
+  answer: { _id: Id<'todAnswers'>; mediaViewedAt?: number; promptOwnerViewedAt?: number },
+): Promise<void> {
+  if (answer.mediaViewedAt !== undefined || answer.promptOwnerViewedAt !== undefined) {
+    throw new Error(TOD_MEDIA_REPLACE_AFTER_VIEW_ERROR);
+  }
+  const existingView = await ctx.db
+    .query('todAnswerViews')
+    .withIndex('by_answer', (q: any) => q.eq('answerId', answer._id as string))
+    .first();
+  if (existingView) {
+    throw new Error(TOD_MEDIA_REPLACE_AFTER_VIEW_ERROR);
+  }
+}
+
+/** Read the durable V1 private-media upload-attempt counter (TOD-MEDIA-3). */
+async function getPrivateMediaUploadAttemptCount(
+  ctx: any,
+  promptId: string,
+  fromUserId: string,
+): Promise<number> {
+  const row = await ctx.db
+    .query('todPrivateMediaAttempts')
+    .withIndex('by_prompt_from', (q: any) =>
+      q.eq('promptId', promptId).eq('fromUserId', fromUserId),
+    )
+    .first();
+  return row?.attemptCount ?? 0;
+}
+
+/**
+ * Increment the durable V1 private-media upload-attempt counter (TOD-MEDIA-3).
+ *
+ * P0 SECURITY CONTRACT — DO NOT WEAKEN:
+ *   Rows in `todPrivateMediaAttempts` MUST NEVER be deleted by the V1
+ *   submit/reject/expire flows.  The 2-attempt cap is per-(prompt, sender)
+ *   for all time so the sender cannot use rejection or expiry as a way to
+ *   regain upload budget.
+ */
+async function incrementPrivateMediaUploadAttempt(
+  ctx: any,
+  promptId: string,
+  fromUserId: string,
+): Promise<void> {
+  const now = Date.now();
+  const row = await ctx.db
+    .query('todPrivateMediaAttempts')
+    .withIndex('by_prompt_from', (q: any) =>
+      q.eq('promptId', promptId).eq('fromUserId', fromUserId),
+    )
+    .first();
+  if (row) {
+    await ctx.db.patch(row._id, {
+      attemptCount: row.attemptCount + 1,
+      lastAttemptAt: now,
+    });
+  } else {
+    await ctx.db.insert('todPrivateMediaAttempts', {
+      promptId,
+      fromUserId,
+      attemptCount: 1,
+      firstAttemptAt: now,
+      lastAttemptAt: now,
+    });
+  }
+}
+
+async function assertPrivateMediaCapNotExceeded(
+  ctx: any,
+  promptId: string,
+  fromUserId: string,
+): Promise<void> {
+  const count = await getPrivateMediaUploadAttemptCount(ctx, promptId, fromUserId);
+  if (count >= MAX_TOD_MEDIA_UPLOAD_ATTEMPTS) {
+    throw new Error(TOD_MEDIA_ATTEMPTS_EXCEEDED_ERROR);
+  }
+}
+
+// ============================================================
+// P1 HARDENING: STRONGER MULTI-WINDOW RATE LIMITS (P1-TOD-RL-*)
+// ============================================================
+//
+// The legacy `checkRateLimit` (defined further below) uses a single
+// fixed-window bucket per action and is preserved for backward compat
+// on the heaviest user paths.  This section adds a SECOND layer on top
+// using `reserveActionSlots` so we can:
+//   - Apply minute + hour + daily backstops to expensive paths
+//     (anti-bot-loop hardening for prompt/answer/connect/media flows).
+//   - Apply per-(sender, recipient) caps for connect requests to
+//     prevent targeted harassment without breaking the anonymity rule
+//     (target id is hashed into the `action` string, never persisted in
+//     a way that exposes the relationship outside this counter row).
+//   - Cover the ~12 mutations that previously had NO rate limit at all
+//     (track/release/cleanup pending uploads, edit/delete prompt,
+//     respondToConnect, submit/begin/finalize/reject private media,
+//     deleteMyAnswer, markPromptMediaViewed).
+//
+// `reserveActionSlots` is two-phase: it reads all windows first and
+// only patches the counters when EVERY window accepts.  Denials never
+// charge a slot, so user-tripped limits stay self-correcting.
+//
+// Windows are listed MOST permissive to LEAST permissive so the
+// minute bucket is denied first on micro-bursts, with hour/day buckets
+// catching sustained abuse.
+
+type TodRateLimitBucket = {
+  /** Internal action key used as the `action` arg to reserveActionSlots. */
+  action: string;
+  /** Ordered list of windows (most -> least permissive). */
+  windows: RateLimitWindow[];
+};
+
+const TOD_P1_RL_WINDOWS: Record<string, TodRateLimitBucket> = {
+  // --- Pending upload tracking (no per-action cost; cheap rows) ---
+  track_pending_upload: {
+    action: 'tod_track_pending_upload',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 60 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 600 },
+    ],
+  },
+  release_pending_upload: {
+    action: 'tod_release_pending_upload',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 60 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 600 },
+    ],
+  },
+  cleanup_pending_upload: {
+    action: 'tod_cleanup_pending_upload',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 30 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+    ],
+  },
+
+  // --- Prompt lifecycle (edit/delete had no limit before) ---
+  edit_prompt: {
+    action: 'tod_edit_prompt',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 10 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 60 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 200 },
+    ],
+  },
+  delete_prompt: {
+    action: 'tod_delete_prompt',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 5 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 30 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 120 },
+    ],
+  },
+
+  // --- Connect responses (V2 + V1 private media) ---
+  respond_to_connect: {
+    action: 'tod_respond_to_connect',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 30 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 1500 },
+    ],
+  },
+  reject_private_media_connect: {
+    action: 'tod_reject_private_media_connect',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 30 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+    ],
+  },
+
+  // --- V1 private-media submission + view lifecycle ---
+  submit_private_media: {
+    action: 'tod_submit_private_media',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 5 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 30 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 150 },
+    ],
+  },
+  begin_private_media_view: {
+    action: 'tod_begin_private_media_view',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 30 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+    ],
+  },
+  finalize_private_media_view: {
+    action: 'tod_finalize_private_media_view',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 30 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+    ],
+  },
+
+  // --- Answer lifecycle ---
+  delete_answer: {
+    action: 'tod_delete_answer',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 10 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 60 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 300 },
+    ],
+  },
+
+  // --- Prompt media one-time view (TOD-BIZ-1) ---
+  mark_prompt_media_viewed: {
+    action: 'tod_mark_prompt_media_viewed',
+    windows: [
+      { kind: 'minute', windowMs: 60_000, max: 30 },
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+    ],
+  },
+
+  // --- Hourly/daily backstops for the heaviest existing-checkRateLimit
+  //     mutations.  The legacy minute window stays in `checkRateLimit`;
+  //     these add a sustained-abuse ceiling.
+  prompt_backstop: {
+    action: 'tod_prompt_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 30 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 100 },
+    ],
+  },
+  answer_backstop: {
+    action: 'tod_answer_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 120 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 600 },
+    ],
+  },
+  media_upload_backstop: {
+    action: 'tod_media_upload_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 120 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 400 },
+    ],
+  },
+  claim_media_backstop: {
+    action: 'tod_claim_media_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 200 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 1000 },
+    ],
+  },
+  connect_backstop: {
+    action: 'tod_connect_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 120 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 500 },
+    ],
+  },
+
+  // P2-TOD-RL: Hour+day backstops for the remaining legacy-checkRateLimit
+  // paths (reactions, reports).  The legacy minute bucket stays in place;
+  // these add sustained-abuse ceilings without changing the user-facing
+  // per-minute throttling.  Reactions are high-frequency by design
+  // (legitimate scroll/tap), so caps are loose; reports are already daily
+  // in the legacy bucket so the hour cap here is the strictest enforcement.
+  reaction_backstop: {
+    action: 'tod_reaction_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 2000 },
+    ],
+  },
+  prompt_reaction_backstop: {
+    action: 'tod_prompt_reaction_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 2000 },
+    ],
+  },
+  report_backstop: {
+    action: 'tod_report_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 5 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 10 },
+    ],
+  },
+  prompt_report_backstop: {
+    action: 'tod_prompt_report_backstop',
+    windows: [
+      { kind: 'hour', windowMs: 60 * 60_000, max: 5 },
+      { kind: 'day', windowMs: 24 * 60 * 60_000, max: 10 },
+    ],
+  },
+};
+
+// P2-TOD-MOD: Bounded scan cap for moderation report recount.
+// The recount is only used to detect whether the answer/prompt has crossed
+// the `hidden_by_reports` threshold (~3 unique reports).  Scanning up to
+// REPORT_COUNT_SCAN_CAP reports gives us either the exact count (when
+// returned < CAP) or a lower bound that already trips the threshold (when
+// returned == CAP).  This replaces the previous unbounded `.collect()`
+// recount which would scan every historical report row.
+const TOD_REPORT_COUNT_SCAN_CAP = 16;
+
+// P2-TOD-CASCADE: Per-section batch caps for `deleteMyPrompt`.  Each cascade
+// section uses `.take(BATCH)`; when any section fills its batch the
+// continuation internalMutation is scheduled to pick up the remainder.  The
+// prompt row itself is hard-deleted at the top of the parent mutation so the
+// user sees an immediate disappearance; orphaned children become invisible
+// (their `canShow*` checks fail without a parent) until the cascade finishes.
+const TOD_PROMPT_CASCADE_BATCH = 200;
+
+// P2-TOD-CLEANUP: Bounded batch for `cleanupExpiredPrivateMedia`.  The cron
+// is idempotent so any rows left over after one run are picked up on the
+// next invocation.  Previous code used unbounded `.collect()` over an
+// index that could grow to all historical 'viewing'/'pending' rows.
+const TOD_PRIVATE_MEDIA_CLEANUP_BATCH = 200;
+
+// Per-(sender, recipient) caps for connect requests.  The target user id is
+// folded into the `action` string so reserveActionSlots scopes the counter
+// per pair.  This prevents targeted harassment (one user spamming connects to
+// one victim) without breaking anonymity (target id never leaves this row,
+// which is keyed by the SENDER's userId).
+const TOD_PER_TARGET_CONNECT_WINDOWS: RateLimitWindow[] = [
+  { kind: 'hour', windowMs: 60 * 60_000, max: 5 },
+  { kind: 'day', windowMs: 24 * 60 * 60_000, max: 15 },
+];
+
+/**
+ * Throws on denial.  Used inline at the top of mutations to enforce a
+ * named bucket from `TOD_P1_RL_WINDOWS`.  Never decrements on later
+ * mutation failure — the cost is paid for attempting the action, which
+ * is exactly the anti-loop property we want.
+ */
+async function enforceTodActionLimit(
+  ctx: any,
+  userId: Id<'users'>,
+  bucketKey: keyof typeof TOD_P1_RL_WINDOWS,
+): Promise<void> {
+  const bucket = TOD_P1_RL_WINDOWS[bucketKey];
+  if (!bucket) return;
+  const result = await reserveActionSlots(ctx, userId, bucket.action, bucket.windows, 1);
+  if (!result.accept) {
+    throw new Error(RATE_LIMIT_ERROR);
+  }
+}
+
+/**
+ * Per-target anti-harassment cap for connect-style actions.  Encodes the
+ * recipient id into the action string so the counter is scoped per
+ * (sender, recipient) pair.
+ */
+async function enforceTodPerTargetConnectLimit(
+  ctx: any,
+  fromUserId: Id<'users'>,
+  toUserId: string,
+): Promise<void> {
+  const result = await reserveActionSlots(
+    ctx,
+    fromUserId,
+    `tod_connect_target:${toUserId}`,
+    TOD_PER_TARGET_CONNECT_WINDOWS,
+    1,
+  );
+  if (!result.accept) {
+    throw new Error(RATE_LIMIT_ERROR);
+  }
+}
+
+/**
+ * Atomic one-time-view claim helper for prompt-owner photo/video media
+ * (TOD-BIZ-1 / TOD-MEDIA-5 / TOD-MEDIA-6).
+ *
+ * Convex mutations are serializable: a read of the
+ * `by_prompt_viewer` index that returned empty will conflict with any
+ * concurrent insert touching the same (promptId, viewerUserId) pair. Two
+ * parallel `openPromptMedia` / `preparePromptMedia` / `markPromptMediaViewed`
+ * calls therefore CANNOT both insert; the loser retries, observes the row,
+ * and returns `alreadyViewed: true`.
+ *
+ * Always returns the canonical (existing or freshly inserted) row id and
+ * timestamp so callers can return consistent metadata.
+ *
+ * IMPORTANT: callers MUST short-circuit owner and voice branches BEFORE
+ * calling this helper. Owner self-views and voice playback are never tracked
+ * by `todPromptMediaViews`.
+ */
+async function consumePromptMediaViewOnce(
+  ctx: any,
+  args: {
+    promptId: string;
+    viewerUserId: string;
+    ownerUserId: string;
+    mediaKind: 'photo' | 'video';
+  },
+): Promise<{ alreadyViewed: boolean; viewedAt: number; rowId: Id<'todPromptMediaViews'> }> {
+  const { promptId, viewerUserId, ownerUserId, mediaKind } = args;
+
+  const existing = await ctx.db
+    .query('todPromptMediaViews')
+    .withIndex('by_prompt_viewer', (q: any) =>
+      q.eq('promptId', promptId).eq('viewerUserId', viewerUserId),
+    )
+    .first();
+  if (existing) {
+    return {
+      alreadyViewed: true,
+      viewedAt: existing.viewedAt,
+      rowId: existing._id as Id<'todPromptMediaViews'>,
+    };
+  }
+
+  const viewedAt = Date.now();
+  const rowId = await ctx.db.insert('todPromptMediaViews', {
+    promptId,
+    viewerUserId,
+    ownerUserId,
+    mediaKind,
+    viewedAt,
+  });
+  return { alreadyViewed: false, viewedAt, rowId: rowId as Id<'todPromptMediaViews'> };
 }
 
 function getTodDisplayName(
@@ -1315,6 +1836,8 @@ export const trackPendingTodUploads = mutation({
   },
   handler: async (ctx, { token, storageIds, authUserId }) => {
     const userId = await requireAuthenticatedTodUserId(ctx, token, { authUserId }, 'UNAUTHORIZED');
+    // P1-TOD-RL: cap pending-upload tracking churn (anti-bot-loop).
+    await enforceTodActionLimit(ctx, userId, 'track_pending_upload');
     const uniqueStorageIds = Array.from(new Set(storageIds));
     const trackedIds: Id<'_storage'>[] = [];
 
@@ -1326,7 +1849,9 @@ export const trackPendingTodUploads = mutation({
 
       if (existing) {
         if (existing.userId !== userId) {
-          throw new Error('Storage ID already claimed by another user');
+          // P3-TOD-ERR: generic message avoids confirming that another
+          // user already owns this storage id (was: "...by another user").
+          throw new Error('Upload reference unavailable');
         }
         trackedIds.push(storageId);
         continue;
@@ -1356,6 +1881,8 @@ export const releasePendingTodUploads = mutation({
   },
   handler: async (ctx, { token, storageIds, authUserId }) => {
     const userId = await requireAuthenticatedTodUserId(ctx, token, { authUserId }, 'UNAUTHORIZED');
+    // P1-TOD-RL: cap pending-upload release churn (anti-bot-loop).
+    await enforceTodActionLimit(ctx, userId, 'release_pending_upload');
     const uniqueStorageIds = Array.from(new Set(storageIds));
     let releasedCount = 0;
 
@@ -1369,7 +1896,9 @@ export const releasePendingTodUploads = mutation({
         continue;
       }
       if (pending.userId !== userId) {
-        throw new Error('Not authorized to release this upload');
+        // P3-TOD-ERR: generic message; do not confirm the storage id is
+        // owned by another user.
+        throw new Error('Upload reference unavailable');
       }
 
       await ctx.db.delete(pending._id);
@@ -1391,6 +1920,8 @@ export const cleanupPendingTodUploads = mutation({
   },
   handler: async (ctx, { token, storageIds, authUserId }) => {
     const userId = await requireAuthenticatedTodUserId(ctx, token, { authUserId }, 'UNAUTHORIZED');
+    // P1-TOD-RL: cap pending-upload cleanup churn (anti-bot-loop).
+    await enforceTodActionLimit(ctx, userId, 'cleanup_pending_upload');
     const uniqueStorageIds = Array.from(new Set(storageIds));
     let deletedCount = 0;
     let skippedInUseCount = 0;
@@ -1405,7 +1936,9 @@ export const cleanupPendingTodUploads = mutation({
         continue;
       }
       if (pending.userId !== userId) {
-        throw new Error('Not authorized to clean up this upload');
+        // P3-TOD-ERR: generic message; do not confirm the storage id is
+        // owned by another user.
+        throw new Error('Upload reference unavailable');
       }
 
       if (await isTodStorageStillReferenced(ctx, storageId)) {
@@ -1473,6 +2006,8 @@ export const createPrompt = mutation({
     if (!rateCheck.allowed) {
       throw new Error(RATE_LIMIT_ERROR);
     }
+    // P1-TOD-RL: hour+day backstop on top of legacy minute bucket.
+    await enforceTodActionLimit(ctx, ownerUserId, 'prompt_backstop');
 
     const ownerSnapshot = await buildTodAuthorSnapshot(ctx, ownerUserId);
     const isPublicPost = args.isAnonymous === false;
@@ -1583,6 +2118,8 @@ export const editMyPrompt = mutation({
   },
   handler: async (ctx, { token, promptId, authUserId, newText }) => {
     const userId = await requireAuthenticatedTodUserId(ctx, token, { authUserId }, 'UNAUTHORIZED');
+    // P1-TOD-RL: cap prompt edits (anti-bot-loop; text-only edit churn).
+    await enforceTodActionLimit(ctx, userId, 'edit_prompt');
 
     const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
     if (!prompt) {
@@ -1610,6 +2147,194 @@ export const editMyPrompt = mutation({
 });
 
 // Delete own prompt (and all associated answers, reactions, reports)
+/**
+ * P2-TOD-CASCADE: One bounded pass through every cascade section for
+ * `deleteMyPrompt`.  Each section uses `.take(TOD_PROMPT_CASCADE_BATCH)`.
+ *
+ * Returns `{ complete: true }` only if every section returned strictly fewer
+ * rows than the BATCH cap (i.e. fully drained).  Returns `{ complete: false }`
+ * if any section filled its cap so the parent can schedule a continuation.
+ *
+ * The prompt row itself is NOT touched here — the parent mutation hard-deletes
+ * it up front so the user sees immediate disappearance and downstream
+ * `canShow*` visibility checks return false for orphaned children that this
+ * helper has not yet purged.
+ *
+ * Section order is intentional: per-answer fan-out first (so we can free
+ * storage and clean child indexes), then prompt-scoped children, finally
+ * connect requests.  No cross-section dependencies inside a single pass.
+ */
+async function runDeletePromptCascadeBounded(
+  ctx: any,
+  promptId: string,
+): Promise<{
+  complete: boolean;
+  deletedAnswers: number;
+  deletedConnectRequests: number;
+  deletedPrivateMedia: number;
+}> {
+  let complete = true;
+
+  // --- Answers + per-answer fan-out (likes, reactions, reports, views) ---
+  const answers = await ctx.db
+    .query('todAnswers')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .take(TOD_PROMPT_CASCADE_BATCH);
+  if (answers.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+
+  for (const answer of answers) {
+    const answerId = answer._id as unknown as string;
+
+    await deleteStorageIfPresent(ctx, answer.mediaStorageId);
+
+    // Per-answer child rows are themselves bounded by .take(BATCH); a single
+    // answer with >BATCH child rows of one kind would leave residue picked up
+    // on the next continuation pass (the answer row is only deleted once all
+    // its child loops complete below).
+    const legacyLikes = await ctx.db
+      .query('todAnswerLikes')
+      .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+      .take(TOD_PROMPT_CASCADE_BATCH);
+    if (legacyLikes.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+    for (const like of legacyLikes) {
+      await ctx.db.delete(like._id);
+    }
+
+    const reactions = await ctx.db
+      .query('todAnswerReactions')
+      .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+      .take(TOD_PROMPT_CASCADE_BATCH);
+    if (reactions.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+    for (const reaction of reactions) {
+      await ctx.db.delete(reaction._id);
+    }
+
+    const reports = await ctx.db
+      .query('todAnswerReports')
+      .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+      .take(TOD_PROMPT_CASCADE_BATCH);
+    if (reports.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+    for (const report of reports) {
+      await ctx.db.delete(report._id);
+    }
+
+    const views = await ctx.db
+      .query('todAnswerViews')
+      .withIndex('by_answer', (q: any) => q.eq('answerId', answerId))
+      .take(TOD_PROMPT_CASCADE_BATCH);
+    if (views.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+    for (const view of views) {
+      await ctx.db.delete(view._id);
+    }
+
+    // Only delete the answer row once we have purged its child rows this
+    // pass.  If a child loop hit the cap we still delete the answer row
+    // because the by_answer indexes for the orphaned children remain valid;
+    // the next continuation pass will pick them up via the same `by_answer`
+    // index (the answerId string is stable even after the row is gone).
+    await ctx.db.delete(answer._id);
+  }
+
+  // --- Prompt-scoped fan-out (reactions, reports, media-view ledger) ---
+  const promptReactions = await ctx.db
+    .query('todPromptReactions')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .take(TOD_PROMPT_CASCADE_BATCH);
+  if (promptReactions.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+  for (const reaction of promptReactions) {
+    await ctx.db.delete(reaction._id);
+  }
+
+  const promptReports = await ctx.db
+    .query('todPromptReports')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .take(TOD_PROMPT_CASCADE_BATCH);
+  if (promptReports.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+  for (const report of promptReports) {
+    await ctx.db.delete(report._id);
+  }
+
+  const promptMediaViews = await ctx.db
+    .query('todPromptMediaViews')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .take(TOD_PROMPT_CASCADE_BATCH);
+  if (promptMediaViews.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+  for (const view of promptMediaViews) {
+    await ctx.db.delete(view._id);
+  }
+
+  const privateMediaItems = await ctx.db
+    .query('todPrivateMedia')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .take(TOD_PROMPT_CASCADE_BATCH);
+  if (privateMediaItems.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+  for (const item of privateMediaItems) {
+    await deleteStorageIfPresent(ctx, item.storageId);
+    await ctx.db.delete(item._id);
+  }
+
+  // --- Connect requests for this prompt ---
+  const connectRequests = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_prompt', (q: any) => q.eq('promptId', promptId))
+    .take(TOD_PROMPT_CASCADE_BATCH);
+  if (connectRequests.length === TOD_PROMPT_CASCADE_BATCH) complete = false;
+  for (const req of connectRequests) {
+    await ctx.db.delete(req._id);
+  }
+
+  return {
+    complete,
+    deletedAnswers: answers.length,
+    deletedConnectRequests: connectRequests.length,
+    deletedPrivateMedia: privateMediaItems.length,
+  };
+}
+
+/**
+ * P2-TOD-CASCADE: scheduled continuation for `deleteMyPrompt`.  Runs one
+ * bounded cascade pass against an already-deleted prompt and re-schedules
+ * itself if any section still has residue.  Idempotent — if the prompt has
+ * no remaining children, the helper returns `{complete: true}` and the chain
+ * stops naturally.
+ */
+export const _continueDeleteMyPromptCascade = internalMutation({
+  args: { promptId: v.string() },
+  handler: async (ctx, { promptId }) => {
+    const result = await runDeletePromptCascadeBounded(ctx, promptId);
+    if (!result.complete) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.truthDare._continueDeleteMyPromptCascade,
+        { promptId },
+      );
+    }
+    return result;
+  },
+});
+
+/**
+ * Delete a prompt the caller owns.
+ *
+ * SECURITY CONTRACT:
+ *   - Token-bound auth (caller resolved from session token, not args).
+ *   - Ownership check: `prompt.ownerUserId === userId` (no admin override).
+ *   - Rate limited (P1-TOD-RL `delete_prompt`) — deletion is expensive
+ *     because it purges all child records and frees storage objects.
+ *
+ * Cascade strategy (P2-TOD-CASCADE):
+ *   - The `todPrompts` row is hard-deleted FIRST so `canShowTodPromptForViewer`
+ *     immediately returns false for any orphaned children (answers,
+ *     reactions, reports, private media, connect requests).  The user sees
+ *     the prompt disappear on the next reactive tick.
+ *   - `runDeletePromptCascadeBounded` then drains child rows in
+ *     TOD_PROMPT_CASCADE_BATCH chunks per section.  If any section fills
+ *     its batch, the continuation internalMutation
+ *     `_continueDeleteMyPromptCascade` is scheduled to drain the rest.
+ *   - The cascade NEVER touches `todAnswerUploadAttempts` /
+ *     `todPrivateMediaAttempts` — those counters are durable on purpose
+ *     (see `incrementAnswerMediaUploadAttempt` security contract).
+ */
 export const deleteMyPrompt = mutation({
   args: {
     token: v.string(),
@@ -1618,6 +2343,9 @@ export const deleteMyPrompt = mutation({
   },
   handler: async (ctx, { token, promptId, authUserId }) => {
     const userId = await requireAuthenticatedTodUserId(ctx, token, { authUserId }, 'UNAUTHORIZED');
+    // P1-TOD-RL: cap prompt deletes (anti-loop; deletion is expensive — purges
+    // answers/reactions/reports + storage objects).
+    await enforceTodActionLimit(ctx, userId, 'delete_prompt');
 
     // Get the prompt
     const prompt = await ctx.db.get(promptId as Id<'todPrompts'>);
@@ -1630,103 +2358,30 @@ export const deleteMyPrompt = mutation({
       throw new Error('Unauthorized: you can only delete your own prompts');
     }
 
-    // Delete all answers for this prompt
-    const answers = await ctx.db
-      .query('todAnswers')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-
-    for (const answer of answers) {
-      const answerId = answer._id as unknown as string;
-
-      await deleteStorageIfPresent(ctx, answer.mediaStorageId);
-
-      const legacyLikes = await ctx.db
-        .query('todAnswerLikes')
-        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
-        .collect();
-      for (const like of legacyLikes) {
-        await ctx.db.delete(like._id);
-      }
-
-      // Delete all reactions for this answer
-      const reactions = await ctx.db
-        .query('todAnswerReactions')
-        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
-        .collect();
-      for (const reaction of reactions) {
-        await ctx.db.delete(reaction._id);
-      }
-
-      // Delete all reports for this answer
-      const reports = await ctx.db
-        .query('todAnswerReports')
-        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
-        .collect();
-      for (const report of reports) {
-        await ctx.db.delete(report._id);
-      }
-
-      // Delete all views for this answer
-      const views = await ctx.db
-        .query('todAnswerViews')
-        .withIndex('by_answer', (q) => q.eq('answerId', answerId))
-        .collect();
-      for (const view of views) {
-        await ctx.db.delete(view._id);
-      }
-
-      // Delete the answer itself
-      await ctx.db.delete(answer._id);
-    }
-
-    const promptReactions = await ctx.db
-      .query('todPromptReactions')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const reaction of promptReactions) {
-      await ctx.db.delete(reaction._id);
-    }
-
-    const promptReports = await ctx.db
-      .query('todPromptReports')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const report of promptReports) {
-      await ctx.db.delete(report._id);
-    }
-
-    // Phase 4: clean up prompt-owner media one-time-view ledger rows.
-    const promptMediaViews = await ctx.db
-      .query('todPromptMediaViews')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const view of promptMediaViews) {
-      await ctx.db.delete(view._id);
-    }
-
-    const privateMediaItems = await ctx.db
-      .query('todPrivateMedia')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const item of privateMediaItems) {
-      await deleteStorageIfPresent(ctx, item.storageId);
-      await ctx.db.delete(item._id);
-    }
-
-    // Delete all connect requests for this prompt
-    const connectRequests = await ctx.db
-      .query('todConnectRequests')
-      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
-    for (const req of connectRequests) {
-      await ctx.db.delete(req._id);
-    }
-
-    // Delete the prompt itself
+    // P2-TOD-CASCADE: hard-delete the prompt row FIRST.  Once it is gone:
+    //   - `canShowTodPromptForViewer` returns false everywhere (orphaned
+    //     answers / reactions / reports / private media / connect requests
+    //     all stop rendering immediately),
+    //   - the user sees the prompt disappear on the next reactive tick,
+    //   - the cascade work below — which may now be bounded across one or
+    //     more continuations — is purely backend garbage collection.
     await ctx.db.delete(prompt._id);
 
-    debugTodLog(`[T/D] Deleted prompt: id=${promptId}, deletedAnswers=${answers.length}, deletedConnectRequests=${connectRequests.length}, deletedPrivateMedia=${privateMediaItems.length}`);
+    // Run one bounded cascade pass synchronously so small/typical prompts
+    // (which fit well under TOD_PROMPT_CASCADE_BATCH per section) are fully
+    // cleaned up in this single request.  For pathological cases with very
+    // many answers/reactions/etc, schedule a continuation that re-runs the
+    // bounded helper until every section drains.
+    const result = await runDeletePromptCascadeBounded(ctx, promptId);
+    if (!result.complete) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.truthDare._continueDeleteMyPromptCascade,
+        { promptId },
+      );
+    }
+
+    debugTodLog(`[T/D] Deleted prompt: id=${promptId}, deletedAnswersThisPass=${result.deletedAnswers}, deletedConnectRequestsThisPass=${result.deletedConnectRequests}, deletedPrivateMediaThisPass=${result.deletedPrivateMedia}, complete=${result.complete}`);
 
     return { success: true };
   },
@@ -1932,7 +2587,28 @@ export const getPendingTodConnectRequestInbox = query({
   },
 });
 
-// Send a T&D connect request (prompt owner → answer author)
+/**
+ * Send a T&D connect request from a prompt owner to an answer author.
+ *
+ * SECURITY / PRIVACY CONTRACT:
+ *   - Token-bound auth (sender = caller).
+ *   - Only the prompt owner can connect on an answer to their own prompt.
+ *   - ANONYMOUS RULE: anonymous answers ARE connectable; the answer
+ *     author's identity is never revealed to the sender at this stage and
+ *     is only resolved on the recipient's accept (see `respondToConnect`).
+ *   - Pre-accept notification body is identity-free and the data payload
+ *     does NOT include the sender's user id (P2-TOD-PRIV).  Identity
+ *     rendering goes through `getPendingTodConnectRequestInbox`, which
+ *     honors `getPromptConnectIdentity` masking server-side.
+ *   - Rate limits: legacy minute bucket + P1 hour/day backstop
+ *     (`connect_backstop`) + per-(sender, recipient) anti-harassment cap
+ *     (`enforceTodPerTargetConnectLimit`).  Recipient id is folded into
+ *     the per-target counter's action string but never persisted in a
+ *     way that exposes the relationship outside the counter row.
+ *   - Idempotent: duplicate request from same (prompt, sender, recipient)
+ *     returns the existing requestId with a stable `action` label rather
+ *     than creating a second pending row.
+ */
 export const sendTodConnectRequest = mutation({
   args: {
     token: v.string(),
@@ -2061,6 +2737,13 @@ export const sendTodConnectRequest = mutation({
     if (!rateCheck.allowed) {
       throw new Error(RATE_LIMIT_ERROR);
     }
+    // P1-TOD-RL: hour+day backstop on connect throughput (anti-bot-loop).
+    await enforceTodActionLimit(ctx, fromUserId, 'connect_backstop');
+    // P1-TOD-RL: per-(sender, recipient) cap to prevent targeted harassment
+    // (one user spamming connect requests to a single victim across multiple
+    // prompts/answers). Counter is keyed by the SENDER's userId; recipient id
+    // is folded into the action string and not exposed elsewhere.
+    await enforceTodPerTargetConnectLimit(ctx, fromUserId, toUserId as string);
 
     const latestExisting = await findTodConnectRequestForPromptPair(
       ctx,
@@ -2101,13 +2784,24 @@ export const sendTodConnectRequest = mutation({
     // revealed only on accept (see respondToConnect).
     if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId as Id<'users'>)) {
       const now = Date.now();
+      // P2-TOD-PRIV: do NOT include `data.otherUserId` (sender id) in the
+      // pre-accept notification.  T&D prompt authors may have posted
+      // anonymously, and even when not, the prompt owner's Convex user id
+      // is a stable cross-feature identifier that the recipient could use
+      // to look up profile data via other queries before consenting.
+      // The recipient's UI navigates via `threadId` (= requestId) and
+      // resolves identity through `getPendingTodConnectRequestInbox`,
+      // which enforces ACL-aware identity rendering server-side (anonymous
+      // prompts render as Anonymous with no photo/age/gender leak).
+      // Identity reveal happens in `respondToConnect` after accept, where
+      // the response payload returns sender profile fields.
       await ctx.db.insert('privateNotifications', {
         userId: toUserId as Id<'users'>,
         type: 'phase2_deep_connect',
         title: 'New Truth or Dare connect',
         body: 'Someone wants to connect on your answer.',
         data: {
-          otherUserId: fromUserId as string,
+          // otherUserId intentionally omitted (P2-TOD-PRIV).
           threadId: requestId as string,
         },
         phase: 'phase2',
@@ -2121,8 +2815,28 @@ export const sendTodConnectRequest = mutation({
   },
 });
 
-// Respond to connect request (Connect or Remove)
-// Creates conversation in Phase-2 privateConversations for both users
+/**
+ * Respond to a T&D connect request (Connect or Remove).
+ * On Connect creates a Phase-2 privateConversation for both users so they
+ * can start chatting; on Remove permanently dismisses the request.
+ *
+ * SECURITY / PRIVACY CONTRACT:
+ *   - Token-bound auth (recipient = caller).
+ *   - Ownership check (`request.toUserId === recipientDbId`) runs BEFORE
+ *     any idempotency early-return so a non-recipient cannot probe
+ *     request status via 'already_connected'/'already_removed' responses.
+ *   - Identity reveal happens HERE on accept: the response payload returns
+ *     sender profile fields so the recipient learns who connected with
+ *     them (even if the original answer was posted anonymously).  Prior
+ *     to this point the recipient only had the request via the inbox
+ *     query, which masks identity per `getPromptConnectIdentity`.
+ *   - Idempotency (P2-TOD-IDEM): repeated calls in the desired terminal
+ *     state return `{success: true, action: 'already_*'}` with no DB
+ *     writes, no notifications, and NO rate-limit consumption (the
+ *     `enforceTodActionLimit` call runs AFTER the idempotency branches).
+ *   - Rate limit (`respond_to_connect`) only charges when actual work
+ *     happens; double-taps from flaky networks are free.
+ */
 export const respondToConnect = mutation({
   args: {
     token: v.string(),
@@ -2134,14 +2848,48 @@ export const respondToConnect = mutation({
     const recipientDbId = await requireAuthenticatedTodUserId(ctx, token, { authUserId }, 'UNAUTHORIZED');
 
     const request = await ctx.db.get(requestId);
-    if (!request || request.status !== 'pending') {
-      return { success: false, reason: 'Request not found or already processed' };
+    if (!request) {
+      return { success: false, reason: 'Request not found' };
     }
 
-    // Only the intended recipient can respond
+    // Authorization check BEFORE returning idempotent status so the
+    // "already_connected"/"already_removed" probe cannot be used by a
+    // non-recipient to enumerate request states.
     if (request.toUserId !== recipientDbId) {
       throw new Error('Unauthorized: only the request recipient can respond');
     }
+
+    // P2-TOD-IDEM: idempotent double-tap protection.  If the request is
+    // already in the desired terminal state, return a stable success-shape
+    // response with no side effects (no DB writes, no notifications, no
+    // rate-limit consumption).  This protects against:
+    //   - retry storms from flaky networks (mobile reconnects),
+    //   - rapid double-tap on the accept/reject button,
+    //   - duplicate Phase-2 match creation (the underlying
+    //     `ensurePhase2MatchAndConversation` already deduplicates, but
+    //     skipping it entirely avoids redundant work and notification
+    //     dedupe-key churn).
+    if (request.status === 'connected') {
+      if (action === 'connect') {
+        return { success: true, action: 'already_connected' as const };
+      }
+      return { success: false, reason: 'Request already connected; cannot remove' };
+    }
+    if (request.status === 'removed') {
+      if (action === 'remove') {
+        return { success: true, action: 'already_removed' as const };
+      }
+      return { success: false, reason: 'Request already removed' };
+    }
+    if (request.status !== 'pending') {
+      return { success: false, reason: 'Request not found or already processed' };
+    }
+
+    // P1/P2-TOD-RL: cap connect-response throughput (anti-bot-loop on the
+    // accept/reject button).  Charge ONLY when we're actually going to do
+    // work — moved below the idempotency early-returns so retries/double
+    // taps on already-processed requests don't burn quota slots.
+    await enforceTodActionLimit(ctx, recipientDbId, 'respond_to_connect');
 
     if (action === 'connect') {
       const recipientAccess = await getTodAccessContext(ctx, recipientDbId);
@@ -2502,6 +3250,9 @@ export const generateUploadUrl = mutation({
     if (!rateCheck.allowed) {
       throw new Error(RATE_LIMIT_ERROR);
     }
+    // P1-TOD-RL: hour+day backstop on upload-URL generation (anti-bot-loop;
+    // every URL backs a storage object, so unbounded URL creation = storage abuse).
+    await enforceTodActionLimit(ctx, userId, 'media_upload_backstop');
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -2543,6 +3294,11 @@ export const submitPrivateMediaResponse = mutation({
     if (!(await getTodAccessContext(ctx, fromUserId))) {
       throw new Error('Phase-2 setup is required to submit private media');
     }
+    // P1-TOD-RL: cap V1 private-media submissions (anti-bot-loop). Works in
+    // tandem with the P0 `todPrivateMediaAttempts` 2-attempt cap which is
+    // per-(prompt, sender) — this adds a per-user velocity ceiling that is
+    // independent of the prompt to prevent broad-sweep abuse.
+    await enforceTodActionLimit(ctx, fromUserId, 'submit_private_media');
 
     // Validate prompt exists
     const prompt = await ctx.db
@@ -2558,6 +3314,12 @@ export const submitPrivateMediaResponse = mutation({
     if (!(await canShowTodPromptForViewer(ctx, prompt, fromUserId))) {
       throw new Error('Prompt unavailable');
     }
+
+    // TOD-MEDIA-3 FIX: enforce durable 2-upload-attempt cap for the V1
+    // private-media path. Counter lives in `todPrivateMediaAttempts` keyed
+    // by (promptId, fromUserId) and is never reset by pending-row deletion,
+    // so refresh / retry / reinstall / multi-device cannot bypass.
+    await assertPrivateMediaCapNotExceeded(ctx, args.promptId, fromUserId);
 
     const mediaUpload = await validateTodUploadReference(
       ctx,
@@ -2576,7 +3338,9 @@ export const submitPrivateMediaResponse = mutation({
       .filter((q) => q.eq(q.field('status'), 'pending'))
       .first();
 
-    // If existing, delete old storage and remove record (replace policy)
+    // If existing, delete old storage and remove record (replace policy).
+    // NOTE: this DOES delete the pending row, but the durable
+    // `todPrivateMediaAttempts` counter is untouched — see TOD-MEDIA-3 fix.
     if (existing) {
       if (existing.storageId) {
         await ctx.storage.delete(existing.storageId);
@@ -2605,6 +3369,9 @@ export const submitPrivateMediaResponse = mutation({
       responderGender: responderSnapshot.gender,
       responderPhotoUrl: responderSnapshot.photoUrl,
     });
+
+    // TOD-MEDIA-3 FIX: monotonically increment durable upload-attempt counter.
+    await incrementPrivateMediaUploadAttempt(ctx, args.promptId, fromUserId);
 
     return { id, success: true };
   },
@@ -2675,9 +3442,24 @@ export const getPrivateMediaForOwner = query({
 });
 
 /**
- * Begin viewing private media (owner only).
- * Returns a short-lived URL without durably consuming the one-time view.
- * Durable consumption happens in finalizePrivateMediaView after successful display.
+ * Begin viewing legacy V1 private media (owner only).
+ * Returns a short-lived URL and atomically transitions the row to
+ * 'viewing' so the one-time view is reserved BEFORE the URL is handed out
+ * (TOD-MEDIA-4).
+ *
+ * SECURITY CONTRACT:
+ *   - Token-bound auth (viewer = caller).
+ *   - Recipient-only: `item.toUserId === currentUserId` is required;
+ *     the sender cannot self-view through this endpoint and therefore
+ *     cannot burn the receiver's one-time view.
+ *   - Block check on (sender, recipient) — blocked senders cannot trigger
+ *     a view URL even if the row exists.
+ *   - State machine (pending → viewing → finalized/deleted) is enforced
+ *     atomically in a single serializable Convex mutation; two parallel
+ *     `begin` calls cannot both transition pending → viewing.  See the
+ *     in-handler comment for the full state diagram.
+ *   - Durable consumption (storage deletion + status='deleted') happens
+ *     in `finalizePrivateMediaView` after the display timer ends.
  */
 export const beginPrivateMediaView = mutation({
   args: {
@@ -2693,6 +3475,10 @@ export const beginPrivateMediaView = mutation({
       { authUserId, viewerUserId },
       'UNAUTHORIZED',
     );
+    // P1-TOD-RL: cap one-time view claims (anti-bot-loop on view-burn endpoint).
+    // The P0 atomic state transitions inside this handler are the
+    // correctness backstop; this adds a per-user velocity ceiling.
+    await enforceTodActionLimit(ctx, currentUserId, 'begin_private_media_view');
     if (!(await getTodAccessContext(ctx, currentUserId))) {
       throw new Error('Phase-2 setup is required to view this media');
     }
@@ -2713,38 +3499,92 @@ export const beginPrivateMediaView = mutation({
       throw new Error('Access denied');
     }
 
-    // Allow retrying records that were previously stuck in the old pre-finalize "viewing" state.
-    if (item.status !== 'pending' && item.status !== 'viewing') {
-      throw new Error('Media already viewed or expired');
-    }
-
-    // Ensure storageId exists
+    // TOD-MEDIA-4 FIX: atomically consume the one-time view BEFORE returning
+    // the URL.
+    //
+    // Status transitions (single Convex mutation, serializable):
+    //   pending  → viewing  (set viewedAt = now, expiresAt = now + duration)
+    //                       and return URL.
+    //   viewing  AND now < expiresAt  → idempotent retry within the active
+    //                       view window: return the SAME URL (same item,
+    //                       same expiresAt). Convex storage URLs are
+    //                       short-lived and bound to the storage id, so this
+    //                       is safe — no extra view is granted.
+    //   viewing  AND now >= expiresAt → the timer has expired without a
+    //                       finalize call. Reject; the cleanup or finalize
+    //                       path must transition the record before any
+    //                       further view is allowed.
+    //   any other status (expired / deleted) → reject.
+    //
+    // Two parallel `beginPrivateMediaView` calls cannot both succeed:
+    // the loser's read of (status='pending') conflicts with the winner's
+    // patch and is retried; on retry it observes status='viewing' and
+    // either returns the same URL (within window) or rejects.
     if (!item.storageId) {
       throw new Error('Media file not found');
     }
 
-    // Generate short-lived URL (Convex URLs expire automatically)
-    const url = await ctx.storage.getUrl(item.storageId);
-    if (!url) {
-      throw new Error('Failed to generate media URL');
+    const now = Date.now();
+
+    if (item.status === 'pending') {
+      const expiresAt = now + item.durationSec * 1000;
+      const url = await ctx.storage.getUrl(item.storageId);
+      if (!url) {
+        throw new Error('Failed to generate media URL');
+      }
+      await ctx.db.patch(item._id, {
+        status: 'viewing',
+        viewedAt: now,
+        expiresAt,
+      });
+      return {
+        url,
+        mediaType: item.mediaType,
+        viewMode: item.viewMode, // 'tap' or 'hold' - frontend enforces this
+        durationSec: item.durationSec,
+        expiresAt,
+      };
     }
 
-    const now = Date.now();
-    const expiresAt = now + item.durationSec * 1000;
+    if (item.status === 'viewing') {
+      const existingExpiresAt = item.expiresAt ?? 0;
+      if (now < existingExpiresAt) {
+        // Idempotent retry within the active view window.
+        const url = await ctx.storage.getUrl(item.storageId);
+        if (!url) {
+          throw new Error('Failed to generate media URL');
+        }
+        return {
+          url,
+          mediaType: item.mediaType,
+          viewMode: item.viewMode,
+          durationSec: item.durationSec,
+          expiresAt: existingExpiresAt,
+        };
+      }
+      throw new Error('Media already viewed or expired');
+    }
 
-    return {
-      url,
-      mediaType: item.mediaType,
-      viewMode: item.viewMode, // 'tap' or 'hold' - frontend enforces this
-      durationSec: item.durationSec,
-      expiresAt,
-    };
+    throw new Error('Media already viewed or expired');
   },
 });
 
 /**
- * Finalize private media view (called when timer ends or user closes).
- * Deletes the storage file and durably consumes the one-time view.
+ * Finalize a legacy V1 private-media view (called when the display timer
+ * ends or the user closes the viewer).  Deletes the underlying storage
+ * object and durably marks the row as 'deleted' so the one-time view can
+ * never be replayed.
+ *
+ * SECURITY CONTRACT:
+ *   - Token-bound auth (viewer = caller).
+ *   - Recipient-only: `item.toUserId === currentUserId`.
+ *   - Block check on (sender, recipient).
+ *   - Idempotent over missing rows (returns `success: false` instead of
+ *     throwing) so a delayed second finalize from the viewer does not
+ *     surface a user-visible error.
+ *   - Storage delete is fail-soft via `deleteStorageIfPresent`; the row
+ *     transition still happens so a partially-failed storage delete
+ *     cannot leave the view unconsumed.
  */
 export const finalizePrivateMediaView = mutation({
   args: {
@@ -2760,6 +3600,8 @@ export const finalizePrivateMediaView = mutation({
       { authUserId, viewerUserId },
       'UNAUTHORIZED',
     );
+    // P1-TOD-RL: cap finalize calls (anti-bot-loop on storage-delete trigger).
+    await enforceTodActionLimit(ctx, currentUserId, 'finalize_private_media_view');
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
@@ -2848,6 +3690,10 @@ export const sendPrivateMediaConnect = mutation({
     if (!rateCheck.allowed) {
       throw new Error(RATE_LIMIT_ERROR);
     }
+    // P1-TOD-RL: hour+day backstop on V1 private-media connect throughput.
+    await enforceTodActionLimit(ctx, currentUserId, 'connect_backstop');
+    // P1-TOD-RL: per-(sender, recipient) cap (anti-harassment) on V1 path.
+    await enforceTodPerTargetConnectLimit(ctx, currentUserId, item.fromUserId);
 
     // Update connect status
     await ctx.db.patch(privateMediaId, {
@@ -2885,6 +3731,9 @@ export const rejectPrivateMediaConnect = mutation({
       { authUserId, userId: fromUserId },
       'UNAUTHORIZED',
     );
+    // P1-TOD-RL: cap reject throughput (anti-bot-loop; cheap mutation but
+    // unbounded calls churn `connectStatus` patches).
+    await enforceTodActionLimit(ctx, currentUserId, 'reject_private_media_connect');
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
@@ -2911,11 +3760,14 @@ export const cleanupExpiredPrivateMedia = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
 
-    // Find items that are viewing and past expiry
+    // P2-TOD-CLEANUP: Bounded scan.  The previous `.collect()` could
+    // load every historical row in 'viewing' / 'pending' status; the cron
+    // is idempotent and re-runs, so per-invocation BATCH cap is safe and
+    // bounds Convex transaction cost.
     const expiredViewing = await ctx.db
       .query('todPrivateMedia')
       .withIndex('by_status', (q) => q.eq('status', 'viewing'))
-      .collect();
+      .take(TOD_PRIVATE_MEDIA_CLEANUP_BATCH);
 
     let cleaned = 0;
     for (const item of expiredViewing) {
@@ -2936,10 +3788,11 @@ export const cleanupExpiredPrivateMedia = internalMutation({
     }
 
     // Also cleanup very old pending items (> 24 hours)
+    // P2-TOD-CLEANUP: same bounded-scan rationale as above.
     const oldPending = await ctx.db
       .query('todPrivateMedia')
       .withIndex('by_status', (q) => q.eq('status', 'pending'))
-      .collect();
+      .take(TOD_PRIVATE_MEDIA_CLEANUP_BATCH);
 
     for (const item of oldPending) {
       if (item.createdAt < now - TWENTY_FOUR_HOURS_MS) {
@@ -3961,6 +4814,8 @@ export const createOrEditAnswer = mutation({
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment before posting again.');
     }
+    // P1-TOD-RL: hour+day backstop on top of legacy minute bucket.
+    await enforceTodActionLimit(ctx, userId, 'answer_backstop');
 
     // Check for existing answer
     const existing = await ctx.db
@@ -3972,6 +4827,24 @@ export const createOrEditAnswer = mutation({
 
     const normalizedText = validateAnswerText(args.text);
     const viewDurationSec = validateViewDuration(args.viewDurationSec);
+
+    // TOD-MEDIA-1 FIX: enforce durable 2-upload-attempt cap BEFORE accepting
+    // any new storage id. Read-then-write inside one Convex mutation is
+    // serializable; two parallel uploads cannot both pass this gate.
+    //
+    // TOD-MEDIA-2 FIX: if this is a replacement onto an existing answer that
+    // already has any view footprint (mediaViewedAt / promptOwnerViewedAt /
+    // todAnswerViews row), reject before any storage is touched.
+    if (args.mediaStorageId) {
+      await assertAnswerMediaCapNotExceeded(ctx, args.promptId, userId);
+      if (existing && existing.mediaStorageId) {
+        await assertNoPriorAnswerView(ctx, {
+          _id: existing._id as Id<'todAnswers'>,
+          mediaViewedAt: existing.mediaViewedAt,
+          promptOwnerViewedAt: existing.promptOwnerViewedAt,
+        });
+      }
+    }
 
     let mediaUpload: ValidatedTodUploadReference | undefined;
     let mediaDurationSec: number | undefined;
@@ -4022,8 +4895,10 @@ export const createOrEditAnswer = mutation({
         patch.isFrontCamera = undefined;
         patch.viewMode = undefined;
         patch.viewDurationSec = undefined;
-        patch.mediaViewedAt = undefined;
-        patch.promptOwnerViewedAt = undefined;
+        // TOD-MEDIA-2 FIX: do NOT reset mediaViewedAt / promptOwnerViewedAt
+        // on remove. The view footprint must survive remove so a subsequent
+        // re-upload (within the 2-attempt cap) cannot bypass the
+        // replace-after-view gate by removing-then-uploading.
         debugTodLog(`[T/D] media removed from answer`);
       } else if (args.mediaStorageId) {
         // Replace media
@@ -4035,8 +4910,11 @@ export const createOrEditAnswer = mutation({
         patch.isFrontCamera = args.isFrontCamera;
         patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
         patch.viewDurationSec = viewDurationSec ?? existing.viewDurationSec;
-        patch.mediaViewedAt = undefined;
-        patch.promptOwnerViewedAt = undefined;
+        // TOD-MEDIA-2 FIX: do NOT reset mediaViewedAt / promptOwnerViewedAt
+        // on replace. The pre-replacement gate (assertNoPriorAnswerView)
+        // already guaranteed neither was set before we reached this branch.
+        // If a future code path bypasses that gate, preserving these values
+        // ensures the one-time view contract is not silently downgraded.
         debugTodLog(`[T/D] media replaced, storageId=${args.mediaStorageId}`);
       } else if (args.viewMode !== undefined || args.viewDurationSec !== undefined) {
         patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
@@ -4086,14 +4964,19 @@ export const createOrEditAnswer = mutation({
 
       await ctx.db.patch(existing._id, patch);
 
-      if (args.removeMedia || args.mediaStorageId) {
-        const priorViews = await ctx.db
-          .query('todAnswerViews')
-          .withIndex('by_answer', (q) => q.eq('answerId', existing._id as string))
-          .collect();
-        for (const view of priorViews) {
-          await ctx.db.delete(view._id);
-        }
+      // TOD-MEDIA-2 FIX: NEVER wipe `todAnswerViews` rows. The per-viewer
+      // ledger is the source of truth for one-time-view consumption; the
+      // pre-edit gate (assertNoPriorAnswerView) blocks media replacement
+      // when any row exists, so reaching this branch with rows present
+      // would already have thrown. Removing media (without replacing) is
+      // permitted but does NOT clear the ledger — preserving the gate's
+      // invariant for any future re-upload attempt.
+
+      // TOD-MEDIA-1 FIX: monotonically increment the durable upload-attempt
+      // counter ONLY when the caller actually set new media. removeMedia
+      // does not count against the cap (no upload happened).
+      if (args.mediaStorageId) {
+        await incrementAnswerMediaUploadAttempt(ctx, args.promptId, userId);
       }
 
       if (args.removeMedia) {
@@ -4173,6 +5056,14 @@ export const createOrEditAnswer = mutation({
         isFrontCamera: args.isFrontCamera,
       });
 
+      // TOD-MEDIA-1 FIX: increment durable upload-attempt counter on CREATE
+      // when the new answer carries media. Survives deleteMyAnswer (the
+      // counter table is intentionally never deleted), so the cap holds
+      // across delete+recreate cycles.
+      if (hasMedia) {
+        await incrementAnswerMediaUploadAttempt(ctx, args.promptId, userId);
+      }
+
       await syncPromptAnswerCounts(ctx, args.promptId);
 
       // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
@@ -4217,6 +5108,8 @@ export const setAnswerReaction = mutation({
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment.');
     }
+    // P2-TOD-RL: hour+day backstop on top of legacy minute bucket (reaction).
+    await enforceTodActionLimit(ctx, userId, 'reaction_backstop');
 
     const now = Date.now();
 
@@ -4345,6 +5238,8 @@ export const reportAnswer = mutation({
     if (!rateCheck.allowed) {
       throw new Error('You have reached your daily report limit');
     }
+    // P2-TOD-RL: hour+day backstop on top of legacy daily bucket (report).
+    await enforceTodActionLimit(ctx, reporterId, 'report_backstop');
 
     const now = Date.now();
 
@@ -4357,10 +5252,17 @@ export const reportAnswer = mutation({
       createdAt: now,
     });
 
+    // P2-TOD-MOD: Bounded recount.  Previously this `.collect()` scanned
+    // every historical report row for the answer.  We now `take(CAP)`
+    // because the only consumer is `moderationStatusForTodReportCount`
+    // which monotonically transitions normal -> under_review ->
+    // hidden_by_reports at small fixed thresholds (~3).  When the scan
+    // returns CAP rows we conservatively treat it as >= CAP, which still
+    // resolves to `hidden_by_reports`.
     const reports = await ctx.db
       .query('todAnswerReports')
       .withIndex('by_answer', (q) => q.eq('answerId', answerId))
-      .collect();
+      .take(TOD_REPORT_COUNT_SCAN_CAP);
 
     const nextCount = reports.length;
     const nextStatus = moderationStatusForTodReportCount(nextCount);
@@ -4425,6 +5327,8 @@ export const setPromptReaction = mutation({
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment.');
     }
+    // P2-TOD-RL: hour+day backstop on top of legacy minute bucket (prompt_reaction).
+    await enforceTodActionLimit(ctx, userId, 'prompt_reaction_backstop');
 
     const now = Date.now();
 
@@ -4550,6 +5454,8 @@ export const reportPrompt = mutation({
     if (!rateCheck.allowed) {
       throw new Error('You have reached your daily report limit');
     }
+    // P2-TOD-RL: hour+day backstop on top of legacy daily bucket (prompt_report).
+    await enforceTodActionLimit(ctx, reporterId, 'prompt_report_backstop');
 
     const now = Date.now();
 
@@ -4562,10 +5468,11 @@ export const reportPrompt = mutation({
       createdAt: now,
     });
 
+    // P2-TOD-MOD: Bounded recount (see reportAnswer for rationale).
     const reports = await ctx.db
       .query('todPromptReports')
       .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
-      .collect();
+      .take(TOD_REPORT_COUNT_SCAN_CAP);
 
     const nextCount = reports.length;
     const nextStatus = moderationStatusForTodReportCount(nextCount);
@@ -4649,6 +5556,11 @@ export const deleteMyAnswer = mutation({
   },
   handler: async (ctx, { token, answerId, userId: argsUserId }) => {
     const userId = await requireAuthenticatedTodUserId(ctx, token, { userId: argsUserId }, 'UNAUTHORIZED');
+    // P1-TOD-RL: cap answer deletes (anti delete/recreate loop). Note that
+    // the P0 `todAnswerUploadAttempts` counter is NEVER reset on delete, so
+    // this limit only constrains delete velocity — it cannot be used to
+    // recover upload-attempt budget by spamming deletes.
+    await enforceTodActionLimit(ctx, userId, 'delete_answer');
 
     const answer = await ctx.db
       .query('todAnswers')
@@ -4823,6 +5735,8 @@ export const claimAnswerMediaView = mutation({
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment.');
     }
+    // P1-TOD-RL: hour+day backstop on top of legacy minute bucket (claim_media).
+    await enforceTodActionLimit(ctx, viewerId, 'claim_media_backstop');
 
     // Get the answer
     const answer = await ctx.db
@@ -4956,6 +5870,8 @@ export const finalizeAnswerMediaView = mutation({
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment.');
     }
+    // P1-TOD-RL: hour+day backstop on top of legacy minute bucket (claim_media).
+    await enforceTodActionLimit(ctx, viewerId, 'claim_media_backstop');
 
     // Get the answer
     const answer = await ctx.db
@@ -5055,6 +5971,8 @@ export const openPromptMedia = mutation({
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment.');
     }
+    // P1-TOD-RL: hour+day backstop on top of legacy minute bucket (claim_media).
+    await enforceTodActionLimit(ctx, viewerId, 'claim_media_backstop');
 
     const prompt = await ctx.db
       .query('todPrompts')
@@ -5113,31 +6031,28 @@ export const openPromptMedia = mutation({
     }
 
     // Non-owner photo/video: one-time gate.
-    const existing = await ctx.db
-      .query('todPromptMediaViews')
-      .withIndex('by_prompt_viewer', (q) =>
-        q.eq('promptId', promptId).eq('viewerUserId', viewerId as string)
-      )
-      .first();
-    if (existing) {
+    // TOD-BIZ-1 / TOD-MEDIA-6 FIX: claim via single atomic helper. Convex
+    // serializable mutations + index-read conflict detection guarantee that
+    // two parallel `openPromptMedia` / `preparePromptMedia` /
+    // `markPromptMediaViewed` calls cannot both insert. The loser retries
+    // and sees `alreadyViewed: true`, so no fresh URL is leaked.
+    const url = await ctx.storage.getUrl(prompt.mediaStorageId);
+    if (!url) return { status: 'no_media' as const };
+
+    const claim = await consumePromptMediaViewOnce(ctx, {
+      promptId,
+      viewerUserId: viewerId as string,
+      ownerUserId: prompt.ownerUserId as string,
+      mediaKind: kind,
+    });
+
+    if (claim.alreadyViewed) {
       return {
         status: 'already_viewed' as const,
         alreadyViewed: true,
         isOwner: false,
       };
     }
-
-    const url = await ctx.storage.getUrl(prompt.mediaStorageId);
-    if (!url) return { status: 'no_media' as const };
-
-    const viewedAt = Date.now();
-    await ctx.db.insert('todPromptMediaViews', {
-      promptId,
-      viewerUserId: viewerId as string,
-      ownerUserId: prompt.ownerUserId as string,
-      mediaKind: kind,
-      viewedAt,
-    });
 
     debugTodLog(
       `[T/D] openPromptMedia inserted view viewerId=${viewerId} promptId=${promptId} kind=${kind}`
@@ -5150,7 +6065,7 @@ export const openPromptMedia = mutation({
       mediaMime: prompt.mediaMime,
       durationSec: prompt.durationSec,
       isFrontCamera: prompt.isFrontCamera ?? false,
-      viewedAt,
+      viewedAt: claim.viewedAt,
       alreadyViewed: false,
       isOwner: false,
     };
@@ -5190,6 +6105,8 @@ export const preparePromptMedia = mutation({
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment.');
     }
+    // P1-TOD-RL: hour+day backstop on top of legacy minute bucket (claim_media).
+    await enforceTodActionLimit(ctx, viewerId, 'claim_media_backstop');
 
     const prompt = await ctx.db
       .query('todPrompts')
@@ -5243,29 +6160,23 @@ export const preparePromptMedia = mutation({
       };
     }
 
-    // Non-owner photo/video: claim before returning the URL. If the user has
-    // already burned the view in a prior session, do not leak a new URL.
-    const existing = await ctx.db
-      .query('todPromptMediaViews')
-      .withIndex('by_prompt_viewer', (q) =>
-        q.eq('promptId', promptId).eq('viewerUserId', viewerId as string)
-      )
-      .first();
-    if (existing) {
-      return { status: 'already_viewed' as const, isOwner: false };
-    }
-
+    // Non-owner photo/video: claim before returning the URL.
+    // TOD-BIZ-1 / TOD-MEDIA-5 FIX: shares the single atomic claim helper
+    // with openPromptMedia and markPromptMediaViewed so all three entry
+    // points agree on consumption semantics and cannot race.
     const url = await ctx.storage.getUrl(prompt.mediaStorageId);
     if (!url) return { status: 'no_media' as const };
 
-    const viewedAt = Date.now();
-    await ctx.db.insert('todPromptMediaViews', {
+    const claim = await consumePromptMediaViewOnce(ctx, {
       promptId,
       viewerUserId: viewerId as string,
       ownerUserId: prompt.ownerUserId as string,
       mediaKind: kind,
-      viewedAt,
     });
+
+    if (claim.alreadyViewed) {
+      return { status: 'already_viewed' as const, isOwner: false };
+    }
 
     debugTodLog(
       `[T/D] preparePromptMedia claimed view viewerId=${viewerId} promptId=${promptId} kind=${kind}`
@@ -5279,7 +6190,7 @@ export const preparePromptMedia = mutation({
       durationSec: prompt.durationSec,
       isFrontCamera: prompt.isFrontCamera ?? false,
       isOwner: false,
-      viewedAt,
+      viewedAt: claim.viewedAt,
     };
   },
 });
@@ -5309,6 +6220,10 @@ export const markPromptMediaViewed = mutation({
   },
   handler: async (ctx, { token, promptId, viewerUserId: argsViewerId }) => {
     const viewerId = await requireAuthenticatedTodUserId(ctx, token, { viewerUserId: argsViewerId }, 'UNAUTHORIZED');
+    // P1-TOD-RL: cap mark-viewed throughput (anti-bot-loop on the one-time
+    // view consume endpoint). P0 `consumePromptMediaViewOnce` already enforces
+    // idempotency; this adds a per-user velocity ceiling.
+    await enforceTodActionLimit(ctx, viewerId, 'mark_prompt_media_viewed');
 
     const prompt = await ctx.db
       .query('todPrompts')
@@ -5344,41 +6259,28 @@ export const markPromptMediaViewed = mutation({
     }
 
     // Non-owner photo/video: idempotent ledger insert.
-    const existing = await ctx.db
-      .query('todPromptMediaViews')
-      .withIndex('by_prompt_viewer', (q) =>
-        q.eq('promptId', promptId).eq('viewerUserId', viewerId as string)
-      )
-      .first();
-    if (existing) {
-      return {
-        status: 'ok' as const,
-        alreadyViewed: true,
-        viewedAt: existing.viewedAt,
-        isOwner: false,
-        recorded: false,
-      };
-    }
-
-    const viewedAt = Date.now();
-    await ctx.db.insert('todPromptMediaViews', {
+    // TOD-BIZ-1 / TOD-MEDIA-5 FIX: single atomic claim helper shared with
+    // openPromptMedia / preparePromptMedia. Idempotent — re-calls for the
+    // same (promptId, viewer) return `alreadyViewed: true`.
+    const claim = await consumePromptMediaViewOnce(ctx, {
       promptId,
       viewerUserId: viewerId as string,
       ownerUserId: prompt.ownerUserId as string,
       mediaKind: kind,
-      viewedAt,
     });
 
-    debugTodLog(
-      `[T/D] markPromptMediaViewed inserted view viewerId=${viewerId} promptId=${promptId} kind=${kind}`
-    );
+    if (!claim.alreadyViewed) {
+      debugTodLog(
+        `[T/D] markPromptMediaViewed inserted view viewerId=${viewerId} promptId=${promptId} kind=${kind}`
+      );
+    }
 
     return {
       status: 'ok' as const,
-      alreadyViewed: false,
-      viewedAt,
+      alreadyViewed: claim.alreadyViewed,
+      viewedAt: claim.viewedAt,
       isOwner: false,
-      recorded: true,
+      recorded: !claim.alreadyViewed,
     };
   },
 });

@@ -2110,6 +2110,34 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_prompt_reporter', ['promptId', 'reporterId']),
 
+  // Truth & Dare durable per-(prompt, responder) media upload-attempt counter.
+  // - One row per (promptId, userId). Created on first media upload attempt.
+  // - `attemptCount` is monotonic. NEVER decremented or deleted on answer
+  //   delete/recreate/remove-media so the 2-upload-attempt cap survives
+  //   refresh, retry, reinstall, multi-device, and deleteMyAnswer.
+  // - Used by `createOrEditAnswer` (TOD-MEDIA-1 fix).
+  todAnswerUploadAttempts: defineTable({
+    promptId: v.string(),
+    userId: v.string(),
+    attemptCount: v.number(),
+    firstAttemptAt: v.number(),
+    lastAttemptAt: v.number(),
+  })
+    .index('by_prompt_user', ['promptId', 'userId']),
+
+  // Truth & Dare durable per-(prompt, responder) V1 private-media upload-attempt counter.
+  // - Mirror of `todAnswerUploadAttempts` but scoped to the legacy
+  //   `todPrivateMedia` path (TOD-MEDIA-3 fix).
+  // - Survives pending-row deletion in `submitPrivateMediaResponse`.
+  todPrivateMediaAttempts: defineTable({
+    promptId: v.string(),
+    fromUserId: v.string(),
+    attemptCount: v.number(),
+    firstAttemptAt: v.number(),
+    lastAttemptAt: v.number(),
+  })
+    .index('by_prompt_from', ['promptId', 'fromUserId']),
+
   // Truth & Dare Rate Limiting (tracks user action counts per day)
   todRateLimits: defineTable({
     userId: v.string(),

@@ -68,7 +68,8 @@ const DARE_CATEGORIES = [
 export default function SendDareScreen() {
   const { userId } = useLocalSearchParams<{ userId: string }>();
   const router = useRouter();
-  const { userId: currentUserId } = useAuthStore();
+  const currentUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const insets = useSafeAreaInsets();
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [customDare, setCustomDare] = useState('');
@@ -90,13 +91,18 @@ export default function SendDareScreen() {
 
   const handleSendDare = async (dareText: string) => {
     if (!currentUserId || !userId) return;
+    if (!token) {
+      Alert.alert('Error', 'Please sign in again to send a dare.');
+      return;
+    }
 
     try {
-      // TOD-002 FIX: Use authUserId for server-side verification
+      // TOD-AUTH-1 FIX: pass session token; authUserId is now only a cross-check hint.
       await sendDare({
-        authUserId: currentUserId!,
+        token,
         toUserId: userId as any,
         content: dareText,
+        authUserId: currentUserId,
       });
       Alert.alert('Dare Sent!', 'Your dare has been sent. If they accept, you\'ll both be revealed!', [
         { text: 'OK', onPress: () => router.back() },
