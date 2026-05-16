@@ -152,18 +152,20 @@ export default function ProfileScreen() {
   const isAdmin = adminCheck?.isAdmin === true;
 
   // Query verification status for details (date, pending session)
-  // FIX: Backend expects { userId }, not { token }
+  // P0-PROFILE-004: backend now requires both `token` and `userId` and only
+  // returns data to the owner/admin. Skip the query when either is missing.
   const verificationDetails = useQuery(
     api.verification.getVerificationStatus,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && userId && token ? { token, userId } : 'skip'
   );
 
   // CONSISTENCY FIX: Use same photo source as Edit Profile (api.photos.getUserPhotos)
   // This ensures Profile Tab shows the SAME photos as Edit Profile grid
-  // FIX: Use getUserPhotos with userId instead of getCurrentUserPhotos with token
+  // P1-PROFILE: getUserPhotos now requires a session token to prevent
+  // anonymous mass enumeration of every user's photo list.
   const backendPhotos = useQuery(
     api.photos.getUserPhotos,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && userId && token ? { token, userId } : 'skip'
   );
 
   // HYDRATION FIX: Distinguish loading vs empty to prevent flicker

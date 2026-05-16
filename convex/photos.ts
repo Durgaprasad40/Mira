@@ -1,7 +1,8 @@
 import { v } from 'convex/values';
 import { mutation, query, action, internalMutation, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken as validateSessionTokenAny } from './helpers';
+import { reserveActionSlots } from './actionRateLimits';
 
 // ---------------------------------------------------------------------------
 // Session-based Auth Helper (matches app's custom auth system)
@@ -109,17 +110,24 @@ async function getGridPrimaryPhotoUrl(
 }
 
 // Generate upload URL
-// P3-NOTE: A per-user rate limit on this mutation was considered during the
-// Phase-1 Messages hardening review but deliberately deferred. This URL is
-// shared across onboarding photo-upload, edit-profile, face verification,
-// Phase-2 onboarding, the photo-sync service, and Phase-1 chat secure
-// media. A single global cap could break onboarding for users with bursty
-// upload patterns. A safe fix requires either (a) splitting this mutation
-// into per-feature variants, or (b) accepting a `purpose` arg and applying
-// per-purpose quotas. Downstream Phase-1 message sends (`sendPreMatchMessage`,
-// `sendProtectedImage`) already enforce their own per-user rate limits, so
-// burning upload URLs without sending only produces orphaned storage
-// objects that the existing GC handles.
+// P3-PROFILE NOTE (shared-upload policy — FUTURE / out of scope for P3):
+// A per-user rate limit on this mutation was considered during P2/P3 but
+// deliberately deferred. The URL is shared across onboarding photo-upload,
+// edit-profile, face verification, Phase-2 onboarding, the photo-sync
+// service, and Phase-1 chat secure media. A single global cap would
+// either be too tight (breaking bursty onboarding) or too loose (no
+// protection). The correct fix requires one of:
+//   (1) Accept a `purpose: v.union(...)` arg and apply per-purpose quotas
+//       (e.g. `onboarding_photo` 20/hr, `chat_image` 60/min,
+//       `verification_reference` 5/hr) — preferred, but needs a
+//       coordinated frontend change at every caller to pass `purpose`;
+//   (2) Split this mutation into per-feature variants
+//       (`generateOnboardingUploadUrl`, `generateChatImageUploadUrl`, …)
+//       so each can be independently rate-limited and audited.
+// Mitigation today: downstream consumers (`addPhoto`, `sendPreMatchMessage`,
+// `sendProtectedImage`, verification flows) each enforce their own per-user
+// rate limits, so an attacker can mint URLs but cannot attach them to user
+// data. Orphaned storage objects are reaped by existing GC.
 export const generateUploadUrl = mutation({
   args: {
     token: v.string(),
@@ -169,6 +177,15 @@ export const getStorageUrl = mutation({
 /**
  * 8A: Validate photo before upload.
  * Call this before uploading to check size/type constraints.
+ *
+ * P3-PROFILE NOTE: This is a UX helper, NOT a security boundary. It is an
+ * unauthenticated query intended to give the upload UI fast feedback
+ * ("photo too small", "wrong format") before the user even hits
+ * `generateUploadUrl`. A malicious client can trivially skip this call;
+ * the authoritative size/type/dimension checks live in `addPhoto` (size +
+ * mimeType bounds), pre-upload UI gating, and the per-user upload rate
+ * limits enforced by downstream consumers. Treat the return value as a
+ * convenience hint, not an authorization decision.
  */
 export const validatePhotoUpload = query({
   args: {
@@ -207,6 +224,22 @@ export const validatePhotoUpload = query({
 });
 
 // Add photo to user profile
+// P3-PROFILE NOTE (dimension validation — FUTURE / out of scope for P3):
+// `width` and `height` here are client-supplied and are NOT independently
+// re-derived server-side from the storage object. The current `validatePhotoUpload`
+// query + pre-upload UI gating enforce min-dimensions client-side only.
+// A server-authoritative dimension check requires one of:
+//   (1) A Convex action that downloads the storage object and decodes the
+//       header bytes (e.g. via `image-size` or a similar lightweight
+//       header-parser) — adds runtime dependency surface and per-upload
+//       latency, and must itself be rate-limited;
+//   (2) A trusted upstream extraction service that signs a sidecar
+//       (width/height/mimeType/sha256) the mutation can verify.
+// Until one of those lands, this mutation deliberately does not pretend to
+// validate dimensions server-side. Worst case is an under-sized profile
+// photo — already mitigated by the UI gate and by photo-moderation review
+// on first display. This is intentionally deferred and tracked here so a
+// future hardening pass does not assume coverage exists.
 export const addPhoto = mutation({
   args: {
     userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
@@ -237,6 +270,19 @@ export const addPhoto = mutation({
     // Verify the authenticated user is modifying their own profile
     if (authenticatedUserId !== userId) {
       throw new Error('Unauthorized: cannot add photos to another user\'s profile');
+    }
+
+    // P2-PROFILE: Per-user rate limit on photo writes. The profile cap is 9
+    // photos total, so a legitimate user only calls this a handful of times
+    // per session. 5/min + 30/hr leaves room for normal upload bursts (e.g.
+    // batch-add 3-4 photos during onboarding) while hard-blocking automated
+    // upload thrash that would burn storage objects and moderation work.
+    const addLimit = await reserveActionSlots(ctx, userId, 'photo_add', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+      { kind: '1min', windowMs: 60 * 1000, max: 5 },
+    ]);
+    if (!addLimit.accept) {
+      throw new Error('rate_limited');
     }
 
     // BUGFIX #67: Validate storage ID exists before proceeding
@@ -462,6 +508,19 @@ export const replacePhoto = mutation({
       throw new Error('Unauthorized: cannot replace another user\'s photo');
     }
 
+    // P2-PROFILE: Per-user rate limit on photo writes. Replace is rarer than
+    // add (users typically swap a couple photos per session at most). 5/min +
+    // 30/hr leaves room for legitimate retry loops while hard-blocking
+    // automated replace thrash that would orphan storage objects and burn
+    // moderation work.
+    const replaceLimit = await reserveActionSlots(ctx, userId, 'photo_replace', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+      { kind: '1min', windowMs: 60 * 1000, max: 5 },
+    ]);
+    if (!replaceLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     // Get URL for new storage
     const url = await ctx.storage.getUrl(storageId);
     if (!url) {
@@ -525,6 +584,18 @@ export const deletePhoto = mutation({
     // SECURITY: Verify photo ownership before deletion
     if (photo.userId !== userId) {
       throw new Error('Unauthorized photo modification');
+    }
+
+    // P2-PROFILE: Per-user rate limit on photo writes. Delete is a deliberate
+    // user action; 5/min + 30/hr accommodates legitimate cleanup (e.g. user
+    // pruning their grid) while hard-blocking automated thrash that would
+    // churn storage cleanup queues and primary-photo reassignment.
+    const deleteLimit = await reserveActionSlots(ctx, userId, 'photo_delete', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+      { kind: '1min', windowMs: 60 * 1000, max: 5 },
+    ]);
+    if (!deleteLimit.accept) {
+      throw new Error('rate_limited');
     }
 
     // Get all user photos
@@ -638,6 +709,18 @@ export const reorderPhotos = mutation({
       throw new Error('Unauthorized: invalid or expired session');
     }
 
+    // P2-PROFILE: Per-user rate limit. Reordering is a drag-and-drop user
+    // action that may fire several times in a row while the user arranges
+    // their grid; 10/min covers that burst while hard-blocking automated
+    // ordering thrash that would churn primary-photo reassignment and
+    // primaryPhotoUrl writes.
+    const reorderLimit = await reserveActionSlots(ctx, userId, 'photo_reorder', [
+      { kind: '1min', windowMs: 60 * 1000, max: 10 },
+    ]);
+    if (!reorderLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     const publicPhotoIds: Id<'photos'>[] = [];
 
     // SECURITY: Verify all photos belong to user before reordering
@@ -681,16 +764,33 @@ export const reorderPhotos = mutation({
 
 // Get public user photos for profile grids. Verification reference photos stay
 // private to the verification system and are never returned here.
+//
+// P1-PROFILE FIX: Previously this query was unauthenticated and accepted ANY
+// `userId` (either Convex ID or auth string). An anonymous caller could iterate
+// every user and pull their full photo URL list — a mass enumeration of every
+// user's images including order, primary flag, NSFW flag, and storage IDs.
+// Hardening: require a session token; only the owner of `userId` (or an admin)
+// receives photo data. Anyone else receives `[]` (matches the existing
+// "safe empty array" convention so callers don't crash).
 export const getUserPhotos = query({
   args: {
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionTokenAny(ctx, (args.token ?? '').trim());
+    if (!callerId) return [];
+
     // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
     const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!convexUserId) {
       console.log('[getUserPhotos] User not found for authUserId:', args.userId);
       return [];
+    }
+
+    if (callerId !== convexUserId) {
+      const caller = await ctx.db.get(callerId);
+      if (!caller?.isAdmin) return [];
     }
 
     const photos = await ctx.db
@@ -709,20 +809,35 @@ export const getUserPhotos = query({
 });
 
 // Set primary photo
+// P3-PROFILE FIX: Standardized to the session-token auth pattern used
+// elsewhere in this file (validateSessionToken). Previously used
+// `ctx.auth.getUserIdentity()` which is inconsistent with the rest of the
+// photos surface and harder to reason about in tests. Grep confirmed zero
+// frontend callsites at the time of this change, so the signature change is
+// safe in-place. IDOR-P1-004 invariant preserved: userId is server-derived,
+// never client-supplied.
 export const setPrimaryPhoto = mutation({
   args: {
-    // IDOR-P1-004 FIX: Removed userId - now derived from server auth
+    // IDOR-P1-004 FIX: No client-supplied userId; derived from session token.
+    token: v.string(),
     photoId: v.id('photos'),
   },
   handler: async (ctx, args) => {
-    // IDOR-P1-004 FIX: Derive caller identity from server auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    // P3-PROFILE FIX: Session-token-based auth (standardized pattern).
+    const userId = await validateSessionToken(ctx, args.token.trim());
     if (!userId) {
-      throw new Error('Unauthorized: user not found');
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // P2-PROFILE: Per-user rate limit. Setting primary is a deliberate user
+    // action; 10/min accommodates rapid-toggle UI flows while hard-blocking
+    // automated primary-photo thrash that would churn primaryPhotoUrl writes
+    // and isPrimary flips across the user's photo set.
+    const primaryLimit = await reserveActionSlots(ctx, userId, 'photo_set_primary', [
+      { kind: '1min', windowMs: 60 * 1000, max: 10 },
+    ]);
+    if (!primaryLimit.accept) {
+      throw new Error('rate_limited');
     }
 
     const { photoId } = args;
@@ -756,7 +871,24 @@ export const setPrimaryPhoto = mutation({
   },
 });
 
-// Mark photo as NSFW (admin/moderation)
+// Mark photo as NSFW (admin moderation OR owner self-flag)
+// P3-PROFILE NOTE (owner-branch behavior — intentional, comment-only):
+// The owner branch lets a user toggle `isNsfw` on their own photos in
+// EITHER direction (flag or un-flag). This is a self-flag affordance, not a
+// moderation-trust grant:
+//   - Owner -> isNsfw=true is the "I want this gated behind blur" UX.
+//   - Owner -> isNsfw=false reverses that, which means an owner can clear
+//     a flag they themselves set. They cannot clear an admin-imposed flag
+//     of any stronger nature because admin moderation actions live in a
+//     separate path (`admin.moderatePhoto` / `markPhotoIneligible`) and
+//     also set `moderationStatus`/`moderationReason` fields that this
+//     mutation does NOT touch independently of `isNsfw`.
+// Trust-level distinction is enforced by the admin branch (which has full
+// authority) vs the owner branch (which can only toggle their own self-flag
+// view). If a future feature needs to prevent owners from un-flagging
+// content that an admin/auto-moderation system flagged, gate the owner
+// branch on the photo's `moderationStatus !== 'flagged_by_admin'` rather
+// than removing the owner-self-flag toggle entirely.
 export const markPhotoNsfw = mutation({
   args: {
     photoId: v.id('photos'),
@@ -850,8 +982,16 @@ export const saveVerificationPhoto = mutation({
  *
  * Returns success if photo meets requirements, or error with specific reason.
  */
+// P1-PROFILE FIX: Previously this mutation accepted a client-supplied `userId`
+// and called `ensureUserByAuthId` WITHOUT verifying the caller. An attacker
+// could overwrite ANY victim's `verificationReferencePhotoId` /
+// `verificationReferencePhotoUrl` to a storage object they uploaded,
+// poisoning the victim's verification reference photo. Hardening: require a
+// session token and confirm the token-derived caller matches the resolved
+// `userId`. Non-owners get an Unauthorized error.
 export const uploadVerificationReferencePhoto = mutation({
   args: {
+    token: v.string(),
     userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     storageId: v.id('_storage'),
     hasFace: v.boolean(),           // Client-side face detection result
@@ -864,8 +1004,30 @@ export const uploadVerificationReferencePhoto = mutation({
   handler: async (ctx, args) => {
     const { storageId, hasFace, faceCount, width, height, fileSize, mimeType } = args;
 
+    const callerId = await validateSessionTokenAny(ctx, (args.token ?? '').trim());
+    if (!callerId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    if (callerId !== userId) {
+      throw new Error('Unauthorized: cannot upload verification photo for another user');
+    }
+
+    // P2-PROFILE: Per-user rate limit. Verification reference upload is a
+    // one-time onboarding action with limited legitimate retry need (failed
+    // face detection, network retry). 3/hr + 10/day is well above any
+    // honest user flow and hard-blocks automated verification-spam loops
+    // that would burn moderator review time and storage objects.
+    const refUploadLimit = await reserveActionSlots(ctx, userId, 'verification_ref_upload', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!refUploadLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     console.log(`[PHOTO_GATE] start user=${userId}`);
 
@@ -1115,6 +1277,18 @@ export const setDisplayPhotoVariant = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
+    // P2-PROFILE: Per-user rate limit. Variant switching (original/blurred/
+    // cartoon) is a privacy preference toggle; 10/min covers any plausible
+    // UI usage and hard-blocks automated variant thrash that would inflate
+    // the photos table with derived-display rows and churn the cached
+    // primary photo URL.
+    const variantLimit = await reserveActionSlots(ctx, userId, 'photo_set_variant', [
+      { kind: '1min', windowMs: 60 * 1000, max: 10 },
+    ]);
+    if (!variantLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     const { variant, processedStorageId } = args;
 
     const user = await ctx.db.get(userId);
@@ -1197,12 +1371,25 @@ export const setDisplayPhotoVariant = mutation({
 /**
  * Get user's display photo (what others see).
  * Returns the display variant, not the private verification photo.
+ *
+ * P1-PROFILE FIX: Previously unauthenticated. Anonymous callers could pull
+ * the display photo URL + verification flag for any user. Hardening: require
+ * a session token; only the owner of `userId` (or an admin) receives data.
+ * Anyone else gets null (matches the existing "safe null" shape).
  */
 export const getDisplayPhoto = query({
   args: {
+    token: v.string(),
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionTokenAny(ctx, (args.token ?? '').trim());
+    if (!callerId) return null;
+    if (callerId !== args.userId) {
+      const caller = await ctx.db.get(callerId);
+      if (!caller?.isAdmin) return null;
+    }
+
     const user = await ctx.db.get(args.userId);
     if (!user) return null;
 
@@ -1218,21 +1405,39 @@ export const getDisplayPhoto = query({
  * Get verification reference photo (INTERNAL/ADMIN ONLY).
  * This is the private face photo used for verification.
  * Should only be accessible by the user themselves or admins for audit.
+ *
+ * P0-PROFILE-007 FIX: Previously this query took `requestingUserId` from the
+ * client and trusted it. Any anonymous caller who knew an admin user `_id`
+ * could pass it as `requestingUserId` to bypass the `isSelf || isAdmin` gate
+ * and read every user's private verification face photo URL — the most
+ * sensitive image users submit. Hardening:
+ *   1. Drop the trusted `requestingUserId` arg entirely. Caller identity is
+ *      derived from a session token via validateSessionToken — never from
+ *      client-supplied IDs.
+ *   2. Allow only owner-or-admin to read the URL/score/timestamp; everyone
+ *      else gets an Unauthorized error.
+ *   3. Preserve return shape for legitimate owner/admin callers.
  */
 export const getVerificationReferencePhoto = query({
   args: {
-    requestingUserId: v.id('users'),
+    token: v.string(),
     targetUserId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { requestingUserId, targetUserId } = args;
+    const { token, targetUserId } = args;
 
-    // Security: Only allow if requesting user is the same as target, or is an admin
-    const requestingUser = await ctx.db.get(requestingUserId);
-    if (!requestingUser) throw new Error('Requesting user not found');
+    // P0-PROFILE-007: derive caller from token, NEVER from args.
+    const callerId = await validateSessionTokenAny(ctx, (token ?? '').trim());
+    if (!callerId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
 
-    const isSelf = requestingUserId === targetUserId;
-    const isAdmin = requestingUser.isAdmin === true;
+    const isSelf = callerId === targetUserId;
+    let isAdmin = false;
+    if (!isSelf) {
+      const caller = await ctx.db.get(callerId);
+      isAdmin = caller?.isAdmin === true;
+    }
 
     if (!isSelf && !isAdmin) {
       throw new Error('Access denied: Verification photos are private.');
@@ -1252,12 +1457,26 @@ export const getVerificationReferencePhoto = query({
 
 /**
  * Check if user has completed the photo gate (has valid verification reference photo).
+ *
+ * P1-PROFILE FIX: Previously unauthenticated. Anonymous callers could
+ * enumerate every user's `faceVerificationStatus`, whether they have a
+ * verification photo, and current display variant. Hardening: require a
+ * session token; only the owner of `userId` (or an admin) receives data.
+ * Anyone else gets the safe `{hasPhoto:false, isVerified:false}` shape.
  */
 export const checkPhotoGateStatus = query({
   args: {
+    token: v.string(),
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionTokenAny(ctx, (args.token ?? '').trim());
+    if (!callerId) return { hasPhoto: false, isVerified: false };
+    if (callerId !== args.userId) {
+      const caller = await ctx.db.get(callerId);
+      if (!caller?.isAdmin) return { hasPhoto: false, isVerified: false };
+    }
+
     const user = await ctx.db.get(args.userId);
     if (!user) return { hasPhoto: false, isVerified: false };
 
@@ -1277,23 +1496,37 @@ export const checkPhotoGateStatus = query({
 /**
  * Debug query: Get detailed photo gate status for debugging.
  * Returns all relevant fields for troubleshooting photo upload and verification flow.
+ *
+ * P1-PROFILE FIX: Previously unauthenticated. This query leaks the private
+ * `verificationReferencePhotoUrl` for any user (alongside other gate state),
+ * which is the single most sensitive photo URL in the system. Hardening:
+ * require a session token; only the owner of `userId` (or an admin) receives
+ * data. Anyone else gets the safe `exists:false` shape with all photo fields
+ * set to null — never any URL or storage ID for another user.
  */
 export const getPhotoGateStatus = query({
   args: {
+    token: v.string(),
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
-    if (!user) {
-      return {
-        userId: args.userId,
-        exists: false,
-        verificationReferencePhotoId: null,
-        verificationReferencePhotoUrl: null,
-        displayPrimaryPhotoId: null,
-        faceVerificationStatus: null,
-      };
+    const callerId = await validateSessionTokenAny(ctx, (args.token ?? '').trim());
+    const safeEmpty = {
+      userId: args.userId,
+      exists: false,
+      verificationReferencePhotoId: null,
+      verificationReferencePhotoUrl: null,
+      displayPrimaryPhotoId: null,
+      faceVerificationStatus: null,
+    };
+    if (!callerId) return safeEmpty;
+    if (callerId !== args.userId) {
+      const caller = await ctx.db.get(callerId);
+      if (!caller?.isAdmin) return safeEmpty;
     }
+
+    const user = await ctx.db.get(args.userId);
+    if (!user) return safeEmpty;
 
     return {
       userId: args.userId,

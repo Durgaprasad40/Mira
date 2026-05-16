@@ -285,9 +285,11 @@ export default function ConfessionThreadScreen() {
   );
   // Local reply previews use the same safe frontend hero photo picker as the
   // composer. Persisted Confess payloads still come from server-owned snapshots.
+  // P1-PROFILE: getUserPhotos now requires a session token to prevent
+  // anonymous mass enumeration of every user's photo list.
   const primaryPhotos = useQuery(
     api.photos.getUserPhotos,
-    !isDemoMode && currentUserId ? { userId: currentUserId } : 'skip'
+    !isDemoMode && currentUserId && token ? { token, userId: currentUserId } : 'skip'
   );
   const createReplyMutation = useMutation(api.confessions.createReply);
   const updateReplyMutation = useMutation(api.confessions.updateReply);

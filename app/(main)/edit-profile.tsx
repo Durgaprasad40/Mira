@@ -138,10 +138,11 @@ export default function EditProfileScreen() {
   const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
   // Query backend photos to get photo IDs for replacement logic (live mode only)
-  // FIX: Use getUserPhotos with userId instead of getCurrentUserPhotos with token
+  // P1-PROFILE: getUserPhotos now requires a session token to prevent
+  // anonymous mass enumeration of every user's photo list.
   const backendPhotos = useQuery(
     api.photos.getUserPhotos,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && userId && token ? { token, userId } : 'skip'
   );
 
   const [timedOut, setTimedOut] = useState(false);
@@ -1543,8 +1544,8 @@ export default function EditProfileScreen() {
       }
 
       // PERSIST BLUR: Save global blur state to backend
-      // FIX: Backend only supports user-level blur via togglePhotoBlur, not per-photo blur
-      if (togglePhotoBlurMutation && userId) {
+      // P1-PROFILE: togglePhotoBlur now requires a session token to prevent IDOR.
+      if (togglePhotoBlurMutation && userId && token) {
         const shouldBlur = Object.values(blurredPhotos).some(b => b === true) || blurEnabled;
         const existingBlur = (currentUser as any)?.photoBlurred;
         const blurUnchanged = typeof existingBlur === 'boolean' ? existingBlur === shouldBlur : false;
@@ -1554,6 +1555,7 @@ export default function EditProfileScreen() {
         if (!blurUnchanged) {
           postSaveOps.push(
             togglePhotoBlurMutation({
+              token,
               authUserId: userId,
               blurred: shouldBlur,
             }),

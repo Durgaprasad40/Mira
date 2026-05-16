@@ -146,9 +146,11 @@ export default function AdditionalPhotosScreen() {
   };
 
   // Query backend photos for deletion (get photoIds)
+  // P1-PROFILE: getUserPhotos now requires a session token to prevent
+  // anonymous mass enumeration of every user's photo list.
   const backendPhotos = useQuery(
     api.photos.getUserPhotos,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && userId && token ? { token, userId: userId as Id<'users'> } : 'skip'
   );
 
   // Sync backend photos to backendUrlByIndex when they load

@@ -4,6 +4,7 @@ import { Id } from "./_generated/dataModel";
 import { api } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, validateOwnership, validateSessionToken } from "./helpers";
+import { reserveActionSlots } from "./actionRateLimits";
 import {
   DEFAULT_MAX_AGE,
   DEFAULT_MAX_DISTANCE_KM,
@@ -1286,13 +1287,42 @@ export const getEmailVerificationStatus = query({
 // 8B: Session Revocation on Deactivation
 // ============================================================================
 
-// Deactivate account (user or admin action)
+// Deactivate account (self-acted with session-revocation side-effect)
+// P3-PROFILE FIX: Previously accepted a bare `userId` with no caller auth,
+// which would have let any caller revoke any user's sessions if it were ever
+// wired up. Grep confirmed zero callers anywhere in app/ or convex/ (the
+// user-facing path is `users.deactivateAccount`), so adding session-token +
+// caller===target gating and per-user rate limits in-place is safe. Limits
+// mirror `users.deactivateAccount` (3/hr + 10/day) so a stolen-session
+// attacker cannot rapidly cycle deactivate/reactivate to thrash session
+// revocation, push routing, and discover visibility.
 export const deactivateAccount = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // P3-PROFILE FIX: Require caller to own the target userId.
+    const callerId = await validateSessionToken(ctx, args.token.trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== args.userId) {
+      throw new Error("Unauthorized: caller does not own target account");
+    }
+
+    // P3-PROFILE: Per-user rate limit on account lifecycle, mirroring
+    // `users.deactivateAccount`. Keyed off the validated caller so it cannot
+    // be exhausted by an anonymous attacker against a victim's userId.
+    const deactivateLimit = await reserveActionSlots(ctx, callerId, 'account_deactivate', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!deactivateLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     const { userId, reason } = args;
     const now = Date.now();
 
@@ -1336,12 +1366,31 @@ export const deactivateAccount = mutation({
   },
 });
 
-// Reactivate account
+// Reactivate account (self-acted)
+// P3-PROFILE FIX: Token + caller===target gate + rate limit added to the
+// legacy auth.ts variant. See deactivateAccount above for rationale.
 export const reactivateAccount = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionToken(ctx, args.token.trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== args.userId) {
+      throw new Error("Unauthorized: caller does not own target account");
+    }
+
+    const reactivateLimit = await reserveActionSlots(ctx, callerId, 'account_reactivate', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!reactivateLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     const user = await ctx.db.get(args.userId);
     if (!user) {
       throw new Error("User not found");
@@ -2066,6 +2115,20 @@ export const softDeleteAccount = mutation({
 
     // R-3: Enforce caller owns the requested authUserId (mirrors logout)
     const userId = await validateOwnership(ctx, token, authUserId);
+
+    // P2-PROFILE: Per-user rate limit on account lifecycle. Soft-delete is
+    // the most destructive lifecycle action — even though it's recoverable,
+    // it mass-revokes sessions and clears the push token. 1/hr + 3/day
+    // hard-blocks an attacker (with a stolen session) from cycling
+    // soft-delete to harass the legitimate user while still allowing the
+    // owner enough headroom for a corrective retry.
+    const softDeleteLimit = await reserveActionSlots(ctx, userId, 'account_soft_delete', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 3 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 1 },
+    ]);
+    if (!softDeleteLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) {

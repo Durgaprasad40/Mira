@@ -17,6 +17,7 @@ import { Id } from '@/convex/_generated/dataModel';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useDemoStore } from '@/stores/demoStore';
+import { useAuthStore } from '@/stores/authStore';
 import { PhotoSlots9, createEmptyPhotoSlots } from '@/types';
 
 // Photo storage directory (matches photo-upload.tsx)
@@ -96,7 +97,17 @@ export async function syncPhotosFromBackend(
     if (__DEV__) console.log('[PHOTO_SYNC] Starting sync for userId:', userId);
 
     // Fetch photos from Convex (SOURCE OF TRUTH)
+    // P1-PROFILE: getUserPhotos now requires a session token to prevent
+    // anonymous mass enumeration of every user's photo list. The token is
+    // read directly from the Zustand auth store so callers don't need to
+    // thread it through (this service runs outside React).
+    const token = useAuthStore.getState().token;
+    if (!token) {
+      if (__DEV__) console.log('[PHOTO_SYNC] No session token - skipping sync');
+      return { success: true, photosCount: 0, message: 'No session token' };
+    }
     const backendPhotos = await convex.query(api.photos.getUserPhotos, {
+      token,
       userId: userId as Id<'users'>,
     });
 

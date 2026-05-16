@@ -445,7 +445,13 @@ export default function PhotoUploadScreen() {
         console.log(`[DEMO_AUTH] PHOTO: Uploaded to storage, storageId=${storageId}`);
 
         // Step 2: Set verification reference photo in Convex
+        // P1-PROFILE: uploadVerificationReferencePhoto now requires a session
+        // token to prevent IDOR overwrite of another user's reference photo.
+        if (!token) {
+          throw new Error('Session expired. Please sign in again.');
+        }
         const result = await uploadVerificationReferencePhoto({
+          token,
           userId: userId as Id<'users'>,
           storageId,
           hasFace: true,
@@ -542,7 +548,10 @@ export default function PhotoUploadScreen() {
       // BUG FIX: Use uploadVerificationReferencePhoto (NOT addPhoto)
       // This mutation does NOT count towards the 9-photo limit
       console.log('[PHOTO_GATE] uploading verification reference photo using uploadVerificationReferencePhoto (NOT addPhoto)');
+      // P1-PROFILE: uploadVerificationReferencePhoto now requires a session
+      // token to prevent IDOR overwrite of another user's reference photo.
       const result = await uploadVerificationReferencePhoto({
+        token,
         userId: userId as Id<'users'>,
         storageId,
         hasFace: true, // Face validation happens server-side in face verification
@@ -558,8 +567,11 @@ export default function PhotoUploadScreen() {
       }
 
       // Step 3: Query photo gate status for debugging
+      // P1-PROFILE: getPhotoGateStatus now requires a session token to
+      // prevent anonymous enumeration of any user's gate state.
       console.log('[PHOTO_GATE] Querying gate status...');
       const gateStatus = await convex.query(api.photos.getPhotoGateStatus, {
+        token,
         userId: userId as Id<'users'>,
       });
       console.log('[PHOTO_GATE] status:', JSON.stringify(gateStatus));

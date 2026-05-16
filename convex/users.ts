@@ -971,6 +971,15 @@ export const getUserById = query({
       verificationStatus: user.verificationStatus || "unverified",
       city: user.city,
       distance: user.hideDistance === true ? undefined : distance,
+      // P3-PROFILE NOTE (privacy contract): `lastActive` is a presence signal
+      // and is suppressed when the target user has opted out of last-seen
+      // visibility (`showLastSeen === false`). The default (undefined) is
+      // treated as opt-in to match the historical behavior; flipping the
+      // default to opt-out is a product decision, not a security one.
+      // Important: callers must NOT fall back to other timestamp fields
+      // (e.g. `_creationTime`, `presenceUpdatedAt`) to reconstruct a
+      // last-seen value when this is undefined — doing so would bypass the
+      // user's privacy choice.
       lastActive: user.showLastSeen === false ? undefined : user.lastActive,
       lookingFor: user.lookingFor,
       relationshipIntent: normalizeRelationshipIntentForResponse(user.relationshipIntent),
@@ -1053,6 +1062,18 @@ export const updateProfilePrompts = mutation({
     const userId = await validateSessionToken(ctx, args.token);
     if (!userId) {
       throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // P2-PROFILE: Per-user rate limit so a tampered client can't spam prompt
+    // edits to burn writes or churn the moderation surface. 10/min + 60/hr
+    // sits well above any human edit cadence (the prompts screen is usually
+    // saved once per session) while hard-blocking obvious abuse loops.
+    const promptsLimit = await reserveActionSlots(ctx, userId, 'profile_prompts_update', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 60 },
+      { kind: '1min', windowMs: 60 * 1000, max: 10 },
+    ]);
+    if (!promptsLimit.accept) {
+      throw new Error('rate_limited');
     }
 
     const user = await ctx.db.get(userId);
@@ -1247,6 +1268,19 @@ export const updateProfile = mutation({
 
     // R-3: Enforce caller owns the requested authUserId (mirrors logout)
     const userId = await validateOwnership(ctx, token, authUserId);
+
+    // P2-PROFILE: Per-user rate limit. The edit-profile screen normally saves
+    // once per session; 10/min + 60/hr lets legitimate retries through (e.g.
+    // form validation tweak loops, photo re-saves) while hard-blocking
+    // automated profile-mutation spam that would burn writes and pollute the
+    // moderation surface.
+    const profileLimit = await reserveActionSlots(ctx, userId, 'profile_update', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 60 },
+      { kind: '1min', windowMs: 60 * 1000, max: 10 },
+    ]);
+    if (!profileLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     const normalizedName = normalizeOptionalTrimmedString(
       name,
@@ -2010,6 +2044,19 @@ export const updatePrivacySettings = mutation({
     // R-3: Enforce caller owns the requested authUserId (mirrors logout)
     const userId = await validateOwnership(ctx, token, authUserId);
 
+    // P2-PROFILE: Per-user rate limit. Privacy toggles are user-driven and
+    // cheap individually, but a tampered client could flip them in a tight
+    // loop to churn discover-eligibility and pause caches. 20/min + 200/day
+    // covers any plausible manual usage (a user might tap a few toggles in
+    // quick succession) while capping daily abuse.
+    const privacyLimit = await reserveActionSlots(ctx, userId, 'privacy_settings_update', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 200 },
+      { kind: '1min', windowMs: 60 * 1000, max: 20 },
+    ]);
+    if (!privacyLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
 
@@ -2066,6 +2113,18 @@ export const updateNotificationSettings = mutation({
     // R-3: Enforce caller owns the requested authUserId (mirrors logout)
     const userId = await validateOwnership(ctx, token, authUserId);
 
+    // P2-PROFILE: Per-user rate limit. Notification toggles are user-driven
+    // and individually cheap, but a tampered client could flip them in a
+    // tight loop to churn push routing decisions. 20/min + 200/day covers
+    // any plausible manual usage while capping daily abuse.
+    const notifLimit = await reserveActionSlots(ctx, userId, 'notif_settings_update', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 200 },
+      { kind: '1min', windowMs: 60 * 1000, max: 20 },
+    ]);
+    if (!notifLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
 
@@ -2097,23 +2156,97 @@ export const updateNotificationSettings = mutation({
   },
 });
 
+// P0-PROFILE-001 FIX: completeOnboardingStep was an unauthenticated mutation
+// that merged an arbitrary `data` payload into ctx.db.patch via Object.assign,
+// allowing any anonymous caller to set sensitive fields (isAdmin, isVerified,
+// isBanned, deletedAt, sessionsRevokedAt, pushToken, verificationStatus, etc.)
+// on any victim — total account takeover. Hardening:
+//   1. Require a valid session token (validateSessionToken) that resolves to
+//      the same Convex userId being patched (caller can only modify themselves).
+//   2. Replace Object.assign(updates, data) with a strict allowlist of safe
+//      onboarding fields. Any key outside the allowlist is silently dropped.
+//      No moderation/security/verification/push/auth-id field is in the list.
+//   3. Preserve return shape and the step==="completed" terminal behavior.
+
+// Allowlist of fields that are safe for the *owner themselves* to patch via
+// the onboarding step mutation. These are profile attributes the user fills
+// in during onboarding screens. Privilege / verification / moderation /
+// push-token / account-state / identity fields are NOT included and cannot
+// be set through this mutation.
+const ONBOARDING_STEP_ALLOWED_FIELDS = new Set<string>([
+  "name",
+  "dateOfBirth",
+  "gender",
+  "interestedIn",
+  "bio",
+  "height",
+  "weight",
+  "city",
+  "jobTitle",
+  "company",
+  "school",
+  "exercise",
+  "smoking",
+  "drinking",
+  "kids",
+  "education",
+  "religion",
+  "lookingFor",
+  "relationshipIntent",
+  "activities",
+  "hideAge",
+  "hideDistance",
+  "hideFromDiscover",
+  "showLastSeen",
+]);
+
 // Complete onboarding step
 export const completeOnboardingStep = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
     step: v.string(),
     data: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
-    const { userId, step, data } = args;
+    const { token, userId, step, data } = args;
+
+    // P0-PROFILE-001: Require authenticated caller and verify they own the
+    // userId being patched. Reject otherwise — no IDOR.
+    const callerId = await validateSessionToken(ctx, (token ?? "").trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== userId) {
+      throw new Error("Unauthorized: cannot modify another user's onboarding state");
+    }
+
+    // P2-PROFILE: Per-user rate limit. Onboarding screens advance step-by-step
+    // (~10-20 total), with occasional retries; 30/min + 200/hr accommodates
+    // the bursty onboarding flow (esp. retry loops after validation) while
+    // hard-blocking automated step-thrash that would corrupt the moderation
+    // and verification routing queues.
+    const onboardingLimit = await reserveActionSlots(ctx, userId, 'onboarding_step', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 200 },
+      { kind: '1min', windowMs: 60 * 1000, max: 30 },
+    ]);
+    if (!onboardingLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     const updates: Record<string, unknown> = {
       onboardingStep: step,
     };
 
-    // Merge any additional data
-    if (data) {
-      Object.assign(updates, data);
+    // P0-PROFILE-001: Strict allowlist filter. Any field not in the
+    // ONBOARDING_STEP_ALLOWED_FIELDS set is silently dropped so a crafted
+    // client payload cannot elevate privilege or bypass verification.
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      for (const key of Object.keys(data)) {
+        if (ONBOARDING_STEP_ALLOWED_FIELDS.has(key)) {
+          updates[key] = (data as Record<string, unknown>)[key];
+        }
+      }
     }
 
     // Check if this is the final step
@@ -2127,13 +2260,41 @@ export const completeOnboardingStep = mutation({
   },
 });
 
-// Update push token
+// P0-PROFILE-002 FIX: updatePushToken was unauthenticated and could be used
+// to overwrite any victim's pushToken (and forcibly re-enable notifications),
+// hijacking their push delivery. Hardening: require a valid session token
+// whose owner matches the userId being patched. Owner registering their own
+// device push token may continue to opt-in `notificationsEnabled: true`
+// (current product behavior); no attacker can flip the flag because the
+// caller must own the target userId.
 export const updatePushToken = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
     pushToken: v.string(),
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionToken(ctx, (args.token ?? "").trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== args.userId) {
+      throw new Error("Unauthorized: cannot update another user's push token");
+    }
+
+    // P2-PROFILE: Per-user rate limit. Push tokens normally refresh at app
+    // launch or when the device rotates them — a few times per day at most.
+    // 5/min + 20/hr leaves room for legitimate token refresh churn (e.g.
+    // multi-device re-login or APNs token rotation) while hard-blocking
+    // automated push-routing thrash.
+    const pushLimit = await reserveActionSlots(ctx, callerId, 'push_token_update', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 20 },
+      { kind: '1min', windowMs: 60 * 1000, max: 5 },
+    ]);
+    if (!pushLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     await ctx.db.patch(args.userId, {
       pushToken: args.pushToken,
       notificationsEnabled: true,
@@ -2575,13 +2736,30 @@ export const reportUser = mutation({
 
 // Basic automated moderation signal helper:
 // Count reports against a user in a recent window (default 30 days).
+// P1-PROFILE FIX: Previously unauthenticated. Anonymous callers could
+// enumerate the report count of any user — a moderation-signal leak that
+// reveals which accounts have been reported and approximately how often.
+// Hardening: require a valid session token and that the caller is an admin.
+// Non-admin callers receive a safe `count: 0, authorized: false` shape so we
+// never leak the existence or magnitude of report activity.
 export const getRecentReportCountForUser = query({
   args: {
+    token: v.string(),
     reportedUserId: v.id("users"),
     days: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const days = Math.max(1, Math.min(args.days ?? 30, 365));
+
+    const callerId = await validateSessionToken(ctx, (args.token ?? "").trim());
+    if (!callerId) {
+      return { reportedUserId: args.reportedUserId, days, count: 0, authorized: false as const };
+    }
+    const caller = await ctx.db.get(callerId);
+    if (!caller?.isAdmin) {
+      return { reportedUserId: args.reportedUserId, days, count: 0, authorized: false as const };
+    }
+
     const windowStart = Date.now() - days * 24 * 60 * 60 * 1000;
 
     const reports = await ctx.db
@@ -2590,20 +2768,38 @@ export const getRecentReportCountForUser = query({
       .filter((q) => q.gte(q.field("createdAt"), windowStart))
       .collect();
 
-    return { reportedUserId: args.reportedUserId, days, count: reports.length };
+    return { reportedUserId: args.reportedUserId, days, count: reports.length, authorized: true as const };
   },
 });
 
 // Generate an upload URL for report evidence (Convex storage)
+// P3-PROFILE FIX: Previously only took `authUserId` so any caller that knew
+// a victim's authUserId could mint upload URLs on their behalf (storage-quota
+// burn vector). Now requires a session token bound to the caller via
+// `validateOwnership`, and applies a per-user rate limit keyed off the
+// server-validated caller identity. Grep confirmed zero frontend callsites
+// (no report-evidence upload flow is wired in the app yet), so the signature
+// change is safe in-place. Return shape preserved: `{ success, uploadUrl? }`
+// for success and `{ success: false, error }` for denial.
 export const generateReportEvidenceUploadUrl = mutation({
   args: {
-    // Auth-safe: require authUserId to prevent anonymous storage abuse
+    token: v.string(),
     authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const reporterId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!reporterId) {
-      return { success: false, error: 'unauthorized' };
+    // P3-PROFILE FIX: Bind to the session-validated caller.
+    const reporterId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    // P3-PROFILE: Per-user rate limit on evidence upload URL minting. Keyed
+    // off the validated caller (never the client-supplied authUserId), so an
+    // attacker cannot exhaust a victim's quota. 20/hr is generous for
+    // legitimate multi-photo report flows while hard-blocking automated
+    // storage-quota burn.
+    const evidenceLimit = await reserveActionSlots(ctx, reporterId, 'report_evidence_upload_url', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 20 },
+    ]);
+    if (!evidenceLimit.accept) {
+      return { success: false, error: 'rate_limited' };
     }
 
     const uploadUrl = await ctx.storage.generateUploadUrl();
@@ -2621,6 +2817,18 @@ export const deactivateAccount = mutation({
   handler: async (ctx, args) => {
     // R-3: Enforce caller owns the requested authUserId (mirrors logout)
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    // P2-PROFILE: Per-user rate limit on account lifecycle. Deactivate is a
+    // rare, deliberate user action; 3/hr + 10/day prevents an attacker (with
+    // a stolen session) from rapidly cycling deactivate/reactivate to thrash
+    // session revocation, push routing, and discover visibility.
+    const deactivateLimit = await reserveActionSlots(ctx, userId, 'account_deactivate', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!deactivateLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     const now = Date.now();
     // Full-account deactivation: hide user everywhere + revoke existing sessions.
@@ -2640,6 +2848,18 @@ export const reactivateAccount = mutation({
   handler: async (ctx, args) => {
     // R-3: Enforce caller owns the requested authUserId (mirrors logout)
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    // P2-PROFILE: Per-user rate limit on account lifecycle. Reactivate is a
+    // rare, deliberate user action; 3/hr + 10/day prevents an attacker from
+    // rapidly cycling deactivate/reactivate to thrash session revocation,
+    // push routing, and discover visibility.
+    const reactivateLimit = await reserveActionSlots(ctx, userId, 'account_reactivate', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!reactivateLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     await ctx.db.patch(userId, { isActive: true, lastActive: Date.now() });
     return { success: true };
@@ -3010,16 +3230,29 @@ export const completeOnboarding = mutation({
 
 /** Toggle blur on/off. No hard-block — user can always toggle freely. */
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own photo blur
+// P1-PROFILE FIX: Previously this mutation accepted a client-supplied
+// `authUserId` and resolved it server-side WITHOUT verifying the caller
+// actually owned that auth ID. Any caller could flip `photoBlurred` on any
+// account (visual-privacy IDOR). Hardening: require a session token and use
+// `validateOwnership` so the token-derived caller MUST match `args.authUserId`.
 export const togglePhotoBlur = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     blurred: v.boolean(),
   },
   handler: async (ctx, args) => {
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    // P2-PROFILE: Per-user rate limit. The blur toggle is a one-tap user
+    // action; 20/min covers any plausible UI usage (rapid toggling while
+    // previewing) while hard-blocking automated visibility churn that would
+    // burn writes and thrash cached profile cards.
+    const blurLimit = await reserveActionSlots(ctx, userId, 'photo_blur_toggle', [
+      { kind: '1min', windowMs: 60 * 1000, max: 20 },
+    ]);
+    if (!blurLimit.accept) {
+      throw new Error('rate_limited');
     }
 
     const user = await ctx.db.get(userId);

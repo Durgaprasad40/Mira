@@ -197,9 +197,9 @@ export default function SettingsScreen() {
       setShowBlurNotice(true);
     } else {
       if (isDemoMode) { setBlurEnabled(false); return; }
-      if (!userId || !togglePhotoBlurMut) return;
-      // FIX: Backend expects { authUserId }, not { token }
-      togglePhotoBlurMut({ authUserId: userId, blurred: false })
+      if (!userId || !token || !togglePhotoBlurMut) return;
+      // P1-PROFILE: togglePhotoBlur now requires a session token to prevent IDOR.
+      togglePhotoBlurMut({ token, authUserId: userId, blurred: false })
         .then(() => setBlurEnabled(false))
         .catch(() => Toast.show('Couldn\u2019t update blur setting. Please try again.'));
     }
@@ -208,10 +208,10 @@ export default function SettingsScreen() {
   const handleBlurConfirm = async () => {
     setShowBlurNotice(false);
     if (isDemoMode) { setBlurEnabled(true); return; }
-    if (!userId || !togglePhotoBlurMut) return;
+    if (!userId || !token || !togglePhotoBlurMut) return;
     try {
-      // FIX: Backend expects { authUserId }, not { token }
-      await togglePhotoBlurMut({ authUserId: userId, blurred: true });
+      // P1-PROFILE: togglePhotoBlur now requires a session token to prevent IDOR.
+      await togglePhotoBlurMut({ token, authUserId: userId, blurred: true });
       setBlurEnabled(true);
     } catch {
       Toast.show('Couldn\u2019t update blur setting. Please try again.');

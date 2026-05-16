@@ -33,10 +33,11 @@ export default function VerificationScreen() {
   const cameraRef = useRef<CameraView>(null);
   const [permission, requestPermission] = useCameraPermissions();
 
-  // FIX: Backend expects { userId }, not { token }
+  // P0-PROFILE-004: backend now requires both `token` and `userId` and only
+  // returns data to the owner/admin. Skip the query when either is missing.
   const verificationStatus = useQuery(
     api.verification.getVerificationStatus,
-    !isDemoMode && userId ? { userId } : "skip"
+    !isDemoMode && userId && token ? { token, userId } : "skip"
   );
 
   const createSession = useMutation(api.verification.createVerificationSession);

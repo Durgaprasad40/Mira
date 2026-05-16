@@ -1,7 +1,8 @@
 import { v } from "convex/values";
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from "./_generated/server";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId } from "./helpers";
+import { resolveUserIdByAuthId, validateSessionToken } from "./helpers";
+import { reserveActionSlots } from "./actionRateLimits";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -94,15 +95,27 @@ export const createVerificationSession = mutation({
 });
 
 // Review a verification session (admin action)
+// P0-PROFILE-003 FIX: This mutation patches `users.isVerified = true` and
+// `verificationStatus = "verified"` for the session's owner — the verified
+// badge is the central trust signal of the app. The function previously had
+// NO auth/admin gate, allowing any unauthenticated caller to self-approve
+// (chained with the unauthenticated `getVerificationStatus` which leaked
+// `pendingSessionId`). Hardening: require an admin session token via the
+// existing local `requireAdmin` helper. Normal users cannot call this.
 export const reviewVerificationSession = mutation({
   args: {
+    token: v.string(),
     sessionId: v.id("verificationSessions"),
     approved: v.boolean(),
     rejectionReason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { sessionId, approved, rejectionReason } = args;
+    const { token, sessionId, approved, rejectionReason } = args;
     const now = Date.now();
+
+    // P0-PROFILE-003: Admin-only. requireAdmin throws on missing/expired/
+    // non-admin sessions and returns the admin user otherwise.
+    await requireAdmin(ctx, (token ?? "").trim());
 
     const session = await ctx.db.get(sessionId);
     if (!session) throw new Error("Session not found");
@@ -135,8 +148,14 @@ export const reviewVerificationSession = mutation({
 });
 
 // Retry verification (rate-limited)
+// P0-PROFILE-006 FIX: Previously this mutation was unauthenticated and any
+// anonymous caller could force any victim into `verificationStatus =
+// "pending_verification"` by passing the victim's userId. Hardening: require
+// a valid session whose owner matches the userId being modified. The existing
+// per-target 30-day rejected-session cap is preserved.
 export const retryVerification = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
     selfieStorageId: v.id("_storage"),
     metadata: v.optional(
@@ -148,8 +167,31 @@ export const retryVerification = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { userId, selfieStorageId, metadata } = args;
+    const { token, userId, selfieStorageId, metadata } = args;
     const now = Date.now();
+
+    // P0-PROFILE-006: caller must own the target userId.
+    const callerId = await validateSessionToken(ctx, (token ?? "").trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== userId) {
+      throw new Error("Unauthorized: cannot retry verification for another user");
+    }
+
+    // P2-PROFILE: Per-user rate limit on verification retry. Layered with the
+    // existing 30-day rejected-session cap below — this short-window guard
+    // hard-blocks rapid-fire retry loops that would burn moderator review
+    // bandwidth and create thrash in the verificationSessions table.
+    // 3/hr + 10/day is generous for legitimate retry behavior (selfie didn't
+    // upload, network retry) but stops automated abuse cold.
+    const retryLimit = await reserveActionSlots(ctx, userId, 'verification_retry', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!retryLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     // Rate limit: max 3 rejected sessions per 30 days
     const recentRejected = await ctx.db
@@ -199,14 +241,38 @@ export const retryVerification = mutation({
 });
 
 // Get verification status for a user
+// P0-PROFILE-004 FIX: Previously this query was unauthenticated and returned
+// `pendingSessionId` for any user, which chained with the unauthenticated
+// `reviewVerificationSession` to enable self-approval of any victim's
+// verification. Hardening:
+//   1. Require a session token; reject unauthenticated callers (return null).
+//   2. Only return data when the caller is the owner of `userId`, OR the
+//      caller is an admin. Other callers receive null (matches the existing
+//      "safe null shape" convention used elsewhere in this file).
+//   3. `pendingSessionId` is only returned to the owner / admin — never to
+//      arbitrary callers. (After auth gating it is by definition only
+//      returned to owner/admin since other callers get null.)
 export const getVerificationStatus = query({
   args: {
+    token: v.string(),
     userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
+    // P0-PROFILE-004: require a valid session
+    const callerId = await validateSessionToken(ctx, (args.token ?? "").trim());
+    if (!callerId) return null;
+
     // Map authUserId -> Convex Id<"users"> if needed
     const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
     if (!convexUserId) return null;
+
+    // P0-PROFILE-004: owner-or-admin gate. Non-owner non-admin callers get
+    // null (do not leak status, completion timestamp, or pendingSessionId).
+    if (callerId !== convexUserId) {
+      const caller = await ctx.db.get(callerId);
+      if (!caller?.isAdmin) return null;
+    }
+
     const user = await ctx.db.get(convexUserId);
     if (!user) return null;
 
@@ -229,11 +295,38 @@ export const getVerificationStatus = query({
 });
 
 // Dismiss verification reminder
+// P1-PROFILE FIX: Previously this mutation accepted any `userId` and would
+// patch that user's `verificationReminderDismissedAt`, allowing one user to
+// silently dismiss reminders on every other user's account (mass IDOR).
+// Hardening: require a session token and confirm the token-derived caller is
+// the same as `args.userId`. Non-owners get an Unauthorized error.
 export const dismissVerificationReminder = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionToken(ctx, (args.token ?? "").trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== args.userId) {
+      throw new Error("Unauthorized: cannot dismiss reminder for another user");
+    }
+
+    // P2-PROFILE: Per-user rate limit. The dismiss reminder action is a
+    // single-tap user gesture; 10/hr + 30/day is comfortably above any
+    // honest UI flow (user sees the banner, dismisses it once or twice
+    // across the day) and hard-blocks automated dismissal churn that
+    // would defeat the reminder feedback loop.
+    const dismissLimit = await reserveActionSlots(ctx, callerId, 'verification_dismiss', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 30 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 10 },
+    ]);
+    if (!dismissLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     await ctx.db.patch(args.userId, {
       verificationReminderDismissedAt: Date.now(),
     });
@@ -261,21 +354,66 @@ type VerificationReason =
  * - If unclear/no face → pending_manual (needs human review)
  * - If clearly fake/NSFW → rejected
  */
+// P0-PROFILE-005 FIX: Previously this mutation was unauthenticated AND
+// trusted the client-supplied `faceDetectionResult.confidence` to set
+// `isVerified=true` / `verificationStatus="verified"` /
+// `verificationEnforcementLevel="none"`. An attacker could submit
+// `{ hasFace:true, faceCount:1, confidence:1.0, isBlurry:false }` and
+// auto-verify any account (combined with the photos.uploadVerificationReferencePhoto
+// IDOR, even any victim account). Hardening:
+//   1. Require a session token; caller must own the target userId.
+//   2. Never auto-mark the user as verified based on client-supplied
+//      confidence. Client metadata is recorded only on the photo's hasFace
+//      flag (non-authoritative) and steers the flow toward manual review or
+//      a `pending_manual` queue. Only an authenticated admin (via
+//      `reviewVerificationSession` / `adminReviewVerification`) or the
+//      server-side face verification action can transition the user to
+//      `verified`. The client may NOT set `isVerified` here under any
+//      `confidence` value.
+//   3. Return shape preserved (`{ success, status, reason }`) so existing
+//      frontends continue to function; in particular, what used to be the
+//      `"verified"` branch now resolves to `"pending_manual"` with reason
+//      `manual_review_required` so the UI shows "pending review" instead of
+//      "verified". Server-side / admin verification finishes the flow.
 export const processPhotoVerification = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
     photoId: v.id("photos"),
-    // Client-side face detection results (basic checks)
+    // Client-side face detection results (NON-AUTHORITATIVE — only used to
+    // pre-flag obviously bad uploads and to seed the `photos.hasFace` flag).
     faceDetectionResult: v.object({
       hasFace: v.boolean(),
       faceCount: v.number(),
-      confidence: v.number(), // 0-1 confidence score
+      confidence: v.number(), // 0-1 confidence score (NOT trusted for verification)
       isBlurry: v.boolean(),
     }),
   },
   handler: async (ctx, args) => {
-    const { userId, photoId, faceDetectionResult } = args;
+    const { token, userId, photoId, faceDetectionResult } = args;
     const now = Date.now();
+
+    // P0-PROFILE-005: caller must own the target userId.
+    const callerId = await validateSessionToken(ctx, (token ?? "").trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== userId) {
+      throw new Error("Unauthorized: cannot process verification for another user");
+    }
+
+    // P2-PROFILE: Per-user rate limit. Each call patches the photo's hasFace
+    // flag and routes verification state — a tampered client could spin this
+    // to thrash the verification queue. 3/hr + 10/day is well above any
+    // legitimate retry pattern (typically 1-2 attempts per upload) and
+    // hard-blocks automated abuse.
+    const processLimit = await reserveActionSlots(ctx, userId, 'verification_process', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!processLimit.accept) {
+      throw new Error('rate_limited');
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -285,56 +423,36 @@ export const processPhotoVerification = mutation({
       throw new Error("Photo not found or doesn't belong to user");
     }
 
-    // Update photo's hasFace flag
+    // Update photo's hasFace flag (non-authoritative client metadata)
     await ctx.db.patch(photoId, { hasFace: faceDetectionResult.hasFace });
 
-    // Analyze results and determine verification status
-    let newStatus: "verified" | "pending_manual" | "rejected" = "pending_manual";
+    // P0-PROFILE-005: Determine routing only. The high-confidence
+    // auto-approve branch is REMOVED — under no client-supplied value can
+    // this mutation mark the user as `verified`. Best-case outcome is
+    // `pending_manual` for the admin/server-side review pipeline.
+    let newStatus: "pending_manual" = "pending_manual";
     let reason: VerificationReason | undefined;
 
     if (!faceDetectionResult.hasFace) {
-      // No face detected → needs manual review
-      newStatus = "pending_manual";
       reason = "no_face_detected";
     } else if (faceDetectionResult.faceCount > 1) {
-      // Multiple faces → needs manual review (which one is the user?)
-      newStatus = "pending_manual";
       reason = "multiple_faces";
     } else if (faceDetectionResult.isBlurry) {
-      // Blurry → needs manual review
-      newStatus = "pending_manual";
       reason = "blurry";
     } else if (faceDetectionResult.confidence < 0.3) {
-      // Low confidence → needs manual review
-      newStatus = "pending_manual";
       reason = "low_quality";
-    } else if (faceDetectionResult.confidence >= 0.7) {
-      // High confidence single face → auto-approve
-      newStatus = "verified";
-      reason = undefined;
     } else {
-      // Medium confidence → manual review to be safe
-      newStatus = "pending_manual";
+      // P0-PROFILE-005: Even confidence >= 0.7 routes to manual review now.
+      // Client confidence is untrusted; only an admin / server-side verifier
+      // may transition the user to `verified`.
       reason = "manual_review_required";
     }
 
-    // Update user verification status
+    // Update user verification status (NEVER set isVerified here)
     const updates: Record<string, unknown> = {
       verificationStatus: newStatus,
     };
-
-    if (reason) {
-      updates.photoVerificationReason = reason;
-    } else {
-      // Clear reason if verified
-      updates.photoVerificationReason = undefined;
-    }
-
-    if (newStatus === "verified") {
-      updates.isVerified = true;
-      updates.verificationCompletedAt = now;
-      updates.verificationEnforcementLevel = "none";
-    }
+    updates.photoVerificationReason = reason;
 
     await ctx.db.patch(userId, updates);
 
@@ -559,12 +677,31 @@ export const adminReviewVerification = mutation({
 /**
  * 8A: Check if user can interact (match/chat).
  * Returns false if user is not verified or is rejected.
+ *
+ * P1-PROFILE FIX: Previously unauthenticated. Anonymous callers could
+ * enumerate any user's verification status, banned/active flags, and the
+ * exact reason string ("banned", "rejected", "pending_auto", etc.).
+ * Hardening: require session token; only the owner (or an admin) gets the
+ * full breakdown. All other callers get a safe `{canInteract:false,
+ * reason:"unauthorized"}` shape, with no information about the target.
  */
 export const canUserInteract = query({
   args: {
+    token: v.string(),
     userId: v.id("users"),
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionToken(ctx, (args.token ?? "").trim());
+    if (!callerId) {
+      return { canInteract: false, reason: "unauthorized" };
+    }
+    if (callerId !== args.userId) {
+      const caller = await ctx.db.get(callerId);
+      if (!caller?.isAdmin) {
+        return { canInteract: false, reason: "unauthorized" };
+      }
+    }
+
     const user = await ctx.db.get(args.userId);
     if (!user) return { canInteract: false, reason: "user_not_found" };
 
@@ -615,12 +752,43 @@ export const canUserInteract = query({
 /**
  * 8A: User action to re-upload photo after rejection.
  * Clears rejection status and starts fresh verification.
+ *
+ * P1-PROFILE FIX: Previously unauthenticated. Any caller could reset any
+ * rejected user back to "unverified", erasing the moderator's rejection
+ * decision. Hardening: require session token; only the owner of `userId`
+ * (or an admin) may clear the rejection.
  */
 export const clearRejectionForReupload = mutation({
   args: {
+    token: v.string(),
     userId: v.id("users"),
   },
   handler: async (ctx, args) => {
+    const callerId = await validateSessionToken(ctx, (args.token ?? "").trim());
+    if (!callerId) {
+      throw new Error("Unauthorized: invalid or expired session");
+    }
+    if (callerId !== args.userId) {
+      const caller = await ctx.db.get(callerId);
+      if (!caller?.isAdmin) {
+        throw new Error("Unauthorized: cannot clear rejection for another user");
+      }
+    }
+
+    // P2-PROFILE: Per-user rate limit. Clear-rejection unwinds the
+    // moderator's decision on a rejected verification — it must remain
+    // available for the user's legitimate re-upload flow but not be loopable.
+    // 3/hr + 10/day matches the verification retry budget so an attacker
+    // can't churn rejected → unverified → rejected to game moderation.
+    // Keyed to callerId (admin acting on someone else hits their own bucket).
+    const clearLimit = await reserveActionSlots(ctx, callerId, 'verification_clear_rejection', [
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 3 },
+    ]);
+    if (!clearLimit.accept) {
+      throw new Error('rate_limited');
+    }
+
     const user = await ctx.db.get(args.userId);
     if (!user) throw new Error("User not found");
 
