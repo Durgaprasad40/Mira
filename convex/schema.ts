@@ -2690,14 +2690,42 @@ export default defineSchema({
     .index('by_expires', ['expiresAt']),
 
   // Chat Room Moderation Log (system/admin audit trail for room safety actions)
+  //
+  // P3-2: The original schema accepted only `actor === 'system'` rows
+  // (auto-timeouts and review-required flags raised by the auto-moderation
+  // pipeline). The union below is widened additively to also capture
+  // human-driven moderation events (room admins and self-service reporters)
+  // so promote / demote / kickAndBan / mute toggles / report submissions
+  // are durable for post-incident review. Existing system-actor rows
+  // remain valid under the widened unions; no migration is needed.
   chatRoomModerationLog: defineTable({
-    actor: v.literal('system'),
-    actorRole: v.literal('system'),
+    actor: v.union(v.literal('system'), v.literal('user')),
+    actorRole: v.union(
+      v.literal('system'),
+      v.literal('admin'),
+      v.literal('user')
+    ),
+    // P3-2: For non-system actors this is the moderator / reporter user id.
+    // System rows leave this undefined.
+    actorUserId: v.optional(v.id('users')),
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
     action: v.union(
+      // Existing system actions:
       v.literal('auto_timeout_applied'),
-      v.literal('admin_review_required')
+      v.literal('admin_review_required'),
+      // P3-2 — admin (room creator) actions:
+      v.literal('admin_promoted'),
+      v.literal('admin_demoted'),
+      v.literal('admin_kicked_banned'),
+      v.literal('admin_muted_user'),
+      v.literal('admin_unmuted_user'),
+      v.literal('admin_closed_room'),
+      // P3-2 — self-service actions:
+      v.literal('user_muted_room'),
+      v.literal('user_unmuted_room'),
+      v.literal('user_reported_user'),
+      v.literal('user_reported_message')
     ),
     reason: v.string(),
     durationMs: v.optional(v.number()),
@@ -2707,7 +2735,9 @@ export default defineSchema({
   })
     .index('by_room_created', ['roomId', 'createdAt'])
     .index('by_target_created', ['targetUserId', 'createdAt'])
-    .index('by_action_created', ['action', 'createdAt']),
+    .index('by_action_created', ['action', 'createdAt'])
+    // P3-2: list a single moderator's actions in chronological order.
+    .index('by_actor_created', ['actorUserId', 'createdAt']),
 
   // Chat Room Join Requests table (Phase-2: password + admin approval)
   chatRoomJoinRequests: defineTable({

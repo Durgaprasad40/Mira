@@ -18,6 +18,183 @@ import {
   requireChatRoomTermsAccepted,
   requirePrivateRoomAdult,
 } from './lib/userPolicyGates';
+import { reserveActionSlots, type RateLimitWindow } from './actionRateLimits';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT ROOMS — per-user action rate-limit windows (P1-4, P1-7, P2-7, P2-8).
+//
+// Centralized here so every Chat Rooms mutation that mutates server state
+// shares one consistent ladder. All windows are user-keyed via
+// `reserveActionSlots(ctx, userId, action, windows)` and use stable
+// `action` strings prefixed `cr_…` so the actionRateLimits table cannot
+// collide with non-Chat-Rooms surfaces.
+//
+// Order matters only for which `windowKind` surfaces on denial; correctness
+// is unaffected. We use 1m + 1h pairs for write-heavy actions and a
+// single window for low-cardinality / housekeeping actions.
+// ─────────────────────────────────────────────────────────────────────────────
+const CR_SEND_MESSAGE_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 10 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+];
+const CR_DM_SEND_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 10 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+];
+const CR_REACTION_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 30 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 600 },
+];
+const CR_REPORT_WINDOWS: RateLimitWindow[] = [
+  { kind: 'hour', windowMs: 60 * 60_000, max: 10 },
+  { kind: 'day', windowMs: 24 * 60 * 60_000, max: 20 },
+];
+const CR_UPLOAD_URL_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 10 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 60 },
+];
+const CR_MOD_ACTION_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 30 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 300 },
+];
+const CR_MUTE_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 30 },
+];
+const CR_PRESENCE_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 120 },
+];
+const CR_MENTION_READ_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 60 },
+];
+const CR_DM_TYPING_WINDOWS: RateLimitWindow[] = [
+  // P2-6: ~1/sec floor + per-minute ceiling so a flapping client cannot
+  // saturate the typing-status table.
+  { kind: 'minute', windowMs: 60_000, max: 60 },
+];
+const CR_DM_THREAD_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 30 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 200 },
+];
+const CR_DM_READ_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 120 },
+];
+const CR_PROFILE_UPDATE_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 10 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 30 },
+];
+const CR_ROOM_LIFECYCLE_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 5 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 30 },
+];
+const CR_OPEN_VISUAL_MEDIA_WINDOWS: RateLimitWindow[] = [
+  { kind: 'minute', windowMs: 60_000, max: 60 },
+  { kind: 'hour', windowMs: 60 * 60_000, max: 600 },
+];
+const CR_MARK_REPORTED_WINDOWS: RateLimitWindow[] = [
+  { kind: 'hour', windowMs: 60 * 60_000, max: 30 },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P3 — STATUS LEDGER
+//
+// This block records the current state of each P3 hardening item. "APPLIED"
+// items are live in this file (or `convex/schema.ts`). "DEFERRED" items are
+// NOT production blockers — each has a documented reason and a follow-up
+// path. Anyone resuming Chat Rooms work should treat APPLIED items as
+// finished and the DEFERRED items as backlog.
+//
+//   P3-1  APPLIED.  `sendMessage.senderId` retained on the validator as
+//         `v.optional()` and silently dropped by the handler (resolved
+//         senderId always comes from `requireRoomSendAccess`). A sharpened
+//         deprecation comment now lives on the validator. Hard-removal is
+//         a coordinated client-release task — not a backend blocker.
+//
+//   P3-2  APPLIED.  `chatRoomModerationLog` (already in schema) widened
+//         additively to also store admin- and user-actor events. Helper
+//         `writeChatRoomUserModerationLog()` writes best-effort rows on
+//         promote / demote / kickAndBan / room close / report-message /
+//         report-user. Personal "user mutes user" toggles are NOT logged
+//         (self-preference, not destructive moderation). Audit-log
+//         failures never roll back the underlying action.
+//
+//   P3-3  APPLIED in two places:
+//         (a) `openChatRoomVisualMedia` re-checks `room.deletedAt` before
+//             issuing a storage URL (P3-3 visual-media live recheck).
+//         (b) `createPrivateRoom` carries an explicit security-contract
+//             comment explaining why the demo-mode bypass cannot be
+//             abused in production (`creator.isDemo === true` on the
+//             persisted row is required in addition to the client flag).
+//
+//   P3-4  DEFERRED (not production-blocking).  Circuit breaker for repeated
+//         rate-limit denials per user / IP. The per-user
+//         `reserveChatRoomAction` ladder already bounds abuse cost; a
+//         circuit breaker is an observability-driven optimisation. Convex
+//         does not currently expose client IP at the mutation boundary,
+//         so a meaningful keying surface does not exist without a custom
+//         HTTP edge.
+//
+//   P3-5  DEFERRED (not production-blocking).  Per-room global send cap.
+//         Adding one would require either a new `chatRoomRateLimits`
+//         table or a type-widening of `actionRateLimits.userId` to also
+//         accept `Id<'chatRooms'>`. Without production telemetry to
+//         calibrate, a global cap could false-positive a popular public
+//         room (e.g. 200 active users at burst). The per-user
+//         `cr_send_message` ladder (10/min, 300/hr) already bounds
+//         individual abusers; per-room caps are best added once the
+//         audit log surfaces real burst patterns.
+//
+//   P3-6  DEFERRED (not production-blocking, lives on frontend).
+//         Optimistic-update rollback in chat-rooms UI. Backend already
+//         absorbs duplicate taps via (a) post-insert clientId /
+//         clientMessageId dedupe (P2-4) returning the canonical id and
+//         (b) per-user rate-limit ladder (P1-4). Toggle mutations
+//         (reactions, mutes) are idempotent. UI rollback for failed
+//         optimistic writes is a UX-polish item only.
+//
+//   P3-7  APPLIED.  Security-contract docstrings on
+//         `validateChatRoomMediaMetadata` (P0-2 + P2-2 audio duration),
+//         `verifyOrClaimChatRoomMediaOwnership` (P0-1), and
+//         `reserveChatRoomAction` (this file). The CR_*_WINDOWS block
+//         above has its own header explaining the ladder design.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Wrapper around `reserveActionSlots()` that throws a uniform
+ * generic error on denial. We deliberately do NOT echo back the
+ * windowKind / retryAfterMs to the client to avoid handing a
+ * stuffing-style probe the information it would need to time
+ * subsequent attempts. We do include them in the underlying
+ * `data` payload for server-side logs (Convex error payloads are
+ * not user-visible unless rendered).
+ *
+ * Security contract:
+ *   - MUST be awaited BEFORE any state-mutating write so denials cost
+ *     at most one read.
+ *   - The `action` string is the row key in `actionRateLimits` and
+ *     SHOULD be reused across paired surfaces (e.g. `cr_mod_action`
+ *     covers promote/demote/kickAndBan) so a client cannot evade a
+ *     cap by alternating between surfaces.
+ *   - On denial throws `ConvexError({code:'RATE_LIMITED', ...})`; the
+ *     caller MUST NOT catch and swallow it.
+ */
+async function reserveChatRoomAction(
+  ctx: any,
+  userId: Id<'users'>,
+  action: string,
+  windows: RateLimitWindow[],
+  slots = 1,
+): Promise<void> {
+  const result = await reserveActionSlots(ctx, userId, action, windows, slots);
+  if (result.accept === false) {
+    throw new ConvexError({
+      code: 'RATE_LIMITED',
+      message: 'Too many requests. Please slow down.',
+      action,
+      windowKind: result.windowKind,
+      retryAfterMs: result.retryAfterMs,
+    });
+  }
+}
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -127,6 +304,9 @@ export const generateUploadUrl = mutation({
     if (!userId) {
       throw new Error('Unauthorized: authentication required');
     }
+    // P1-1: Rate-limit upload-URL issuance so a single user cannot
+    // mint unlimited presigned URLs and pre-stage storage blobs.
+    await reserveChatRoomAction(ctx, userId, 'cr_generate_upload_url', CR_UPLOAD_URL_WINDOWS);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -421,6 +601,12 @@ const CHAT_ROOM_MEDIA_LIMITS: Record<
   doodle: { maxBytes: 5 * 1024 * 1024, contentTypePrefix: 'image/' },
 };
 
+// P2-2: Hard cap on declared audio duration (server-side). Voice messages
+// longer than this are rejected even when the underlying blob is within the
+// 20 MB size budget — prevents abuse where a low-bitrate stream encodes very
+// long monologues that bypass byte caps.
+const CHAT_ROOM_AUDIO_MAX_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+
 /**
  * P0-1: Verify that the given storage blob belongs to `senderId`, or claim
  * first-time ownership for the sender. Throws if another user already owns it.
@@ -455,14 +641,18 @@ async function verifyOrClaimChatRoomMediaOwnership(
 }
 
 /**
- * P0-2: Validate the actual blob metadata (size + content-type) against the
- * declared media kind. Rejects mismatched or oversized uploads regardless of
- * what the client claimed via `mediaType`.
+ * P0-2 / P2-2: Validate the actual blob metadata (size + content-type) against
+ * the declared media kind. Rejects mismatched or oversized uploads regardless
+ * of what the client claimed via `mediaType`. When `declaredDurationMs` is
+ * supplied for audio uploads, it is enforced against
+ * `CHAT_ROOM_AUDIO_MAX_DURATION_MS` so callers cannot post arbitrarily long
+ * voice notes under the byte cap.
  */
 async function validateChatRoomMediaMetadata(
   ctx: MutationCtx,
   storageId: Id<'_storage'>,
-  mediaKind: ChatRoomMediaKind
+  mediaKind: ChatRoomMediaKind,
+  declaredDurationMs?: number
 ): Promise<void> {
   const meta = (await ctx.db.system.get(storageId)) as
     | { size?: number; contentType?: string }
@@ -481,6 +671,23 @@ async function validateChatRoomMediaMetadata(
   const contentType = typeof meta.contentType === 'string' ? meta.contentType : '';
   if (!contentType.toLowerCase().startsWith(limits.contentTypePrefix)) {
     throw new Error(`Media content type does not match declared ${mediaKind}`);
+  }
+
+  // P2-2: Audio duration enforcement. Only applied when the caller actually
+  // passed a declared duration so existing flows that never reported one
+  // (e.g. legacy `sendMessage` voice path) are not broken. When supplied,
+  // duration must be a finite non-negative number under the hard cap.
+  if (mediaKind === 'audio' && declaredDurationMs !== undefined) {
+    if (
+      typeof declaredDurationMs !== 'number' ||
+      !Number.isFinite(declaredDurationMs) ||
+      declaredDurationMs < 0
+    ) {
+      throw new Error('Invalid audio duration');
+    }
+    if (declaredDurationMs > CHAT_ROOM_AUDIO_MAX_DURATION_MS) {
+      throw new Error('Audio duration exceeds maximum allowed length');
+    }
   }
 }
 
@@ -1300,6 +1507,56 @@ async function writeChatRoomModerationLog(
     createdAt: Date.now(),
     metadata: args.metadata,
   });
+}
+
+/**
+ * P3-2: Persist a human-actor moderation event (admin action or self-service
+ * report/mute) to `chatRoomModerationLog`. Wrapped in try/catch so audit-log
+ * failures NEVER block the underlying moderation action — the action itself
+ * is the source of truth; the log is best-effort.
+ */
+type ChatRoomUserModerationAction =
+  | 'admin_promoted'
+  | 'admin_demoted'
+  | 'admin_kicked_banned'
+  | 'admin_muted_user'
+  | 'admin_unmuted_user'
+  | 'admin_closed_room'
+  | 'user_muted_room'
+  | 'user_unmuted_room'
+  | 'user_reported_user'
+  | 'user_reported_message';
+
+async function writeChatRoomUserModerationLog(
+  ctx: MutationCtx,
+  args: {
+    actorUserId: Id<'users'>;
+    actorRole: 'admin' | 'user';
+    roomId: Id<'chatRooms'>;
+    targetUserId: Id<'users'>;
+    action: ChatRoomUserModerationAction;
+    reason: string;
+    metadata?: Record<string, unknown>;
+  }
+): Promise<void> {
+  try {
+    await ctx.db.insert('chatRoomModerationLog', {
+      actor: 'user',
+      actorRole: args.actorRole,
+      actorUserId: args.actorUserId,
+      roomId: args.roomId,
+      targetUserId: args.targetUserId,
+      action: args.action,
+      reason: args.reason,
+      createdAt: Date.now(),
+      metadata: args.metadata,
+    });
+  } catch {
+    // Audit-log writes are best-effort: a failure here MUST NOT roll back
+    // the moderation action above. Convex retries the whole mutation on
+    // real storage failures, so a swallowed error here only loses an
+    // observability record, not the safety decision.
+  }
 }
 
 async function applyChatRoomReadOnlyTimeout(
@@ -2187,10 +2444,31 @@ export const joinRoom = mutation({
       role: 'member', // ROLE SYSTEM: Default role for public room joins
     });
 
+    // P1-2: Post-insert dedupe. The pre-check above is best-effort; a
+    // parallel handler can race the same insert. Collapse any duplicate
+    // (roomId, userId) rows back to one — keep the earliest by creation
+    // time so the older membership/role wins.
+    const memberRowsAfter = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .take(10);
+    let canonicalMemberId: Id<'chatRoomMembers'> = memberId;
+    if (memberRowsAfter.length > 1) {
+      const sorted = memberRowsAfter
+        .slice()
+        .sort((a, b) => a._creationTime - b._creationTime);
+      canonicalMemberId = sorted[0]._id;
+      for (const row of sorted.slice(1)) {
+        if (row._id !== canonicalMemberId) {
+          await ctx.db.delete(row._id);
+        }
+      }
+    }
+
     // CONSISTENCY FIX B6: Recompute memberCount from source of truth
     await patchMemberCountIfExact(ctx, roomId);
 
-    return memberId;
+    return canonicalMemberId;
   },
 });
 
@@ -2253,8 +2531,14 @@ export const sendMessage = mutation({
     roomId: v.id('chatRooms'),
     authUserId: v.string(),
     sessionToken: v.string(),
-    // SEND-FIX: senderId is now optional - we use resolved userId from authUserId
-    // Frontend was passing authUserId as senderId which caused mismatch
+    // P3-1 / SEND-FIX: `senderId` is DEPRECATED and IGNORED. The handler
+    // resolves the real sender from `sessionToken`/`authUserId` via
+    // `requireRoomSendAccess()`. The arg is kept on the validator only so
+    // shipped clients that still send it do not get a hard rejection from
+    // Convex's strict argument validator; it is silently dropped by the
+    // handler destructure (`senderId: _senderIdLegacy`). Do NOT trust it
+    // for any authorization decision. To be removed in a coordinated
+    // client release once usage telemetry shows no callers remain.
     senderId: v.optional(v.id('users')),
     text: v.optional(v.string()),
     // CR-009 FIX: Accept either URL (demo mode/legacy) or storage ID (real upload)
@@ -2325,10 +2609,51 @@ export const sendMessage = mutation({
       }
     }
 
-    // 2. Rate limiting: max 10 messages per minute per user per room
+    // P1-7: Migrate inline O(N) rate-limit scan onto the generic
+    // `reserveActionSlots()` ladder. The per-room content-policy "recent
+    // messages" lookup is still needed for the soft-mask/dedup check
+    // (further below), but the rate-limit decision itself no longer
+    // depends on a Convex range scan per send.
+    await reserveChatRoomAction(ctx, senderId, 'cr_send_message', CR_SEND_MESSAGE_WINDOWS);
+
     const now = Date.now();
     const expiresAt = now + 24 * 60 * 60 * 1000;
     const oneMinuteAgo = now - 60000;
+
+    // P2-5: Re-check `room.deletedAt` / expiry RIGHT BEFORE persistence so
+    // a room that was closed between auth-gate and insert cannot accept a
+    // straggler write. `requireRoomSendAccess` above checks at the start
+    // of the handler but, by the time we reach the insert, the room
+    // doc may have been deleted by another mutation (closeRoom /
+    // resetMyPrivateRooms / cleanupExpiredRooms cron).
+    const freshRoom = await ctx.db.get(roomId);
+    if (!freshRoom) {
+      throw new Error('Room not found');
+    }
+    if (
+      (typeof (freshRoom as any).deletedAt === 'number') ||
+      (typeof freshRoom.expiresAt === 'number' && freshRoom.expiresAt <= now)
+    ) {
+      throw new Error('Room has expired');
+    }
+
+    // P2-1: Reject raw client-supplied media URLs that are NOT backed by
+    // a storage id. Real uploads always flow through generateUploadUrl →
+    // storage id → server-resolved URL. A request that presents a raw
+    // `imageUrl` / `audioUrl` without the corresponding storage id is
+    // either a misconfigured client or an attempt to inject an external
+    // URL into the message stream. Soft-fail with a generic error and
+    // do NOT persist anything.
+    if (imageUrl && !imageStorageId) {
+      throw new Error('Invalid media payload');
+    }
+    if (audioUrl && !audioStorageId) {
+      throw new Error('Invalid media payload');
+    }
+
+    // Recent message lookup retained for content-policy spam/copy-paste
+    // detection only — rate-limit gating is now handled by
+    // reserveChatRoomAction above.
     const recentMessages = await ctx.db
       .query('chatRoomMessages')
       .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
@@ -2360,10 +2685,6 @@ export const sendMessage = mutation({
         category: contentPolicy.category,
         message: formatChatRoomContentPolicyError(contentPolicy),
       });
-    }
-
-    if (recentMessages.length >= 10) {
-      throw new Error('Rate limit exceeded: max 10 messages per minute');
     }
 
     // CR-009 FIX: Resolve storage IDs to URLs (for real uploads)
@@ -2488,6 +2809,38 @@ export const sendMessage = mutation({
       ...(mentions && mentions.length > 0 ? { mentions } : {}),
     });
 
+    // P2-4: Post-insert clientId dedupe. Two handlers racing the same
+    // (roomId, clientId) can both pass the pre-insert idempotency check
+    // (4 lines above the rate-limit) because both read their snapshot
+    // before either commits. Collapse back to a single canonical row by
+    // re-reading the index after our own insert and dropping all but the
+    // earliest. Returning `keepId` keeps the contract (sender always
+    // gets back ONE message id for ONE logical send).
+    let canonicalMessageId: typeof messageId = messageId;
+    if (clientId) {
+      const clientIdMatches = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_clientId', (q) =>
+          q.eq('roomId', roomId).eq('clientId', clientId)
+        )
+        .take(10);
+      if (clientIdMatches.length > 1) {
+        const sorted = clientIdMatches.slice().sort((a, b) => a._creationTime - b._creationTime);
+        canonicalMessageId = sorted[0]._id;
+        for (const row of sorted.slice(1)) {
+          if (row._id === canonicalMessageId) continue;
+          try {
+            await cleanupChatRoomMessageRelations(ctx, roomId, row._id);
+            await deleteChatRoomMessageStorage(ctx, row);
+            await ctx.db.delete(row._id);
+          } catch {
+            // Best-effort: a concurrent handler may have already collapsed
+            // this row. Treat as success.
+          }
+        }
+      }
+    }
+
     // 4b. Mention inbox notifications (best-effort; never fails the send)
     if (mentions && mentions.length > 0) {
       const roomName = (room as { name?: string }).name ?? 'Chat';
@@ -2589,7 +2942,10 @@ export const sendMessage = mutation({
     // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
     await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
 
-    return messageId;
+    // P2-4: Return the canonical (earliest) message id, which may differ
+    // from `messageId` if a parallel handler lost the race and was
+    // collapsed above.
+    return canonicalMessageId;
   },
 });
 
@@ -2603,6 +2959,13 @@ export const openChatRoomVisualMedia = mutation({
   handler: async (ctx, { roomId, messageId, authUserId, sessionToken }) => {
     const { userId } = await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
 
+    // P1-4: Rate-limit visual-media opens per user. View counters are
+    // single-shot per message (chatRoomMediaViews dedupe by viewer), but
+    // a malicious client could still spam the mutation against new
+    // messages to drive O(N) URL resolutions + storage lookups. Limit
+    // total open attempts (whether successful or not) per minute/hour.
+    await reserveChatRoomAction(ctx, userId, 'cr_open_visual_media', CR_OPEN_VISUAL_MEDIA_WINDOWS);
+
     const message = await ctx.db.get(messageId);
     if (!message || message.roomId !== roomId || !isChatRoomVisualMediaType(message.type)) {
       return { status: 'no_media' as const };
@@ -2613,6 +2976,14 @@ export const openChatRoomVisualMedia = mutation({
       message.deletedAt ||
       (typeof message.expiresAt === 'number' && message.expiresAt <= now)
     ) {
+      return { status: 'no_media' as const };
+    }
+    // P3-3: Re-assert membership read access against the LIVE room doc
+    // because requireRoomReadAccess captured the snapshot at handler
+    // entry. If the caller was kicked/banned between then and now the
+    // view counter must NOT bump and the URL must NOT be issued.
+    const liveRoom = await ctx.db.get(roomId);
+    if (!liveRoom || (typeof (liveRoom as any).deletedAt === 'number')) {
       return { status: 'no_media' as const };
     }
     if (String(message.senderId) !== String(userId)) {
@@ -2827,7 +3198,14 @@ export const createPrivateRoom = mutation({
       }
     }
 
-    // Check if demo user (for coin bypass)
+    // P3-3 (demo-mode production guard):
+    // The `isDemo` flag from the client is NOT trusted on its own. The demo
+    // bypass (coin + onboarding checks below) only applies when BOTH
+    // (a) the client asserted `isDemo === true`, AND
+    // (b) the authenticated user row has `creator.isDemo === true`.
+    // A production user cannot self-elevate by passing `isDemo: true` because
+    // (b) requires the persisted user record to be a demo account, which is
+    // only minted by the dedicated demo-login mutation.
     const isDemoUser = isDemo === true && creator.isDemo === true;
     if (!isDemoUser) {
       await requireChatRoomTermsAccepted(ctx, createdBy);
@@ -2882,7 +3260,7 @@ export const createPrivateRoom = mutation({
     const now = Date.now();
 
     // 7. Insert private room with optional password and 24h expiration
-    const roomId = await ctx.db.insert('chatRooms', {
+    let roomId = await ctx.db.insert('chatRooms', {
       name,
       slug: finalSlug,
       category: 'general',
@@ -2896,6 +3274,55 @@ export const createPrivateRoom = mutation({
       ...(passwordHash && { passwordHash }),
       ...(passwordEncrypted && { passwordEncrypted }),
     });
+
+    // P1-6: Post-insert uniqueness guard for joinCode. The pre-check above
+    // is best-effort and racy. Re-read by index after the insert; if more
+    // than one row shares this joinCode, keep the earliest (by creation
+    // time) and patch all later rows to suffix-tagged unique codes so the
+    // attacker-friendly outcome — two rooms sharing the same joinCode —
+    // never persists.
+    const joinCodeMatches = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_join_code', (q) => q.eq('joinCode', joinCode))
+      .take(10);
+    if (joinCodeMatches.length > 1) {
+      const sorted = joinCodeMatches
+        .slice()
+        .sort((a, b) => a._creationTime - b._creationTime);
+      const keep = sorted[0];
+      for (const dup of sorted.slice(1)) {
+        // Suffix with a creation-time hash so the new code is opaque and
+        // unguessable. Anyone holding the original code joins the canonical
+        // (earliest) room.
+        const suffix = `-${dup._creationTime.toString(36).slice(-4)}`;
+        const newCode = `${joinCode}${suffix}`;
+        await ctx.db.patch(dup._id, { joinCode: newCode });
+        if (dup._id === roomId) {
+          // Our own insert lost the race; client should retry. Refresh
+          // local variable for the membership insert below.
+          roomId = keep._id;
+        }
+      }
+    }
+
+    // P1-6: Post-insert uniqueness guard for slug. Same rationale.
+    const slugMatches = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_slug', (q) => q.eq('slug', finalSlug))
+      .take(10);
+    if (slugMatches.length > 1) {
+      const sorted = slugMatches
+        .slice()
+        .sort((a, b) => a._creationTime - b._creationTime);
+      const keep = sorted[0];
+      for (const dup of sorted.slice(1)) {
+        const suffix = `-${dup._creationTime.toString(36)}`;
+        await ctx.db.patch(dup._id, { slug: `${finalSlug}${suffix}` });
+        if (dup._id === roomId) {
+          roomId = keep._id;
+        }
+      }
+    }
 
     // 8. Add creator as owner
     await ctx.db.insert('chatRoomMembers', {
@@ -3242,6 +3669,13 @@ export const reportMessage = mutation({
     // CR-012 FIX: Derive reporterId from authenticated user
     const reporterId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
+    // P1-4 + P2-8: Rate-limit reporter actions. Per-user cap protects
+    // the auto-timeout pipeline from a single reporter farming reports
+    // against many targets / messages. The `findRecentRoomUserReport`
+    // dedupe below is per (reporter, reportedUser, room) but cannot
+    // stop a reporter from cycling targets/messages.
+    await reserveChatRoomAction(ctx, reporterId, 'cr_report_message', CR_REPORT_WINDOWS);
+
     const message = await ctx.db.get(messageId);
     if (!message) {
       throw new Error('Message not found');
@@ -3280,6 +3714,19 @@ export const reportMessage = mutation({
       roomId,
       messageId: String(messageId),
       reportType: 'content',
+    });
+
+    // P3-2: Audit-log the message report alongside the report row itself
+    // so post-incident review has a single chronological view per room.
+    // Best-effort; failures do not roll back.
+    await writeChatRoomUserModerationLog(ctx, {
+      actorUserId: reporterId,
+      actorRole: 'user',
+      roomId,
+      targetUserId: message.senderId,
+      action: 'user_reported_message',
+      reason: 'message_report',
+      metadata: { reportId, messageId: String(messageId), rawReason: reason },
     });
 
     const autoTimeout = await evaluateChatRoomAutoTimeoutAfterReport(
@@ -3478,6 +3925,12 @@ export const closeRoom = mutation({
   handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
+    // P1-4: Per-user lifecycle cap. closeRoom triggers `deleteRoomFully`
+    // which is an expensive cascade (members + messages + media +
+    // penalties + presence + reports). Limit how often a user can
+    // initiate one so a compromised account cannot churn the table.
+    await reserveChatRoomAction(ctx, userId, 'cr_close_room', CR_ROOM_LIFECYCLE_WINDOWS);
+
     const room = await ctx.db.get(roomId);
     if (!room) {
       throw new Error('Room not found');
@@ -3492,6 +3945,19 @@ export const closeRoom = mutation({
     if (room.createdBy !== userId) {
       throw new Error('Only the room creator can close this room');
     }
+
+    // P3-2: Audit-log the room close BEFORE cascading delete (the room
+    // row is gone after `deleteRoomFully` so the log preserves the
+    // record). Best-effort; failures do not roll back.
+    await writeChatRoomUserModerationLog(ctx, {
+      actorUserId: userId,
+      actorRole: 'admin',
+      roomId,
+      targetUserId: userId, // self-actor: target is the creator themselves
+      action: 'admin_closed_room',
+      reason: 'creator_closed_room',
+      metadata: { roomName: room.name },
+    });
 
     // Delete room and all related data
     await deleteRoomFully(ctx, roomId);
@@ -3514,6 +3980,10 @@ export const resetMyPrivateRooms = mutation({
       sessionToken: args.sessionToken,
     });
 
+    // P1-4: Per-user lifecycle cap. Same envelope as closeRoom because
+    // this mutation is effectively closeRoom * N.
+    await reserveChatRoomAction(ctx, userId, 'cr_reset_private_rooms', CR_ROOM_LIFECYCLE_WINDOWS);
+
     // P2-10: Use the `by_creator` index to fetch only this user's rooms
     // instead of scanning every chat room in the database and filtering
     // in memory. Private-ness is still checked by the `joinCode` field.
@@ -3526,6 +3996,13 @@ export const resetMyPrivateRooms = mutation({
     let deletedCount = 0;
 
     for (const room of myPrivateRooms) {
+      // P1-8: Re-assert ownership on each room AT delete-time. The
+      // `by_creator` index already filtered to rooms owned by `userId`,
+      // but if `room.createdBy` was patched (admin re-assignment) by a
+      // concurrent mutation between the index read and the cascade call
+      // we must NOT delete a room we no longer own.
+      const live = await ctx.db.get(room._id);
+      if (!live || live.createdBy !== userId) continue;
       await deleteRoomFully(ctx, room._id);
       deletedCount++;
     }
@@ -3551,6 +4028,9 @@ export const promoteMember = mutation({
   },
   handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+
+    // P1-4: Per-user moderation-action cap shared with kick/demote.
+    await reserveChatRoomAction(ctx, userId, 'cr_mod_action', CR_MOD_ACTION_WINDOWS);
 
     // 2. Get room
     const room = await ctx.db.get(roomId);
@@ -3594,6 +4074,17 @@ export const promoteMember = mutation({
     // 7. Promote to admin
     await ctx.db.patch(targetMembership._id, { role: 'admin' });
 
+    // P3-2: Audit-log the role change. Best-effort; failures do not roll back.
+    await writeChatRoomUserModerationLog(ctx, {
+      actorUserId: userId,
+      actorRole: 'admin',
+      roomId,
+      targetUserId,
+      action: 'admin_promoted',
+      reason: 'role_change',
+      metadata: { fromRole: targetMembership.role, toRole: 'admin' },
+    });
+
     return { success: true, newRole: 'admin' };
   },
 });
@@ -3608,6 +4099,9 @@ export const demoteMember = mutation({
   },
   handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+
+    // P1-4: Per-user moderation-action cap shared with kick/promote.
+    await reserveChatRoomAction(ctx, userId, 'cr_mod_action', CR_MOD_ACTION_WINDOWS);
 
     // 2. Get room
     const room = await ctx.db.get(roomId);
@@ -3650,6 +4144,17 @@ export const demoteMember = mutation({
 
     // 7. Demote to member
     await ctx.db.patch(targetMembership._id, { role: 'member' });
+
+    // P3-2: Audit-log the role change. Best-effort; failures do not roll back.
+    await writeChatRoomUserModerationLog(ctx, {
+      actorUserId: userId,
+      actorRole: 'admin',
+      roomId,
+      targetUserId,
+      action: 'admin_demoted',
+      reason: 'role_change',
+      metadata: { fromRole: targetMembership.role, toRole: 'member' },
+    });
 
     return { success: true, newRole: 'member' };
   },
@@ -4766,6 +5271,9 @@ export const kickAndBanMember = mutation({
   handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
+    // P1-4: Per-user moderation-action cap shared with promote/demote.
+    await reserveChatRoomAction(ctx, userId, 'cr_mod_action', CR_MOD_ACTION_WINDOWS);
+
     const room = await ctx.db.get(roomId);
     if (!room) {
       throw new Error('Room not found');
@@ -4850,6 +5358,56 @@ export const kickAndBanMember = mutation({
       await ctx.db.delete(muteId);
     }
 
+    // P2-9: Invalidate room-scoped private DMs for the kicked user so they
+    // cannot continue chatting via threads opened before the ban. Strategy:
+    //   - Delete any `chatRoomPrivateTyping` rows the kicked user authored
+    //     in this room (other participants see the indicator vanish).
+    //   - Insert `chatRoomPrivateConversationHides` for BOTH the kicked
+    //     user AND the other participant so neither side keeps the thread
+    //     pinned in the room's DM list. The conversation row itself is
+    //     retained (audit trail + retention sweep handles deletion).
+    const targetConversationsAsUser1 = await ctx.db
+      .query('chatRoomPrivateConversations')
+      .withIndex('by_user1', (q) => q.eq('user1Id', targetUserId))
+      .take(200);
+    const targetConversationsAsUser2 = await ctx.db
+      .query('chatRoomPrivateConversations')
+      .withIndex('by_user2', (q) => q.eq('user2Id', targetUserId))
+      .take(200);
+    const roomConversations = [
+      ...targetConversationsAsUser1,
+      ...targetConversationsAsUser2,
+    ].filter((conv) => conv.roomId === roomId);
+    for (const conv of roomConversations) {
+      // Drop the kicked user's typing rows in this conversation.
+      const typingRows = await ctx.db
+        .query('chatRoomPrivateTyping')
+        .withIndex('by_user_conversation', (q) =>
+          q.eq('userId', targetUserId).eq('conversationId', conv._id),
+        )
+        .take(10);
+      for (const row of typingRows) {
+        await ctx.db.delete(row._id);
+      }
+      // Hide for both participants (idempotent).
+      const otherUserId = conv.user1Id === targetUserId ? conv.user2Id : conv.user1Id;
+      for (const uid of [targetUserId, otherUserId]) {
+        const existingHide = await ctx.db
+          .query('chatRoomPrivateConversationHides')
+          .withIndex('by_user_conversation', (q) =>
+            q.eq('userId', uid).eq('conversationId', conv._id),
+          )
+          .first();
+        if (!existingHide) {
+          await ctx.db.insert('chatRoomPrivateConversationHides', {
+            userId: uid,
+            conversationId: conv._id,
+            hiddenAt: now,
+          });
+        }
+      }
+    }
+
     const removedMessageText = 'A member was removed by a room moderator.';
     await ctx.db.insert('chatRoomMessages', {
       roomId,
@@ -4874,6 +5432,18 @@ export const kickAndBanMember = mutation({
         updatedAt: now,
       });
     }
+
+    // P3-2: Audit-log the kick+ban. Best-effort; failures do not roll back
+    // the kick (the ban row + membership delete are the safety contract).
+    await writeChatRoomUserModerationLog(ctx, {
+      actorUserId: userId,
+      actorRole: 'admin',
+      roomId,
+      targetUserId,
+      action: 'admin_kicked_banned',
+      reason: 'moderator_action',
+      metadata: { targetRole: targetMembership.role },
+    });
 
     return { success: true };
   },
@@ -5010,6 +5580,10 @@ export const setUserRoomMuted = mutation({
   handler: async (ctx, { roomId, muted, authUserId, sessionToken }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
+    // P1-4: Per-user mute toggle cap. Avoids letting a client thrash
+    // userRoomPrefs by hammering this mutation in a loop.
+    await reserveChatRoomAction(ctx, userId, 'cr_set_user_room_muted', CR_MUTE_WINDOWS);
+
     const now = Date.now();
 
     // Check if preference exists
@@ -5071,6 +5645,10 @@ export const markReportedRoom = mutation({
   handler: async (ctx, { roomId, authUserId, sessionToken }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
+    // P1-4: Per-user "mark reported" cap. Idempotent anyway, but the cap
+    // protects against bot-driven write amplification across many room ids.
+    await reserveChatRoomAction(ctx, userId, 'cr_mark_reported_room', CR_MARK_REPORTED_WINDOWS);
+
     // Check if already reported
     const existing = await ctx.db
       .query('userRoomReports')
@@ -5124,6 +5702,12 @@ export const submitChatRoomReport = mutation({
   handler: async (ctx, { authUserId, sessionToken, reportedUserId, roomId, reason, details, messageId, reportType }) => {
     // 1. SECURITY: Authenticate the reporter
     const reporterId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+
+    // P1-4 + P2-8: Per-user reporter cap shared with reportMessage so
+    // counting / auto-timeout pipelines see one cohesive ladder per
+    // reporter regardless of which mutation they call.
+    await reserveChatRoomAction(ctx, reporterId, 'cr_report_message', CR_REPORT_WINDOWS);
+
     const roomDocId = roomId ? ctx.db.normalizeId('chatRooms', roomId) : null;
     if (!roomDocId) {
       throw new Error('Room not found');
@@ -5206,6 +5790,25 @@ export const submitChatRoomReport = mutation({
       roomId: roomDocId,
       messageId: effectiveMessageId,
       reportType: effectiveReportType,
+    });
+
+    // P3-2: Audit-log the user/content report. Best-effort; failures do
+    // not roll back the report itself.
+    await writeChatRoomUserModerationLog(ctx, {
+      actorUserId: reporterId,
+      actorRole: 'user',
+      roomId: roomDocId,
+      targetUserId: reportedId,
+      action:
+        effectiveReportType === 'content'
+          ? 'user_reported_message'
+          : 'user_reported_user',
+      reason,
+      metadata: {
+        reportId,
+        messageId: effectiveMessageId,
+        reportType: effectiveReportType,
+      },
     });
 
     // 6. Also mark the room as reported (for quick lookups)
@@ -5465,6 +6068,11 @@ export const createOrUpdateChatRoomProfile = mutation({
     // Auth guard
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
 
+    // P1-4: Per-user profile update cap. Throttles rapid nickname/avatar
+    // churn so a single user cannot stress the broadcast surface (every
+    // member rendering the room sees these via getRoomUserIdentities).
+    await reserveChatRoomAction(ctx, userId, 'cr_update_profile', CR_PROFILE_UPDATE_WINDOWS);
+
     // Validate nickname
     const trimmedNickname = nickname.trim();
     if (trimmedNickname.length === 0) {
@@ -5710,24 +6318,150 @@ export const generateChatRoomAvatarUploadUrl = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
+    // P1-1: Rate-limit avatar upload-URL issuance.
+    await reserveChatRoomAction(
+      ctx,
+      userId,
+      'cr_generate_avatar_upload_url',
+      CR_UPLOAD_URL_WINDOWS,
+    );
+
     return await ctx.storage.generateUploadUrl();
   },
 });
 
 /**
- * Get storage URL for a chat room avatar.
+ * Resolve the storage URL for a freshly-uploaded chat-room avatar blob.
+ *
+ * P0-1 FIX (Chat Rooms Block 1):
+ *   The previous implementation accepted ANY `storageId: v.id('_storage')`
+ *   from any authenticated user and returned `ctx.storage.getUrl(storageId)`
+ *   unconditionally. That meant any signed-in user who learned a storage id
+ *   (even one belonging to a completely unrelated Mira surface) could mint
+ *   a usable signed URL for it.
+ *
+ *   This handler now enforces a claim-or-verify policy that is fully scoped
+ *   to Chat Rooms tables:
+ *
+ *     1.  Caller must be authenticated (session token).
+ *     2.  The storage blob must exist, be image/*, fit the avatar size cap,
+ *         and have been uploaded recently (within
+ *         CHAT_ROOM_AVATAR_FRESHNESS_MS). The freshness cap narrows the
+ *         window in which an opaque storage id from elsewhere could be
+ *         re-targeted as a chat-room avatar.
+ *     3.  Ownership lookup is restricted to `chatRoomMediaUploads` (a table
+ *         used exclusively by Chat Rooms):
+ *           - If a row already exists, the caller MUST be the uploader,
+ *             otherwise we reject with a generic error.
+ *           - If no row exists, the caller is claiming first-time
+ *             ownership for the avatar upload they just performed. We
+ *             atomically insert the binding row before returning the URL.
+ *     4.  Every failure path throws the same generic "Media unavailable"
+ *         message and never reveals whether the storage id exists, what
+ *         table it belongs to, or who owns it.
+ *
+ *   Isolation: this handler reads/writes only `chatRoomMediaUploads`
+ *   (Chat Rooms-only) and `ctx.db.system._storage` (Convex system
+ *   metadata). It never touches matches/conversations/privateConversations/
+ *   connections/messages/dares/deepConnect/discover/confess/profile tables.
+ *
+ *   Shape kept as `mutation` (not `query`) because the first-time claim
+ *   must write a row to `chatRoomMediaUploads`. Converting to `query`
+ *   would either require a separate "claim" mutation (an avoidable extra
+ *   round-trip in the avatar-upload flow) or would leave fresh uploads
+ *   unbindable. Callsite signature is unchanged.
  */
+const CHAT_ROOM_AVATAR_MAX_BYTES = 5 * 1024 * 1024; // 5 MB hard cap on avatar size.
+const CHAT_ROOM_AVATAR_FRESHNESS_MS = 60 * 60 * 1000; // 60 min — claim window after upload.
+
 export const getChatRoomAvatarUrl = mutation({
   args: {
     storageId: v.id('_storage'),
     token: v.string(),
   },
   handler: async (ctx, { storageId, token }) => {
+    // 1. Auth required.
     const userId = await validateSessionToken(ctx, token.trim());
     if (!userId) {
-      throw new Error('Unauthorized: authentication required');
+      // Generic error — do not differentiate from later "Media unavailable"
+      // paths to avoid leaking whether a storage id exists vs. the caller
+      // is unauthenticated.
+      throw new Error('Media unavailable');
     }
-    return await ctx.storage.getUrl(storageId);
+
+    // 2. Look up existing Chat Rooms ownership binding FIRST. Storage ids
+    //    bound to another Chat Rooms user (e.g. another member's room
+    //    message media) must be rejected without falling through to the
+    //    claim path below.
+    const existingBinding = await ctx.db
+      .query('chatRoomMediaUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+      .first();
+
+    if (existingBinding) {
+      if (existingBinding.uploaderUserId !== userId) {
+        throw new Error('Media unavailable');
+      }
+      // Caller already owns this binding — return the URL. We still
+      // confirm the blob exists; otherwise the row is dangling and the
+      // cleanup cron will reap it.
+      const boundUrl = await ctx.storage.getUrl(storageId);
+      if (!boundUrl) {
+        throw new Error('Media unavailable');
+      }
+      return boundUrl;
+    }
+
+    // 3. No binding yet. The caller is asserting first-time ownership of a
+    //    freshly-uploaded avatar. Validate the storage metadata to make
+    //    sure the blob looks like an avatar image AND was uploaded
+    //    recently. We deliberately keep validation tight and uniform-
+    //    error so that probing the endpoint cannot enumerate storage ids
+    //    or differentiate failure reasons.
+    const meta = (await ctx.db.system.get(storageId)) as
+      | {
+          _creationTime?: number;
+          size?: number;
+          contentType?: string;
+        }
+      | null;
+    if (!meta) {
+      throw new Error('Media unavailable');
+    }
+
+    if (typeof meta.size !== 'number' || meta.size <= 0 || meta.size > CHAT_ROOM_AVATAR_MAX_BYTES) {
+      throw new Error('Media unavailable');
+    }
+
+    const contentType = typeof meta.contentType === 'string' ? meta.contentType.toLowerCase() : '';
+    if (!contentType.startsWith('image/')) {
+      throw new Error('Media unavailable');
+    }
+
+    const createdAt = typeof meta._creationTime === 'number' ? meta._creationTime : 0;
+    const now = Date.now();
+    if (createdAt <= 0 || now - createdAt > CHAT_ROOM_AVATAR_FRESHNESS_MS) {
+      throw new Error('Media unavailable');
+    }
+
+    // 4. Atomically claim ownership in `chatRoomMediaUploads` before
+    //    returning the resolved URL. This binds the blob to this caller
+    //    so any subsequent resolution attempt by another user (or any
+    //    later misuse via sendMessage / sendRoomDmMessage) will hit the
+    //    `uploaderUserId !== senderId` guard in
+    //    `verifyOrClaimChatRoomMediaOwnership` and be rejected.
+    await ctx.db.insert('chatRoomMediaUploads', {
+      storageId,
+      uploaderUserId: userId,
+      mediaKind: 'image',
+      createdAt: now,
+    });
+
+    const url = await ctx.storage.getUrl(storageId);
+    if (!url) {
+      throw new Error('Media unavailable');
+    }
+    return url;
   },
 });
 
@@ -6132,6 +6866,10 @@ export const markMentionRead = mutation({
   handler: async (ctx, { authUserId, sessionToken, mentionId }) => {
     try {
       const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+      // P1-4: Per-user cap on mark-read churn. The mutation is cheap on
+      // its own but the inbox UI can fire one per visible row on scroll
+      // — coalesce client-side abuse here.
+      await reserveChatRoomAction(ctx, userId, 'cr_mention_read', CR_MENTION_READ_WINDOWS);
       const row = await ctx.db.get(mentionId);
       if (!row || row.mentionedUserId !== userId) {
         return { success: false as const };
@@ -6149,6 +6887,10 @@ export const markAllMentionsRead = mutation({
   handler: async (ctx, { authUserId, sessionToken }) => {
     try {
       const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+      // P1-4: Single bulk mark-read counts as one "mention_read" slot.
+      // Same envelope as the per-row mutation so a client cannot evade
+      // the cap by alternating between the two surfaces.
+      await reserveChatRoomAction(ctx, userId, 'cr_mention_read', CR_MENTION_READ_WINDOWS);
       const rows = await ctx.db
         .query('chatRoomMentionNotifications')
         .withIndex('by_mentioned_user_created', (q) => q.eq('mentionedUserId', userId))
@@ -6237,6 +6979,10 @@ export const addReaction = mutation({
   },
   handler: async (ctx, { roomId, messageId, emoji, authUserId, sessionToken }) => {
     const { userId } = await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
+    // P1-4 + P2-7: Per-user reaction cap shared with removeReaction so a
+    // single account cannot churn the reactions surface (every group is
+    // re-read by viewers on every change).
+    await reserveChatRoomAction(ctx, userId, 'cr_reaction', CR_REACTION_WINDOWS);
     const msg = await ctx.db.get(messageId);
     if (!msg || msg.roomId !== roomId || msg.deletedAt) {
       throw new Error('Message not found');
@@ -6297,6 +7043,8 @@ export const removeReaction = mutation({
   },
   handler: async (ctx, { roomId, messageId, emoji, authUserId, sessionToken }) => {
     const { userId } = await requireRoomReadAccess(ctx, roomId, { authUserId, sessionToken });
+    // P1-4 + P2-7: Per-user reaction cap shared with addReaction.
+    await reserveChatRoomAction(ctx, userId, 'cr_reaction', CR_REACTION_WINDOWS);
     const msg = await ctx.db.get(messageId);
     if (!msg || msg.roomId !== roomId) {
       throw new Error('Message not found');
@@ -6358,6 +7106,9 @@ export const toggleMuteUserInRoom = mutation({
   },
   handler: async (ctx, { roomId, targetUserId, authUserId, sessionToken }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+    // P1-4: Per-user toggle cap. Same envelope as setUserRoomMuted so
+    // mute churn across the two surfaces is jointly bounded.
+    await reserveChatRoomAction(ctx, userId, 'cr_toggle_mute_user', CR_MUTE_WINDOWS);
     if (userId === targetUserId) {
       throw new Error('Cannot mute yourself');
     }
@@ -6433,6 +7184,10 @@ export const getOrCreateDmThread = mutation({
   },
   handler: async (ctx, { authUserId, sessionToken, peerUserId, roomId }) => {
     const userId = await requireAuthenticatedUser(ctx, { authUserId, sessionToken });
+    // P1-4: Per-user thread-bootstrap cap. Each call walks several
+    // membership / block / report checks; bound how many distinct peer
+    // threads a user can spin up per window.
+    await reserveChatRoomAction(ctx, userId, 'cr_dm_thread', CR_DM_THREAD_WINDOWS);
     await requireChatRoomTermsAccepted(ctx, userId);
     if (userId === peerUserId) {
       throw new Error('Invalid recipient');
@@ -6640,6 +7395,10 @@ export const markRoomDmRead = mutation({
   handler: async (ctx, { conversationId, token }) => {
     try {
       const { userId } = await requireChatRoomPrivateConversationAccess(ctx, conversationId, token);
+      // P1-4: Per-user mark-read cap. A scroll-spammy client can fire
+      // this very frequently — bound it so the patch loop below cannot
+      // be amplified.
+      await reserveChatRoomAction(ctx, userId, 'cr_dm_read', CR_DM_READ_WINDOWS);
       const now = Date.now();
       const unreadMessages = await ctx.db
         .query('chatRoomPrivateMessages')
@@ -6678,6 +7437,12 @@ export const sendRoomDmMessage = mutation({
       conversationId,
       token
     );
+    // P1-4 + P1-7: Migrate the inline "max 10/min" check (which only
+    // counts THIS conversation) onto the generic per-user ladder so a
+    // sender cannot evade by cycling conversations. The per-conversation
+    // `recentMessages` query below is retained for content-policy
+    // copy-paste detection only.
+    await reserveChatRoomAction(ctx, userId, 'cr_dm_send_message', CR_DM_SEND_WINDOWS);
     await requireRoomMemberForPrivateDm(ctx, conversation.roomId, peerUserId);
     await requireChatRoomTermsAccepted(ctx, userId);
     if (await isBlockedBidirectional(ctx, userId, peerUserId)) {
@@ -6738,9 +7503,10 @@ export const sendRoomDmMessage = mutation({
         message: formatChatRoomContentPolicyError(contentPolicy),
       });
     }
-    if (recentMessages.length >= 10) {
-      throw new Error('Rate limit exceeded: max 10 messages per minute');
-    }
+    // P1-7: Inline `recentMessages.length >= 10` removed. The per-user
+    // ladder above already gates send rate across conversations and the
+    // `recentMessages` query is retained only for the content-policy
+    // copy-paste check.
 
     if (type === 'text' && !content) {
       throw new Error('Message cannot be empty');
@@ -6757,7 +7523,9 @@ export const sendRoomDmMessage = mutation({
     }
     if (audioStorageId) {
       await verifyOrClaimChatRoomMediaOwnership(ctx, audioStorageId, userId, 'audio');
-      await validateChatRoomMediaMetadata(ctx, audioStorageId, 'audio');
+      // P2-2: Enforce the server-side audio duration cap using the
+      // client-declared `audioDurationMs` from the mutation args.
+      await validateChatRoomMediaMetadata(ctx, audioStorageId, 'audio', audioDurationMs);
     }
 
     const maskedContent = type === 'text' ? softMaskText(content) : '';
@@ -6773,6 +7541,32 @@ export const sendRoomDmMessage = mutation({
       clientMessageId,
       createdAt: now,
     });
+
+    // P2-4 (DM variant): Post-insert clientMessageId dedupe. Race-window
+    // between the pre-insert dedupe lookup above and this insert means
+    // two parallel handlers can both reach insert. Collapse to one row
+    // and return the canonical id.
+    let canonicalDmMessageId = messageId;
+    if (clientMessageId) {
+      const dmMatches = await ctx.db
+        .query('chatRoomPrivateMessages')
+        .withIndex('by_conversation_clientMessageId', (q) =>
+          q.eq('conversationId', conversationId).eq('clientMessageId', clientMessageId),
+        )
+        .take(10);
+      if (dmMatches.length > 1) {
+        const sorted = dmMatches.slice().sort((a, b) => a._creationTime - b._creationTime);
+        canonicalDmMessageId = sorted[0]._id;
+        for (const extra of sorted.slice(1)) {
+          if (extra._id === canonicalDmMessageId) continue;
+          try {
+            await ctx.db.delete(extra._id);
+          } catch {
+            // Concurrent collapse — ignore.
+          }
+        }
+      }
+    }
 
     const lastMessageText =
       type === 'text'
@@ -6797,7 +7591,7 @@ export const sendRoomDmMessage = mutation({
       await ctx.db.delete(hiddenRow._id);
     }
 
-    return { success: true as const, messageId };
+    return { success: true as const, messageId: canonicalDmMessageId };
   },
 });
 
@@ -6810,6 +7604,9 @@ export const setRoomDmTypingStatus = mutation({
   handler: async (ctx, { conversationId, token, isTyping }) => {
     try {
       const { userId, conversation } = await requireChatRoomPrivateConversationAccess(ctx, conversationId, token);
+      // P1-4: Per-user typing-status cap (per minute / hour). Belt to
+      // the per-row 1-Hz throttle (P2-6) immediately below.
+      await reserveChatRoomAction(ctx, userId, 'cr_dm_typing', CR_DM_TYPING_WINDOWS);
       const existing = await ctx.db
         .query('chatRoomPrivateTyping')
         .withIndex('by_user_conversation', (q) =>
@@ -6821,6 +7618,12 @@ export const setRoomDmTypingStatus = mutation({
         return { success: true as const };
       }
       const now = Date.now();
+      // P2-6: 1 Hz throttle on typing updates. The existing row carries
+      // `updatedAt`; collapse repeated updates within a 1 s window into
+      // a no-op so the table cannot be hammered.
+      if (existing && existing.isTyping === true && now - existing.updatedAt < 1000) {
+        return { success: true as const };
+      }
       if (existing) {
         await ctx.db.patch(existing._id, { isTyping, updatedAt: now });
       } else {
@@ -7069,6 +7872,23 @@ export const joinRoomWithPassword = mutation({
           isBanned: false,
           passwordVerified: true,
         });
+        // P1-2: Post-insert dedupe — collapse any parallel duplicate
+        // membership rows that may have raced this insert.
+        const memberRowsAfter = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+          .take(10);
+        if (memberRowsAfter.length > 1) {
+          const sorted = memberRowsAfter
+            .slice()
+            .sort((a, b) => a._creationTime - b._creationTime);
+          const keepId = sorted[0]._id;
+          for (const row of sorted.slice(1)) {
+            if (row._id !== keepId) {
+              await ctx.db.delete(row._id);
+            }
+          }
+        }
         // P1: Recompute memberCount from source of truth to avoid lost
         // updates from concurrent joins racing on a stale read of `room`.
         await patchMemberCountIfExact(ctx, roomId);
