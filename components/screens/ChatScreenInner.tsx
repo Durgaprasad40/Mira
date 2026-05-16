@@ -180,6 +180,11 @@ type PendingSecureMessage = RenderMessage & {
   uploadStatus: PendingSecureUploadStatus;
   uploadProgress: number;
   retryOptions: PendingSecureRetryOptions;
+  // [P2_MEDIA_RETRY] Bounded manual-retry guard. `retryAttempts` counts user
+  // retries (initial send not counted). `retryBackoffUntil` blocks the
+  // retry handler until that timestamp has elapsed.
+  retryAttempts?: number;
+  retryBackoffUntil?: number;
 };
 type OptimisticTextMessage = RenderMessage & {
   clientMessageId: string;
@@ -205,6 +210,11 @@ type BottleSpinSessionView = {
 const PHOTO_UPLOAD_COMPRESSION_THRESHOLD_BYTES = 4 * 1024 * 1024;
 const PHOTO_UPLOAD_MAX_WIDTH = 1600;
 const MAX_MESSAGE_CONTENT_LENGTH = 400;
+// [P2_MEDIA_RETRY] Cap manual retries of a failed pending secure-media
+// message and apply per-attempt backoff. Total: 3 attempts at 2s → 5s →
+// 10s. After the cap the user is asked to discard and re-send.
+const PENDING_SECURE_MAX_RETRY_ATTEMPTS = 3;
+const PENDING_SECURE_RETRY_BACKOFF_MS = [2_000, 5_000, 10_000];
 const SYSTEM_MESSAGE_ROW_RE = /^\[SYSTEM:[a-z_]+\]/i;
 const EXPIRED_MEDIA_ROW_HIDE_AFTER_MS = 60_000;
 
@@ -2410,6 +2420,42 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       retryingPendingIdsRef.current.delete(pendingId);
       return;
     }
+
+    // [P2_MEDIA_RETRY] Bounded manual-retry guard. Refuse the retry call
+    // when the backoff window is still active or when the attempt cap has
+    // been reached. We surface a stable errorMessage so the existing
+    // upload_failed / send_failed pill simply continues to show; no UI
+    // redesign is required. Backend rate limits remain the source of
+    // truth — this is only client hygiene to prevent tap-spam loops.
+    const previousAttempts = pending.retryAttempts ?? 0;
+    const now = Date.now();
+    if (pending.retryBackoffUntil && pending.retryBackoffUntil > now) {
+      retryingPendingIdsRef.current.delete(pendingId);
+      return;
+    }
+    if (previousAttempts >= PENDING_SECURE_MAX_RETRY_ATTEMPTS) {
+      if (mountedRef.current) {
+        updatePendingSecureMessage(pendingId, (m) => ({
+          ...m,
+          errorMessage:
+            'Retry limit reached. Discard this message and try sending again.',
+        }));
+      }
+      retryingPendingIdsRef.current.delete(pendingId);
+      return;
+    }
+    const nextAttempt = previousAttempts + 1;
+    const backoffIndex = Math.min(
+      nextAttempt - 1,
+      PENDING_SECURE_RETRY_BACKOFF_MS.length - 1
+    );
+    const backoffMs = PENDING_SECURE_RETRY_BACKOFF_MS[backoffIndex];
+    updatePendingSecureMessage(pendingId, (m) => ({
+      ...m,
+      retryAttempts: nextAttempt,
+      retryBackoffUntil: now + backoffMs,
+    }));
+
     const { retryOptions } = pending;
     const isVideoRetry = retryOptions.mediaType === 'video';
 

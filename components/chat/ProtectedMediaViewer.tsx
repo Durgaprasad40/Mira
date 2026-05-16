@@ -158,16 +158,18 @@ export function ProtectedMediaViewer({
   useScreenProtection(visible);
 
   // Screenshot detection — fires on both platforms
-  // [P1_MEDIA_FIX] Backend validator for `logScreenshotEvent` accepts only
-  // `{ messageId, wasTaken }` — userId is derived from server auth.
+  // [P1_MEDIA_FIX] Backend validator for `logScreenshotEvent` accepts
+  // `{ token, messageId, wasTaken }`. The server resolves the user via
+  // `validateSessionToken` and enforces a per-user rate limit.
   const handleScreenshot = useCallback(() => {
-    if (messageId && userId) {
+    if (messageId && userId && token) {
       void logScreenshot({
+        token,
         messageId: asMessageId(messageId),
         wasTaken: true,
       }).catch(() => {});
     }
-  }, [messageId, userId, logScreenshot]);
+  }, [messageId, userId, token, logScreenshot]);
 
   useScreenshotDetection({
     enabled: visible,

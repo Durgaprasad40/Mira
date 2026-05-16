@@ -3,6 +3,7 @@ import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_gen
 import { Id, Doc } from './_generated/dataModel';
 import { softMaskText } from './softMask';
 import { validateSessionToken } from './helpers';
+import { reserveActionSlots } from './actionRateLimits';
 import {
   CHAT_ROOM_PRIVATE_DM_INACTIVITY_MS,
   isChatRoomPrivateDmConversation,
@@ -128,6 +129,8 @@ const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice', 'template', 
 const TYPING_STATUS_TIMEOUT_MS = 5_000;
 const TYPING_STATUS_CLEANUP_MS = 60_000;
 const TYPING_STATUS_CLEANUP_BATCH = 500;
+// P2-FIX: Explicit per-row expiry for typing indicators (60s after last update).
+const TYPING_STATUS_EXPIRES_MS = 60_000;
 const CONVERSATION_PARTICIPANT_SCAN_LIMIT = 1000;
 const MESSAGE_DELIVERY_SCAN_LIMIT = 200;
 const MESSAGE_READ_SCAN_LIMIT = 200;
@@ -827,7 +830,29 @@ export const sendPreMatchMessage = mutation({
       throw new Error('Message too long');
     }
 
-    // Check if already have a conversation
+    // P0 SECURITY: Backend rate-limit pre-match sends to prevent bot fan-out
+    // across Discover prospects. Enforced AFTER token/verification/block gates
+    // and BEFORE any conversation/message/notification write so denial costs
+    // exactly one limiter read.
+    const prematchLimit = await reserveActionSlots(ctx, fromUserId, 'send_prematch_message', [
+      { kind: 'short', windowMs: 60_000, max: 5 },
+      { kind: 'daily', windowMs: 24 * 60 * 60 * 1000, max: 50 },
+    ]);
+    if (!prematchLimit.accept) {
+      throw new Error('You are sending pre-match messages too quickly. Please try again later.');
+    }
+
+    // P1-FIX (D1): Removed the legacy full-table `conversations.filter(...)`
+    // fallback. Lookup now relies exclusively on the indexed
+    // `conversationParticipants` scan below. Any conversation created via
+    // this mutation (or any other Phase-1 message write) calls
+    // `upsertParticipantUnreadCount` which inserts participant rows for both
+    // sides, so the index is authoritative going forward. Legacy
+    // pre-participant-row conversations are repaired by
+    // `backfillConversationParticipants`. The Batch 1 P0 rate limit
+    // (`send_prematch_message`) bounds duplicate-conversation risk if a
+    // legacy row is missed; idempotency is still preserved via
+    // `clientMessageId` below.
     let conversation: Doc<'conversations'> | null = null;
     const senderParticipantRows = await ctx.db
       .query('conversationParticipants')
@@ -846,25 +871,6 @@ export const sendPreMatchMessage = mutation({
         conversation = candidateConversation;
         break;
       }
-    }
-
-    if (!conversation) {
-      conversation = await ctx.db
-        .query('conversations')
-        .filter((q) =>
-          q.and(
-            q.eq(q.field('isPreMatch'), true),
-            q.or(
-              q.and(
-                q.eq(q.field('participants'), [fromUserId, toUserId])
-              ),
-              q.and(
-                q.eq(q.field('participants'), [toUserId, fromUserId])
-              )
-            )
-          )
-        )
-        .first();
     }
 
     // Create conversation if doesn't exist
@@ -933,7 +939,11 @@ export const sendPreMatchMessage = mutation({
 
     // 9-5: Notify recipient with TTL and dedupe
     // M1 FIX: Privacy-safe notification body - never expose message content
+    // P1-FIX (D4): Privacy-safe notification title — do not expose sender's
+    // display name in lock-screen surfaces. Matches the `'New Message'`
+    // title used by `sendProtectedImage` and other Phase-1 message paths.
     const dedupeKey = `message:${conversation._id}:unread`;
+    const notificationTitle = 'New Message';
     const notificationBody = 'You have a new message';
     const existingNotif = await ctx.db
       .query('notifications')
@@ -942,7 +952,7 @@ export const sendPreMatchMessage = mutation({
 
     if (existingNotif) {
       await ctx.db.patch(existingNotif._id, {
-        title: `${fromUser.name} sent you a message`,
+        title: notificationTitle,
         body: notificationBody,
         createdAt: now,
         expiresAt: now + 24 * 60 * 60 * 1000,
@@ -952,7 +962,7 @@ export const sendPreMatchMessage = mutation({
       await ctx.db.insert('notifications', {
         userId: toUserId,
         type: 'message',
-        title: `${fromUser.name} sent you a message`,
+        title: notificationTitle,
         body: notificationBody,
         data: { conversationId: conversation._id, userId: fromUserId },
         phase: 'phase1',
@@ -1143,6 +1153,17 @@ export const markAsRead = mutation({
     const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return; // Silent return for mark-as-read (non-critical)
+    }
+
+    // P1-FIX (D5): Cap mark-as-read rate to bound per-conversation message
+    // patch fan-out. Limit is well above any realistic legitimate user
+    // pattern (60/min). On denial we mirror the existing silent no-op
+    // return so debounced clients do not surface user-facing errors.
+    const readLimit = await reserveActionSlots(ctx, userId, 'msg_mark_read', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+    ]);
+    if (!readLimit.accept) {
+      return { success: false, count: 0 };
     }
 
     const conversation = await ctx.db.get(conversationId);
@@ -1383,6 +1404,16 @@ export const markAsDelivered = mutation({
       return { success: false, count: 0 };
     }
 
+    // P1-FIX (D5): Cap mark-as-delivered rate to bound per-conversation
+    // message patch fan-out (60/min per user). Silent denial keeps clients
+    // that retry on focus-flap from showing user-visible errors.
+    const deliveredLimit = await reserveActionSlots(ctx, userId, 'msg_mark_delivered', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+    ]);
+    if (!deliveredLimit.accept) {
+      return { success: false, count: 0 };
+    }
+
     const conversation = await ctx.db.get(conversationId);
     if (!conversation || !conversation.participants.includes(userId)) {
       return { success: false, count: 0 };
@@ -1432,6 +1463,16 @@ export const markAllAsDelivered = mutation({
     }
     const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
+      return { success: false, count: 0 };
+    }
+
+    // P1-FIX (D5): Cap mark-all-as-delivered rate (60/min per user). This
+    // mutation cross-scans every conversation the user participates in, so
+    // the cap also caps the worst-case fan-out.
+    const deliveredAllLimit = await reserveActionSlots(ctx, userId, 'msg_mark_all_delivered', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+    ]);
+    if (!deliveredAllLimit.accept) {
       return { success: false, count: 0 };
     }
 
@@ -1751,25 +1792,29 @@ export const getConversations = query({
     // PERF #7: Batch-fetch all related data in parallel instead of N+1 queries
     // M2 FIX: Batch-fetch ALL blocks for current user in just 2 queries (not 2*N)
     // Uses same efficient pattern as privateDiscover.ts
+    // P3-FIX: Defensive 1000-row cap on blocks/reports per direction. Used
+    // only to build a membership Set for filtering, so a partial result is
+    // never silently wrong for normal users (cap is far above realistic
+    // block / report counts).
     const [blocksOut, blocksIn, reportsOut, reportsIn] = await Promise.all([
       // All users I have blocked
       ctx.db
         .query('blocks')
         .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
-        .collect(),
+        .take(1000),
       // All users who have blocked me
       ctx.db
         .query('blocks')
         .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
-        .collect(),
+        .take(1000),
       ctx.db
         .query('reports')
         .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
-        .collect(),
+        .take(1000),
       ctx.db
         .query('reports')
         .withIndex('by_reported_user', (q) => q.eq('reportedUserId', userId))
-        .collect(),
+        .take(1000),
     ]);
 
     // Build set of blocked user IDs (either direction)
@@ -2185,20 +2230,21 @@ export const getUnreadCount = query({
       return 0;
     }
 
-    // C1/C2-REPAIR: Hybrid approach - use denormalized counts where available,
-    // fall back to source-of-truth computation for conversations without participant rows.
-    // P1-FIX: Bounded fallback instead of unbounded .collect() on all conversations.
+    // P1-FIX (D2): Use denormalized `conversationParticipants.unreadCount` as
+    // the single source of truth. The prior implementation walked up to 500
+    // recent conversations and, for each one missing a participant row,
+    // recomputed unread by scanning up to 1000 messages — worst case 500K
+    // message reads per query call. Participant rows are now always inserted
+    // by `upsertParticipantUnreadCount` on every message write, and any
+    // legacy gaps are repaired by `backfillConversationParticipants`. No
+    // unbounded fallback remains. Phase-1/Chat-Rooms isolation is preserved
+    // via the same conversation-lookup-and-filter step.
 
     // 1. Get all participant rows for this user (fast indexed query)
     const participantRows = await ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .take(CONVERSATION_PARTICIPANT_SCAN_LIMIT);
-
-    // Build set of conversation IDs that have participant rows (O(1) lookup)
-    const coveredConversationIds = new Set<string>(
-      participantRows.map((row) => row.conversationId as string)
-    );
 
     // PHASE-1/CHAT-ROOMS ISOLATION: The Phase-1 Messages badge must NOT count
     // Chat Rooms private 1:1 DMs (connectionSource === 'room'). Those are
@@ -2214,37 +2260,10 @@ export const getUnreadCount = query({
     // 2. Count conversations that have unreadCount > 0 (not sum of all unread)
     //    …excluding Chat Rooms DMs.
     let totalUnreadConversations = 0;
-    const now = Date.now();
     for (const conversation of unreadConversationsForRows) {
       if (!conversation) continue;
       if (isChatRoomPrivateDmConversation(conversation)) continue;
       totalUnreadConversations += 1;
-    }
-
-    // 3. Bounded fallback: only check recent conversations (last 30 days) without participant rows
-    // This replaces the unbounded .collect() that loaded ALL conversations
-    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-    const thirtyDaysAgo = now - THIRTY_DAYS_MS;
-    const MAX_FALLBACK_CONVERSATIONS = 500;
-
-    const recentConversations = await ctx.db
-      .query('conversations')
-      .withIndex('by_last_message', (q) => q.gt('lastMessageAt', thirtyDaysAgo))
-      .take(MAX_FALLBACK_CONVERSATIONS);
-
-    for (const conversation of recentConversations) {
-      // Skip if not a participant
-      if (!conversation.participants.includes(userId)) continue;
-      // PHASE-1/CHAT-ROOMS ISOLATION (fallback path): same reasoning as above.
-      if (isChatRoomPrivateDmConversation(conversation)) continue;
-      // Skip if already covered by participant row
-      if (coveredConversationIds.has(conversation._id as string)) continue;
-
-      const count = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
-      // BADGE-FIX: Add 1 if conversation has any unread, not the count itself
-      if (count > 0) {
-        totalUnreadConversations += 1;
-      }
     }
 
     return totalUnreadConversations;
@@ -2293,6 +2312,14 @@ export const markDmConversationRead = mutation({
     }
     const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
+      return { success: false, count: 0 };
+    }
+
+    // P1-FIX (D5): Cap mark-DM-read rate (60/min per user). Silent denial.
+    const dmReadLimit = await reserveActionSlots(ctx, userId, 'msg_mark_dm_read', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+    ]);
+    if (!dmReadLimit.accept) {
       return { success: false, count: 0 };
     }
 
@@ -2508,6 +2535,15 @@ export const setTypingStatus = mutation({
     const userId = sessionToken ? await validateSessionToken(ctx, sessionToken) : null;
     if (!userId) return;
 
+    // P1-FIX (D5): Cap typing-status churn (20/min per user). Well above any
+    // legitimate debounced client; silent denial on overflow.
+    const typingLimit = await reserveActionSlots(ctx, userId, 'msg_typing_status', [
+      { kind: '1min', windowMs: 60_000, max: 20 },
+    ]);
+    if (!typingLimit.accept) {
+      return;
+    }
+
     // Verify user is part of conversation
     const conversation = await ctx.db.get(conversationId);
     if (!conversation || !conversation.participants.includes(userId)) {
@@ -2535,14 +2571,19 @@ export const setTypingStatus = mutation({
       return;
     }
 
+    // P2-FIX: Stamp explicit `expiresAt` so cleanup can target rows via the
+    // `by_expires_at` index without scanning the whole table.
+    const expiresAt = now + TYPING_STATUS_EXPIRES_MS;
+
     if (existing) {
-      await ctx.db.patch(existing._id, { isTyping, updatedAt: now });
+      await ctx.db.patch(existing._id, { isTyping, updatedAt: now, expiresAt });
     } else {
       await ctx.db.insert('typingStatus', {
         conversationId,
         userId,
         isTyping,
         updatedAt: now,
+        expiresAt,
       });
     }
   },
@@ -2602,14 +2643,35 @@ export const getTypingStatus = query({
 export const cleanupStaleTypingStatus = internalMutation({
   args: {},
   handler: async (ctx) => {
-    const cutoff = Date.now() - TYPING_STATUS_CLEANUP_MS;
-    const typingRows = await ctx.db
+    const now = Date.now();
+    const cutoff = now - TYPING_STATUS_CLEANUP_MS;
+
+    // P2-FIX: Primary sweep uses the new `by_expires_at` index. Anchoring
+    // with `gt(0)` skips rows whose optional `expiresAt` is unset (legacy
+    // rows are caught by the second sweep below).
+    const expiredRows = await ctx.db
+      .query('typingStatus')
+      .withIndex('by_expires_at', (q) => q.gt('expiresAt', 0).lte('expiresAt', now))
+      .take(TYPING_STATUS_CLEANUP_BATCH);
+
+    let deleted = 0;
+    const deletedIds = new Set<string>();
+    for (const row of expiredRows) {
+      if (row.expiresAt && row.expiresAt > now) continue; // defence in depth
+      await ctx.db.delete(row._id);
+      deletedIds.add(row._id);
+      deleted += 1;
+    }
+
+    // Compatibility sweep: pick up legacy rows that pre-date the
+    // `expiresAt` field and would otherwise never appear in the new index.
+    const legacyRows = await ctx.db
       .query('typingStatus')
       .withIndex('by_updatedAt', (q) => q.lt('updatedAt', cutoff))
       .take(TYPING_STATUS_CLEANUP_BATCH);
 
-    let deleted = 0;
-    for (const row of typingRows) {
+    for (const row of legacyRows) {
+      if (deletedIds.has(row._id)) continue;
       await ctx.db.delete(row._id);
       deleted += 1;
     }
@@ -2617,7 +2679,9 @@ export const cleanupStaleTypingStatus = internalMutation({
     return {
       success: true,
       deleted,
-      hasMore: typingRows.length === TYPING_STATUS_CLEANUP_BATCH,
+      hasMore:
+        expiredRows.length === TYPING_STATUS_CLEANUP_BATCH ||
+        legacyRows.length === TYPING_STATUS_CLEANUP_BATCH,
     };
   },
 });

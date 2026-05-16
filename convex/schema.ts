@@ -1007,7 +1007,11 @@ export default defineSchema({
     isMirrored: v.optional(v.boolean()),
   })
     .index('by_chat', ['chatId'])
-    .index('by_owner', ['ownerId']),
+    .index('by_owner', ['ownerId'])
+    // P1-FIX (D3): Bounded `cleanupExpiredMedia` cron uses this index to
+    // pull only already-marked-expired media rows in batches instead of
+    // `.collect()`-ing the whole table.
+    .index('by_expired_at', ['expiredAt']),
 
   // Media Permissions table (per-recipient access control)
   mediaPermissions: defineTable({
@@ -1024,7 +1028,11 @@ export default defineSchema({
     lastViewedAt: v.optional(v.number()),
   })
     .index('by_media_recipient', ['mediaId', 'recipientId'])
-    .index('by_recipient', ['recipientId']),
+    .index('by_recipient', ['recipientId'])
+    // P1-FIX (D3): Bounded `cleanupExpiredMedia` cron uses this index to
+    // pull only permissions whose timer has elapsed in batches instead of
+    // `.collect()`-ing the whole table.
+    .index('by_expires_at', ['expiresAt']),
 
   // Security Events table (audit log for protected media)
   securityEvents: defineTable({
@@ -1642,15 +1650,21 @@ export default defineSchema({
     .index('by_token', ['token']),
 
   // Typing status table (ephemeral)
+  // P2-FIX: `expiresAt` lets cleanup target rows by explicit expiry instead
+  // of deriving the cutoff from `updatedAt`. New rows always set it; legacy
+  // rows without `expiresAt` are still swept by the existing `by_updatedAt`
+  // path in `cleanupStaleTypingStatus`.
   typingStatus: defineTable({
     conversationId: v.id('conversations'),
     userId: v.id('users'),
     isTyping: v.boolean(),
     updatedAt: v.number(),
+    expiresAt: v.optional(v.number()),
   })
     .index('by_conversation', ['conversationId'])
     .index('by_user_conversation', ['userId', 'conversationId'])
-    .index('by_updatedAt', ['updatedAt']),
+    .index('by_updatedAt', ['updatedAt'])
+    .index('by_expires_at', ['expiresAt']),
 
   // Nudges table (smart notifications)
   nudges: defineTable({

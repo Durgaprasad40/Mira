@@ -109,6 +109,17 @@ async function getGridPrimaryPhotoUrl(
 }
 
 // Generate upload URL
+// P3-NOTE: A per-user rate limit on this mutation was considered during the
+// Phase-1 Messages hardening review but deliberately deferred. This URL is
+// shared across onboarding photo-upload, edit-profile, face verification,
+// Phase-2 onboarding, the photo-sync service, and Phase-1 chat secure
+// media. A single global cap could break onboarding for users with bursty
+// upload patterns. A safe fix requires either (a) splitting this mutation
+// into per-feature variants, or (b) accepting a `purpose` arg and applying
+// per-purpose quotas. Downstream Phase-1 message sends (`sendPreMatchMessage`,
+// `sendProtectedImage`) already enforce their own per-user rate limits, so
+// burning upload URLs without sending only produces orphaned storage
+// objects that the existing GC handles.
 export const generateUploadUrl = mutation({
   args: {
     token: v.string(),

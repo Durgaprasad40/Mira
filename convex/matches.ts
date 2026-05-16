@@ -402,14 +402,34 @@ export const unmatch = mutation({
 
 // Get new matches (for notifications)
 // P1 SECURITY: Added bidirectional block filtering
+// P0 SECURITY: Token-bound + caller must equal args.userId (prevents IDOR
+// enumeration of another user's recent matches).
 export const getNewMatches = query({
   args: {
+    token: v.string(),
     userId: v.id('users'),
     since: v.number(),
   },
   handler: async (ctx, args) => {
-    const { userId, since } = args;
+    const { token, userId, since } = args;
 
+    const sessionToken = typeof token === 'string' ? token.trim() : '';
+    if (!sessionToken) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const callerId = await validateSessionToken(ctx, sessionToken);
+    if (!callerId) {
+      throw new Error('Unauthorized: user not found');
+    }
+    if (callerId !== userId) {
+      throw new Error('Unauthorized');
+    }
+
+    // P3-FIX: Defensive caps. `since` is a recent timestamp from the poller,
+    // so the typical new-match count is single digits. The 200-row cap
+    // guards against pathological callers / time skew without affecting
+    // normal use. Blocks are capped at 1000, well above any realistic
+    // per-user block list.
     const [matchesAsUser1, matchesAsUser2, myBlocks, blocksOnMe] = await Promise.all([
       ctx.db
         .query('matches')
@@ -420,7 +440,7 @@ export const getNewMatches = query({
             q.gt(q.field('matchedAt'), since)
           )
         )
-        .collect(),
+        .take(200),
       ctx.db
         .query('matches')
         .withIndex('by_user2', (q) => q.eq('user2Id', userId))
@@ -430,16 +450,16 @@ export const getNewMatches = query({
             q.gt(q.field('matchedAt'), since)
           )
         )
-        .collect(),
+        .take(200),
       // P1 SECURITY: Fetch blocks bidirectionally
       ctx.db
         .query('blocks')
         .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
-        .collect(),
+        .take(1000),
       ctx.db
         .query('blocks')
         .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
-        .collect(),
+        .take(1000),
     ]);
 
     // Build blocked user set

@@ -1,11 +1,24 @@
 import { v } from 'convex/values';
 import { internalMutation, mutation, query, type MutationCtx } from './_generated/server';
 import type { Doc, Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { validateSessionToken } from './helpers';
+import { reserveActionSlots } from './actionRateLimits';
 import {
   isChatRoomPrivateDmConversation,
   isChatRoomPrivateDmExpired,
 } from './chatRoomDmRetention';
+
+// P1-FIX (D3): Bounded batch sizes for `cleanupExpiredMedia`. The cron
+// caller can call this repeatedly until `hasMore` returns false.
+const MEDIA_PERMISSION_CLEANUP_BATCH = 256;
+const MEDIA_CLEANUP_BATCH = 256;
+
+// P2-FIX: Grace window armed by `markViewed` on view-once media when no
+// explicit `timerSeconds` is set. Ensures the permission cannot be replayed
+// after the recipient opens the media and kills the app before
+// `markExpired` lands. The window is long enough to render and consume the
+// media but short enough that reopen-after-kill loses access on next open.
+const VIEW_ONCE_GRACE_MS = 60_000;
 
 /**
  * Legacy compatibility layer.
@@ -264,7 +277,11 @@ export const sendProtectedImage = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    const { conversation, sender } = await assertCanSendProtectedMedia(
+    // P2-FIX: `sender` was previously interpolated into the notification
+    // body; the dedupe path below uses a privacy-safe generic body and no
+    // longer needs the sender doc. `assertCanSendProtectedMedia` still
+    // verifies the sender's email/verification status server-side.
+    const { conversation } = await assertCanSendProtectedMedia(
       ctx,
       conversationId,
       senderId,
@@ -324,18 +341,47 @@ export const sendProtectedImage = mutation({
     // Update conversation
     await ctx.db.patch(conversationId, { lastMessageAt: now });
 
-    // Notify recipient
+    // Notify recipient.
+    // P2-FIX: Dedupe via `message:${conversationId}:unread` so repeated
+    // protected sends (or a mix of protected + text sends) collapse into a
+    // single unread notification per conversation. Mirrors the upsert
+    // pattern used by `sendPreMatchMessage` / regular text sends in
+    // `convex/messages.ts`. Data payload remains free of media URLs,
+    // storage IDs, and message text.
     const recipientId = conversation.participants.find((id) => id !== senderId);
     if (recipientId) {
-      await ctx.db.insert('notifications', {
-        userId: recipientId,
-        type: 'message',
-        title: 'New Message',
-        body: `${sender.name} sent you a protected ${isVideo ? 'video' : 'photo'}`,
-        data: { conversationId },
-        phase: 'phase1',
-        createdAt: now,
-      });
+      const dedupeKey = `message:${conversationId}:unread`;
+      const notificationTitle = 'New Message';
+      const notificationBody = `You received a protected ${isVideo ? 'video' : 'photo'}`;
+      const expiresAt = now + 24 * 60 * 60 * 1000;
+      const existingNotif = await ctx.db
+        .query('notifications')
+        .withIndex('by_user_dedupe', (q) =>
+          q.eq('userId', recipientId).eq('dedupeKey', dedupeKey)
+        )
+        .first();
+
+      if (existingNotif) {
+        await ctx.db.patch(existingNotif._id, {
+          title: notificationTitle,
+          body: notificationBody,
+          createdAt: now,
+          expiresAt,
+          readAt: undefined,
+        });
+      } else {
+        await ctx.db.insert('notifications', {
+          userId: recipientId,
+          type: 'message',
+          title: notificationTitle,
+          body: notificationBody,
+          data: { conversationId },
+          phase: 'phase1',
+          dedupeKey,
+          createdAt: now,
+          expiresAt,
+        });
+      }
     }
 
     return { success: true, messageId, mediaId };
@@ -370,6 +416,38 @@ export const getMediaUrl = query({
 
     const media = await ctx.db.get(message.mediaId);
     if (!media) return null;
+
+    // P1-FIX (D7): Block secure-media URLs once the linked Phase-1 match is
+    // inactive (unmatched). `unmatch` flips `match.isActive = false` but does
+    // not revoke individual `mediaPermissions` rows — without this gate the
+    // recipient can keep replaying view-once / timed media after the
+    // conversation is supposed to be closed. The UI consumes the standard
+    // expired-shape response (url: null, isExpired: true) and degrades the
+    // tile to the existing "expired" pill.
+    if (conversation.matchId) {
+      const match = await ctx.db.get(conversation.matchId);
+      const linkedActive =
+        !!match &&
+        match.isActive !== false &&
+        conversation.participants.includes(match.user1Id) &&
+        conversation.participants.includes(match.user2Id);
+      if (!linkedActive) {
+        return {
+          url: null,
+          isExpired: true,
+          allowScreenshot: false,
+          shouldBlur: true,
+          watermarkText: null,
+          mediaId: media._id,
+          timerSeconds: null,
+          expiresAt: null,
+          viewOnce: media.viewOnce,
+          viewMode: media.viewMode ?? 'tap',
+          mediaType: media.mediaType ?? 'image',
+          isMirrored: media.isMirrored ?? false,
+        };
+      }
+    }
 
     // EXPIRY-SYNC-FIX: Check global expiry first (applies to both owner and recipient)
     if (media.expiredAt || media.deletedAt) {
@@ -525,6 +603,16 @@ export const markViewed = mutation({
       return { success: true }; // Silent return for view tracking
     }
 
+    // P1-FIX (D5): Cap protected-media view-marking rate (30/min per user).
+    // Silent denial preserves the existing "success: true" no-op semantics
+    // used elsewhere in this handler so the viewer does not surface errors.
+    const viewedLimit = await reserveActionSlots(ctx, userId, 'media_mark_viewed', [
+      { kind: '1min', windowMs: 60_000, max: 30 },
+    ]);
+    if (!viewedLimit.accept) {
+      return { success: true };
+    }
+
     const message = await ctx.db.get(messageId);
     if (!message || !message.mediaId) return { success: true };
 
@@ -561,6 +649,16 @@ export const markViewed = mutation({
       updates.openedAt = now;
       if (media.timerSeconds && media.timerSeconds > 0) {
         updates.expiresAt = now + media.timerSeconds * 1000;
+      } else if (media.viewOnce) {
+        // P2-FIX: Arm a short server-side expiry on view-once media.
+        // Without this, opening the media and killing the app before
+        // `markExpired` lands leaves the permission live until the cron
+        // sweep — letting the recipient reopen the media.
+        const graceExpiresAt = now + VIEW_ONCE_GRACE_MS;
+        updates.expiresAt =
+          permission.expiresAt && permission.expiresAt > 0
+            ? Math.min(permission.expiresAt, graceExpiresAt)
+            : graceExpiresAt;
       }
     }
 
@@ -598,6 +696,14 @@ export const markExpired = mutation({
     const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: true }; // Silent return for expiry tracking
+    }
+
+    // P1-FIX (D5): Cap mark-expired rate (30/min per user). Silent denial.
+    const expiredLimit = await reserveActionSlots(ctx, userId, 'media_mark_expired', [
+      { kind: '1min', windowMs: 60_000, max: 30 },
+    ]);
+    if (!expiredLimit.accept) {
+      return { success: true };
     }
 
     const message = await ctx.db.get(messageId);
@@ -641,22 +747,42 @@ export const markExpired = mutation({
   },
 });
 
+// P1-FIX (D3): Bounded cleanup. Prior implementation used `.collect()` on
+// both `mediaPermissions` and `media` — unbounded full-table scans that
+// scale with platform lifetime. We now drive cleanup off two new indexes
+// (`mediaPermissions.by_expires_at`, `media.by_expired_at`) and process at
+// most `MEDIA_PERMISSION_CLEANUP_BATCH` + `MEDIA_CLEANUP_BATCH` rows per
+// invocation. Returns `hasMore` so the cron caller (or a manual operator)
+// can re-run until the queues drain. Internal-only (no public API).
 export const cleanupExpiredMedia = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    const permissions = await ctx.db.query('mediaPermissions').collect();
     const expiredMediaIds = new Set<Id<'media'>>();
 
-    for (const permission of permissions) {
+    // 1. Permissions whose timer elapsed. Bounded range query on the new
+    //    `by_expires_at` index. Optional-field rows (no expiresAt) are not
+    //    surfaced because we anchor the range strictly above 0.
+    const expiredPermissions = await ctx.db
+      .query('mediaPermissions')
+      .withIndex('by_expires_at', (q) => q.gt('expiresAt', 0).lte('expiresAt', now))
+      .take(MEDIA_PERMISSION_CLEANUP_BATCH);
+    for (const permission of expiredPermissions) {
+      // Defensive belt-and-braces guard in case Convex surfaces undefined
+      // rows through the range query in some edge cases.
       if (permission.expiresAt && permission.expiresAt <= now) {
         expiredMediaIds.add(permission.mediaId);
       }
     }
 
-    const mediaRecords = await ctx.db.query('media').collect();
-    for (const media of mediaRecords) {
-      if (media.expiredAt || media.deletedAt) {
+    // 2. Media already flagged expired (timer/view-once finalize path) that
+    //    may still need storage cleanup retried by `finalizeExpiredMedia`.
+    const expiringMedia = await ctx.db
+      .query('media')
+      .withIndex('by_expired_at', (q) => q.gt('expiredAt', 0).lte('expiredAt', now))
+      .take(MEDIA_CLEANUP_BATCH);
+    for (const media of expiringMedia) {
+      if (media.expiredAt && media.expiredAt <= now) {
         expiredMediaIds.add(media._id);
       }
     }
@@ -669,29 +795,55 @@ export const cleanupExpiredMedia = internalMutation({
       expiredCount += 1;
     }
 
-    return { success: true, expiredCount };
+    return {
+      success: true,
+      expiredCount,
+      hasMore:
+        expiredPermissions.length === MEDIA_PERMISSION_CLEANUP_BATCH ||
+        expiringMedia.length === MEDIA_CLEANUP_BATCH,
+    };
   },
 });
 
 // Legacy: logScreenshotEvent → delegates to events module pattern
+// P1-FIX (D6): Migrated auth to the same `token` + `validateSessionToken`
+// pattern used by every other Phase-1 Messages mutation (the previous
+// `ctx.auth.getUserIdentity()` path was the lone hold-out and made the
+// security-event surface depend on a different auth pipeline). The
+// dedupe scan was also unbounded `.collect()` over `securityEvents` and
+// inspected the count AFTER inserting the new row (`<= 1`), which
+// produced exactly one row per call regardless. We now query BEFORE
+// inserting the row with `.take(2)` and require zero prior matches to
+// drop a system message — true "only the first screenshot drops a
+// chat-visible breadcrumb" semantics.
 export const logScreenshotEvent = mutation({
   args: {
     messageId: v.id('messages'),
-    // MEDIA-P1-003 FIX: Removed userId - now derived from server auth
+    token: v.string(),
     wasTaken: v.boolean(),
   },
   handler: async (ctx, args) => {
-    // MEDIA-P1-003 FIX: Derive caller identity from server auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    const { messageId, token, wasTaken } = args;
+
+    const sessionToken = token.trim();
+    if (!sessionToken) {
       return { success: true }; // Silent return for unauthenticated
     }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    const userId = await validateSessionToken(ctx, sessionToken);
     if (!userId) {
       return { success: true }; // Silent return if user not found
     }
 
-    const { messageId, wasTaken } = args;
+    // P1-FIX (D5): Cap screenshot event rate (10/min per user). Silent
+    // denial — clients should never legitimately exceed this and surfacing
+    // an error would leak rate-limit state to the device.
+    const screenshotLimit = await reserveActionSlots(ctx, userId, 'media_screenshot_event', [
+      { kind: '1min', windowMs: 60_000, max: 10 },
+    ]);
+    if (!screenshotLimit.accept) {
+      return { success: true };
+    }
+
     const now = Date.now();
 
     const message = await ctx.db.get(messageId);
@@ -700,20 +852,22 @@ export const logScreenshotEvent = mutation({
     const media = await ctx.db.get(message.mediaId);
     if (!media) return { success: true };
 
+    // Participant guard: only conversation participants can log screenshot
+    // events for this media. Preserves the existing trust boundary that the
+    // old `ctx.auth` path relied on implicitly through the viewer mounting.
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { success: true };
+    }
+
     const eventType = wasTaken ? 'screenshot_taken' : 'screenshot_attempted';
 
-    // Always log for audit
-    await ctx.db.insert('securityEvents', {
-      chatId: media.chatId,
-      mediaId: media._id,
-      actorId: userId,
-      type: eventType,
-      createdAt: now,
-    });
-
-    // Deduplicate system messages for screenshot_taken
+    // Dedupe check FIRST (bounded, before any inserts). We only drop a
+    // chat-visible system message when this is the first screenshot_taken
+    // event for this (media, actor) pair.
+    let shouldInsertSystemMessage = false;
     if (wasTaken) {
-      const existing = await ctx.db
+      const prior = await ctx.db
         .query('securityEvents')
         .withIndex('by_media', (q) => q.eq('mediaId', media._id))
         .filter((q) =>
@@ -722,19 +876,28 @@ export const logScreenshotEvent = mutation({
             q.eq(q.field('type'), 'screenshot_taken')
           )
         )
-        .collect();
+        .take(2);
+      shouldInsertSystemMessage = prior.length === 0;
+    }
 
-      // Only one system message per actor+media (we just inserted one, so check <= 1)
-      if (existing.length <= 1) {
-        await ctx.db.insert('messages', {
-          conversationId: media.chatId,
-          senderId: userId,
-          type: 'system',
-          content: '📸 Screenshot taken',
-          systemSubtype: 'screenshot_taken',
-          createdAt: now,
-        });
-      }
+    // Always log the security event for audit (independent of dedupe).
+    await ctx.db.insert('securityEvents', {
+      chatId: media.chatId,
+      mediaId: media._id,
+      actorId: userId,
+      type: eventType,
+      createdAt: now,
+    });
+
+    if (shouldInsertSystemMessage) {
+      await ctx.db.insert('messages', {
+        conversationId: media.chatId,
+        senderId: userId,
+        type: 'system',
+        content: '📸 Screenshot taken',
+        systemSubtype: 'screenshot_taken',
+        createdAt: now,
+      });
     }
 
     return { success: true };
