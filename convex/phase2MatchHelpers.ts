@@ -13,6 +13,20 @@ export function getPhase2UserPair(userA: Id<'users'>, userB: Id<'users'>) {
   return { user1Id, user2Id };
 }
 
+/**
+ * Locate the unique Phase-2 conversation shared by two users, if any.
+ *
+ * P3-BOUNDS-01: The `.collect()` here is intentional and effectively bounded
+ * by the number of conversations userA participates in (i.e. one user's
+ * inbox size). At the worst-case Phase-2 inbox of ~200 (see
+ * `MAX_PRIVATE_CONVERSATION_SCAN_LIMIT` in privateConversations.ts), this
+ * scan reads at most ~200 small rows and then does a single indexed lookup
+ * per row. Adding a `.take()` cap here would risk silently failing to find
+ * an existing conversation for a heavy user and creating a duplicate row,
+ * which would then need the `cleanDuplicatePairConversations` collapse to
+ * recover. Leaving unbounded is the safer choice; the indexed query keeps
+ * cost linear in user inbox size, not global Phase-2 traffic.
+ */
 async function findPrivateConversationForPair(
   ctx: any,
   userAId: Id<'users'>,
@@ -82,6 +96,25 @@ async function ensurePrivateReveal(ctx: any, user1Id: Id<'users'>, user2Id: Id<'
   }
 }
 
+/**
+ * Race-safe collapse for duplicate `privateConversations` rows that share
+ * the same sorted-participants pair.
+ *
+ * P3-BOUNDS-02: Both `.collect()` calls in this function are intentionally
+ * unbounded because:
+ *   1. The outer scan is a sorted-pair equality, which in steady state
+ *      returns 1 row and at worst (race collision) returns 2-3 rows. There
+ *      is no realistic universe where it returns hundreds.
+ *   2. The inner per-duplicate scan reads `privateConversationParticipants`
+ *      keyed on `by_conversation`, which is structurally bounded to exactly
+ *      2 rows per conversation (Phase-2 conversations are strictly 1:1).
+ *   3. Capping these scans could leave orphan duplicate conversations alive
+ *      and break the convergence guarantee that the post-insert collapse
+ *      pattern relies on (see P2-RACE-01 in `ensurePhase2MatchAndConversation`).
+ *
+ * Race semantics: lexicographically-smallest `_id` wins. Convex OCC ensures
+ * concurrent collapses agree on the same winner row.
+ */
 async function cleanDuplicatePairConversations(
   ctx: any,
   sortedParticipants: [Id<'users'>, Id<'users'>],
@@ -175,6 +208,36 @@ export async function ensurePhase2MatchAndConversation(
       publicSource = 'rematch';
     }
   } else {
+    // P2-RACE-01: Concurrent-reciprocal-like duplicate-match prevention.
+    //
+    //   Threat model: two clients (A→B and B→A) submit the second-half of a
+    //   mutual like within the same Convex commit window. Because the
+    //   `existingMatch` check above can return null in both transactions
+    //   before either insert commits, both transactions would race to
+    //   insert a `privateMatches` row for the same (user1Id, user2Id) pair.
+    //   Convex does NOT enforce uniqueness on `by_users` — the index is
+    //   non-unique — so both rows would persist absent this collapse step.
+    //
+    //   Protection: post-insert, re-query ALL rows on `by_users` and keep
+    //   ONLY the row with the lexicographically-smallest `_id`. Convex
+    //   `_id` values are monotonic and globally unique, so both racing
+    //   transactions deterministically converge on the SAME winner row.
+    //   The loser transaction(s) delete their just-inserted row, rebind
+    //   the local `matchId` to the winner, and flag `alreadyMatched=true`
+    //   so downstream notification/conversation hooks don't double-fire.
+    //   Convex's OCC (optimistic concurrency control) ensures the
+    //   post-insert .collect() reads the committed view, so even if both
+    //   transactions race to the .collect() step, both will see both rows
+    //   and both will agree on which to keep.
+    //
+    //   The mirror pattern for `privateConversations` lives in
+    //   `cleanDuplicatePairConversations` above, which is invoked from the
+    //   conversation-create path below.
+    //
+    //   Why not a unique index? Convex schemas don't expose unique
+    //   constraints today; this post-insert collapse is the idiomatic
+    //   Convex pattern for race-safe singletons keyed on a composite
+    //   non-unique index.
     matchId = await ctx.db.insert('privateMatches', {
       user1Id,
       user2Id,
@@ -276,6 +339,22 @@ export async function ensurePhase2MatchAndConversation(
   };
 }
 
+/**
+ * Read-only status lookup for a Phase-2 (user, user) pair.
+ *
+ * Returns the active match (if any), the shared conversation ID (if any),
+ * and `isConnected` (true iff either an active match OR a conversation
+ * exists for the sorted pair).
+ *
+ * SECURITY CONTRACT:
+ *   - This helper takes already-validated user IDs from the caller; the
+ *     CALLER is responsible for token-bound viewer auth. Do NOT call this
+ *     from a public mutation/query handler without first resolving and
+ *     validating the viewer's identity via `validateSessionToken`.
+ *   - Sorted-pair ordering is enforced via `getPhase2UserPair`, matching
+ *     the `by_users` index shape. Calling with unsorted IDs would miss
+ *     the match.
+ */
 export async function findPhase2MatchConversationStatus(
   ctx: any,
   userAId: Id<'users'>,
@@ -298,6 +377,27 @@ export async function findPhase2MatchConversationStatus(
   };
 }
 
+/**
+ * Idempotent producer for Phase-2 match notifications.
+ *
+ * CONTRACT (do not weaken):
+ *   - Dedupe is keyed on `p2_match:${matchId}:${userId}` — racing inserts
+ *     for the same (match, recipient) pair will see the existing row via
+ *     the `by_user_dedupe` index and short-circuit. This is the ONLY guard
+ *     against double-notifying a recipient when a match is established by
+ *     two simultaneous reciprocal-like transactions.
+ *   - User preferences are checked via `shouldCreatePhase2DeepConnectNotification`
+ *     BEFORE the dedupe lookup, so an opted-out user never has a row
+ *     written even once.
+ *   - `data` is filtered through an allowlist (`allowedDataKeys`) — never
+ *     spread user-provided data straight into the notification row. Adding
+ *     a new field requires updating both the allowlist AND any consumer
+ *     UI that needs to read it.
+ *   - TTL: 7 days (vs the standard 24h on transient inbox rows) because
+ *     match notifications are higher-value and shown in the bell longer.
+ *   - Push is optional and dispatched via the Phase-2-specific helper so
+ *     the side-channel never crosses into Phase-1's push pipeline.
+ */
 export async function createPhase2MatchNotificationIfMissing(
   ctx: any,
   args: {

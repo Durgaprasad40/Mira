@@ -12,6 +12,7 @@ import { Doc, Id } from './_generated/dataModel';
 import { getPhase2DisplayName, validateSessionToken, resolveUserIdByAuthId } from './helpers';
 import { shouldCreatePhase2DeepConnectNotification } from './phase2NotificationPrefs';
 import { dispatchPrivatePush } from './privateNotifications';
+import { reserveActionSlots, type RateLimitWindow } from './actionRateLimits';
 import { softMaskText } from './softMask';
 import {
   filterOwnedSafePrivatePhotoUrls,
@@ -66,6 +67,99 @@ const MAX_STAND_OUT_LIST_FETCH_WINDOW = 200;
 const MAX_STAND_OUT_COUNT_SCAN = 300;
 const MAX_INCOMING_LIKE_LIST_FETCH_WINDOW = 150;
 const MAX_INCOMING_LIKE_COUNT_SCAN = 500;
+
+// P2-PERF-02: Early-bailout display caps for badge counts. The mobile UI
+// renders "99+" for any value at or above this threshold, so once a count
+// query has accumulated enough visible/eligible rows to exceed the cap we
+// can stop doing per-row reciprocal-like / safety / preview lookups. The
+// row-scan caps above (MAX_STAND_OUT_COUNT_SCAN, MAX_INCOMING_LIKE_COUNT_SCAN)
+// bound the database read; these display caps bound the *per-row* work
+// (reciprocal-like checks, profile preview reads, safety filters) which is
+// the dominant cost for users with hot incoming-like inboxes.
+const MAX_STAND_OUT_DISPLAY_COUNT = 99;
+const MAX_INCOMING_LIKE_DISPLAY_COUNT = 99;
+
+// P1-RL-01 / P1-RL-05: Generic user-facing message returned when a Phase-2
+// action is denied by a velocity limiter. Kept intentionally vague (no
+// window kind / retry-after) so a scripted client cannot probe limits.
+const PHASE2_RATE_LIMITED_MESSAGE = 'Slow down — too many actions in a short period.';
+
+// P1-RL-01: Per-action velocity windows applied to `swipe`. Mirrors the
+// Phase-1 Discover `swipe_{action}` shape from `convex/likes.ts` so Phase-2
+// inherits the same hardened "duplicate first, then velocity" behavior:
+//   - PASS:        ≤5/sec, ≤600/hour  (allow normal browsing speed)
+//   - LIKE:        ≤1/sec, ≤30/hour   (block click-spam, allow legitimate use)
+//   - SUPER_LIKE:  ≤1/min, ≤5/hour    (super_likes are also daily-capped at
+//                                       STAND_OUT_DAILY_LIMIT=2, this caps
+//                                       burst on upgrade paths)
+// Returns `null` for actions that should not consume a velocity slot.
+function getPhase2SwipeVelocityWindows(
+  action: 'like' | 'pass' | 'super_like',
+): RateLimitWindow[] | null {
+  switch (action) {
+    case 'pass':
+      return [
+        { kind: '1sec', windowMs: 1_000, max: 5 },
+        { kind: '1hour', windowMs: 60 * 60 * 1000, max: 600 },
+      ];
+    case 'like':
+      return [
+        { kind: '1sec', windowMs: 1_000, max: 1 },
+        { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+      ];
+    case 'super_like':
+      return [
+        { kind: '1min', windowMs: 60 * 1000, max: 1 },
+        { kind: '1hour', windowMs: 60 * 60 * 1000, max: 5 },
+      ];
+    default:
+      return null;
+  }
+}
+
+// P1-RL-01: Helper to consume a Phase-2 swipe velocity slot. Returns `void`
+// on accept, throws a user-safe message on denial. Keeping this co-located
+// with the windows table avoids drift between the swipe handler and the
+// upgrade path (existingLike like → super_like).
+async function assertPhase2SwipeVelocity(
+  ctx: MutationCtx,
+  fromUserId: Id<'users'>,
+  action: 'like' | 'pass' | 'super_like',
+): Promise<void> {
+  const windows = getPhase2SwipeVelocityWindows(action);
+  if (!windows) return;
+  const result = await reserveActionSlots(ctx, fromUserId, `p2_swipe_${action}`, windows);
+  if (!result.accept) {
+    throw new Error(PHASE2_RATE_LIMITED_MESSAGE);
+  }
+}
+
+// P1-RL-06: Per-recipient notification cap. Mirrors the Phase-1 helper
+// `phase1_notification` (`convex/likes.ts:117`) so one sender — or a coordinated
+// burst — cannot flood a target user's `privateNotifications` table.
+//
+// Returns `true` if the caller may proceed with the notification insert/patch,
+// `false` if the cap is exhausted. On `false` callers SHOULD silently skip
+// the notification write (matching Phase-1 behavior) so the sender's primary
+// action (swipe, message) still succeeds and the receiver is simply spared
+// the bell-spam.
+async function tryReservePhase2NotificationSlot(
+  ctx: MutationCtx,
+  recipientId: Id<'users'>,
+  kind: 'like' | 'message',
+): Promise<boolean> {
+  // Conservative daily caps: ample headroom for normal activity but bounded
+  // enough that a coordinated spam burst cannot exhaust the receiver's
+  // privateNotifications quota. Per-action types are kept independent so
+  // like-floods cannot starve genuine messages and vice versa.
+  const windows: RateLimitWindow[] =
+    kind === 'message'
+      ? [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 200 }]
+      : [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 100 }];
+  const action = kind === 'message' ? 'p2_message_notification' : 'p2_like_notification';
+  const result = await reserveActionSlots(ctx, recipientId, action, windows);
+  return result.accept;
+}
 
 const STAND_OUT_UNSAFE_PATTERNS: RegExp[] = [
   /\bp[o0]rn/i,
@@ -160,6 +254,13 @@ async function upsertPhase2LikeNotificationForAction(
     return;
   }
 
+  // P1-RL-06: Per-recipient cap on like-notification rows. If exhausted we
+  // skip the notification write (sender's swipe still completes) so a single
+  // sender — or a coordinated burst — cannot flood the recipient's bell.
+  if (!(await tryReservePhase2NotificationSlot(ctx, args.toUserId, 'like'))) {
+    return;
+  }
+
   const title =
     args.action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜';
   const body = 'Check your likes in Deep Connect to see who!';
@@ -250,6 +351,32 @@ async function getActivePrivateMatch(
   return match?.isActive === true ? match : null;
 }
 
+// P2-STANDOUT-01: Why this custom DB scan instead of `reserveActionSlots`?
+//
+//   `reserveActionSlots` (used by P1-RL-01..06) is a rolling-window limiter:
+//   it counts events in the last N ms. `STAND_OUT_DAILY_LIMIT` is a
+//   *calendar-day* quota — it resets at 00:00 UTC, not 24 hours after the
+//   user's last Stand Out. That difference is product-visible: a user who
+//   sends both Stand Outs at 23:00 UTC must be able to send two more at
+//   00:05 UTC (next calendar day), but a rolling 24h limiter would block
+//   them until 23:00 the next day.
+//
+//   To stay tight and bounded:
+//     - We read at most `STAND_OUT_DAILY_LIMIT` rows (`.take(LIMIT)`), so the
+//       scan is O(LIMIT) regardless of the user's historical privateLikes
+//       volume — there is no unbounded `.collect()` here.
+//     - The `by_from_action_createdAt` composite index lets the dayStart
+//       lower-bound be pushed into the index, so we never read rows outside
+//       today's window even if the user has thousands of historical
+//       super_likes.
+//
+//   The rolling-window velocity caps for `p2_swipe_super_like`
+//   (≤1/min, ≤5/hour, see P1-RL-01) sit on TOP of this calendar-day quota,
+//   so burst protection and per-day product limit are enforced
+//   independently. A future migration to a counter-row pattern (single
+//   `userId|dayBucket` row patched in-place) would further reduce read
+//   amplification, but the current O(LIMIT) bounded scan is already well
+//   within Convex per-mutation budgets.
 async function countStandOutsSentToday(
   ctx: QueryCtx | MutationCtx,
   fromUserId: Id<'users'>,
@@ -659,6 +786,13 @@ export const swipe = mutation({
         }
 
         const normalizedStandOutMessage = normalizeStandOutMessage(message);
+        // P1-RL-01: Velocity cap on the upgrade path (existing like →
+        // super_like) BEFORE the stand-out daily quota check, so a sender
+        // hitting their daily quota does not consume a velocity slot first
+        // (errors are surfaced in the most user-meaningful order). Placed
+        // here — after the duplicate check has resolved to "upgrade write" —
+        // so idempotent replays do not burn quota.
+        await assertPhase2SwipeVelocity(ctx, fromUserId, 'super_like');
         await assertStandOutQuotaAvailable(ctx, fromUserId, now);
 
         const likePatch: {
@@ -829,6 +963,13 @@ export const swipe = mutation({
 
     const normalizedStandOutMessage =
       action === 'super_like' ? normalizeStandOutMessage(message) : message;
+
+    // P1-RL-01: Velocity cap on the fresh-write path. Placed AFTER the
+    // duplicate check (the `existingLike` branches above return without
+    // consuming a slot) and AFTER target-eligibility + block checks so the
+    // most user-meaningful error wins. Mirrors Phase-1 `likes.swipe` ordering.
+    await assertPhase2SwipeVelocity(ctx, fromUserId, action);
+
     if (action === 'super_like') {
       await assertStandOutQuotaAvailable(ctx, fromUserId, now);
     }
@@ -948,6 +1089,14 @@ export const swipe = mutation({
         // Notify the recipient that someone liked them (anonymous)
         // STRICT ISOLATION: Phase-2 rows live in `privateNotifications` only
         if (await shouldCreatePhase2DeepConnectNotification(ctx, toUserId)) {
+          // P1-RL-06: Per-recipient daily cap on phase2_like notifications.
+          // If the recipient is already saturated for the day we silently
+          // skip both the notification row insert AND the push, mirroring
+          // Phase-1 `phase1_notification` behavior. The like itself is still
+          // persisted above so the relationship/match logic is unaffected.
+          if (!(await tryReservePhase2NotificationSlot(ctx, toUserId, 'like'))) {
+            return { success: true, isMatch: false, alreadyMatched: false, source: 'deep_connect' };
+          }
           const likeTitle =
             action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜';
           const likeBody = 'Check your likes in Deep Connect to see who!';
@@ -1140,8 +1289,12 @@ export const getStandOutCounts = query({
       countStandOutsSentToday(ctx, viewerId, Date.now()),
     ]);
 
+    // P2-PERF-02: Early-bailout once we've accumulated MAX_STAND_OUT_DISPLAY_COUNT
+    // visible rows. The UI shows "99+" beyond this, so additional per-row
+    // visibility/preview lookups would be discarded by the renderer anyway.
     let incoming = 0;
     for (const like of incomingLikes) {
+      if (incoming >= MAX_STAND_OUT_DISPLAY_COUNT) break;
       if (await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.fromUserId)) {
         const sender = await getStandOutProfilePreview(ctx, like.fromUserId);
         if (sender) incoming++;
@@ -1150,6 +1303,7 @@ export const getStandOutCounts = query({
 
     let outgoing = 0;
     for (const like of outgoingLikes) {
+      if (outgoing >= MAX_STAND_OUT_DISPLAY_COUNT) break;
       if (await isPendingStandOutVisibleToViewer(ctx, like, viewerId, like.toUserId)) {
         const receiver = await getStandOutProfilePreview(ctx, like.toUserId);
         if (receiver) outgoing++;
@@ -1176,6 +1330,20 @@ export const acceptStandOut = mutation({
   handler: async (ctx, args) => {
     const receiverId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
 
+    // P1-RL-05: Per-receiver velocity cap on Stand-Out acceptance. Each accept
+    // creates a privateLike + ensures match + ensures conversation + creates
+    // two match notifications (sender + receiver) + optionally seeds the
+    // original stand-out message, i.e. a non-trivial fan-out. Bounded well
+    // above any realistic human tap pattern; throws a generic message on
+    // denial so a scripted client cannot probe the window.
+    const limit = await reserveActionSlots(ctx, receiverId, 'p2_accept_standout', [
+      { kind: '1min', windowMs: 60_000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 60 },
+    ]);
+    if (!limit.accept) {
+      throw new Error(PHASE2_RATE_LIMITED_MESSAGE);
+    }
+
     return await acceptPendingStandOut(ctx, {
       receiverId,
       likeId: args.likeId,
@@ -1195,6 +1363,19 @@ export const replyToStandOut = mutation({
   },
   handler: async (ctx, args) => {
     const receiverId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
+
+    // P1-RL-05: Stricter velocity cap than `acceptStandOut` because each
+    // reply additionally inserts a text message in the new conversation
+    // (potential text-spam vector). Independent action key so reply-spam
+    // and silent-accept-spam are tracked separately. Generic denial message
+    // mirrors `acceptStandOut`.
+    const limit = await reserveActionSlots(ctx, receiverId, 'p2_reply_standout', [
+      { kind: '1min', windowMs: 60_000, max: 5 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+    ]);
+    if (!limit.accept) {
+      throw new Error(PHASE2_RATE_LIMITED_MESSAGE);
+    }
 
     return await acceptPendingStandOut(ctx, {
       receiverId,
@@ -1310,26 +1491,16 @@ export const hasSwipedOn = query({
   },
 });
 
-/**
- * Get users that current user has swiped on in Phase-2 (for filtering discover)
- * P1-SECURITY FIX: Requires auth - users can only access their OWN swipe list
- */
-export const getSwipedUserIds = query({
-  args: {
-    token: v.string(),
-    authUserId: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
-    const userId = await requirePrivateSwipeActor(ctx, args.token, args.authUserId);
-
-    const swipes = await ctx.db
-      .query('privateLikes')
-      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
-      .collect();
-
-    return swipes.map((s) => s.toUserId);
-  },
-});
+// P2-DEAD-06: `getSwipedUserIds` was removed in the Deep Connect P2 batch
+// after grep confirmed zero callers. The query did an unbounded `.collect()`
+// over `privateLikes` keyed on `fromUserId`, so a power-user with thousands
+// of swipes would have produced a multi-MB response for any caller that
+// invoked it. Live Phase-2 discover-deck filtering already excludes already-
+// swiped users on the server side inside `privateDiscover.ts` without round-
+// tripping the full set to the client. If a future feature needs paginated
+// access to a user's own swipe list, add a bounded `getSwipeHistory`-style
+// query (which already exists immediately above) — do NOT reintroduce an
+// unbounded `.collect()` over per-user `privateLikes`.
 
 /**
  * Get incoming likes (people who liked the current user) in Phase-2
@@ -1447,8 +1618,15 @@ export const getIncomingLikesCount = query({
       .order('desc')
       .take(MAX_INCOMING_LIKE_COUNT_SCAN);
 
+    // P2-PERF-02: Early-bailout once we've accumulated
+    // MAX_INCOMING_LIKE_DISPLAY_COUNT eligible rows. The badge surfaces "99+"
+    // beyond this, so further per-row safety + reciprocal-like lookups would
+    // be discarded by the renderer. This dominates query cost for users with
+    // many incoming likes — the reciprocal-like check is an indexed lookup
+    // per row, so capping the loop bounds per-call DB read fanout.
     let count = 0;
     for (const like of incomingLikes) {
+      if (count >= MAX_INCOMING_LIKE_DISPLAY_COUNT) break;
       if (like.action !== 'like' && like.action !== 'super_like') continue;
       if (await isIncomingLikeHiddenBySafety(ctx, userId, like.fromUserId)) continue;
 

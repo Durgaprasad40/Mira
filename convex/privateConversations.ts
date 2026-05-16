@@ -14,6 +14,7 @@ import { Doc, Id } from './_generated/dataModel';
 import { validateSessionToken, resolveUserIdByAuthId, getPhase2DisplayName } from './helpers';
 import { shouldCreatePhase2PrivateMessagesNotification } from './phase2NotificationPrefs';
 import { markPrivateMessageNotificationsForConversation } from './privateNotifications';
+import { reserveActionSlots } from './actionRateLimits';
 import { softMaskText } from './softMask';
 import { awardWalletCoins } from './wallet';
 import { filterOwnedSafePrivatePhotoUrls } from './phase2PrivatePhotos';
@@ -27,6 +28,26 @@ const EXPIRED_SECURE_MEDIA_VISIBLE_GRACE_MS = 60 * 1000;
 const PRIVATE_PROTECTED_MEDIA_TIMERS = new Set([0, 30, 60]);
 const MAX_PRIVATE_CONVERSATION_LIST_LIMIT = 80;
 const MAX_PRIVATE_CONVERSATION_SCAN_LIMIT = 200;
+
+// P2-BOUNDS-01: Per-call bound on how many participation rows the
+// total-unread / unread-conversation-count queries scan. Matches the
+// list-scan ceiling so badge counts are always consistent with what the
+// conversation list itself shows. A user with more than this many
+// conversations would have any conversation beyond the cap excluded from
+// the badge (same UX as the list page), but this is well above any
+// realistic Phase-2 inbox size and prevents an unbounded `.collect()` on a
+// per-user index.
+const MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN = MAX_PRIVATE_CONVERSATION_SCAN_LIMIT;
+
+// P2-BOUNDS-02: Per-call bound on the unread/undelivered message-row scan
+// inside a single conversation. The conversation read-receipt mutations
+// historically did an unbounded `.collect()` over the per-conversation
+// index, which on a chat with thousands of unread messages would have
+// patched every row in one mutation. We now batch — callers see
+// `hasMore: true` when the cap is reached and may re-invoke (subject to
+// the existing P1-RL-03 `p2_mark_read` rate limiter). Mirrors the
+// Phase-1 `msg_mark_all_delivered` bounded-batch shape.
+const MAX_PRIVATE_MESSAGE_MARK_BATCH = 200;
 
 type PrivateMessageMediaKind = 'image' | 'video' | 'audio';
 
@@ -829,6 +850,19 @@ export const markPrivateMessagesRead = mutation({
     // longer need the explicit if-null branch.
     const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
+    // P1-RL-03: Cap per-user mark-read churn (60/min). Each accepted call may
+    // patch every unread message in the conversation, so the cap also bounds
+    // per-conversation message patch fan-out. Mirrors Phase-1 `msg_mark_read`
+    // exactly (`convex/messages.ts:1162`). Silent denial returns a no-op
+    // shape so debounced clients (focus-flap, scroll-into-view) do not
+    // surface user-facing errors.
+    const readLimit = await reserveActionSlots(ctx, userId, 'p2_mark_read', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+    ]);
+    if (!readLimit.accept) {
+      return { success: false, markedCount: 0 };
+    }
+
     // Get conversation and verify user is participant
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
@@ -855,7 +889,11 @@ export const markPrivateMessagesRead = mutation({
       }
     }
 
-    // Get all unread messages sent by others
+    // P2-BOUNDS-02: Bounded scan. Replaces unbounded `.collect()` with a
+    // capped batch; on overflow we return `hasMore: true` so the client can
+    // re-invoke (subject to the existing P1-RL-03 `p2_mark_read` velocity
+    // limiter). This caps a single mutation's fan-out of `ctx.db.patch`
+    // calls and matches the Phase-1 mark-all-delivered batch shape.
     const unreadMessages = await ctx.db
       .query('privateMessages')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -865,7 +903,7 @@ export const markPrivateMessagesRead = mutation({
           q.eq(q.field('readAt'), undefined)
         )
       )
-      .collect();
+      .take(MAX_PRIVATE_MESSAGE_MARK_BATCH);
 
     // Mark each message as read
     for (const message of unreadMessages) {
@@ -898,7 +936,27 @@ export const markPrivateMessagesRead = mutation({
 /**
  * Send a message in a Phase-2 conversation.
  *
- * Security: Uses token-based auth, verifies user is participant, rate limits
+ * SECURITY CONTRACT (do not weaken without explicit review):
+ *   - Auth: identity is taken from `validateSessionToken(token)`. There is NO
+ *     `authUserId` override path here — the token IS the identity.
+ *   - IDOR: caller MUST be in `conversation.participants` (line ~997).
+ *     Conversation ID is treated as untrusted input.
+ *   - Block / unavailability: bidirectional block check via
+ *     `isBlockedBidirectional`; `isUnavailableUser` on the recipient.
+ *   - Rate limit: P1-RL-02 `p2_send_message` velocity windows are applied
+ *     before any DB write. Limiter denial returns the generic
+ *     `PHASE2_RATE_LIMITED_MESSAGE` so a scripted client cannot probe window
+ *     state.
+ *   - Idempotency: `clientMessageId` short-circuits to the original row to
+ *     prevent duplicate inserts on network retry. Do NOT remove this check —
+ *     it is the only guard against double-send when a client reconnects mid
+ *     mutation.
+ *   - Phase-2 isolation: writes ONLY to `privateMessages` /
+ *     `privateConversations` / `privateConversationParticipants`. Never the
+ *     Phase-1 `messages` / `conversations` tables.
+ *   - Push side-channel: dispatched via the Phase-2-specific dedupe key, NOT
+ *     `convex/notifications.ts`. Mixing tables here would break Phase-1/
+ *     Phase-2 separation.
  */
 export const sendPrivateMessage = mutation({
   args: {
@@ -974,22 +1032,26 @@ export const sendPrivateMessage = mutation({
       throw new Error('Conversation closed');
     }
 
-    // Rate limiting: 10 messages per minute per sender per conversation
-    // T/D SYSTEM MESSAGES: Skip rate limiting for system messages (game events)
+    // P1-RL-02: Backend-enforced velocity cap on outgoing Phase-2 messages.
+    // Replaces the previous ad-hoc per-conversation `.take(10)/60s` scan
+    // which (a) was per-conversation so a sender could fan out across many
+    // matches without limit, and (b) cost an indexed scan per send.
+    //
+    // The limiter is keyed on the sender across ALL their conversations, so
+    // cross-conversation spam is bounded by the same windows as in-thread
+    // spam. System messages (T/D game events) remain exempt as before.
+    //
+    // Idempotency note: the `clientMessageId` early-return above runs BEFORE
+    // this check, so a client retrying the same logical message does NOT
+    // consume a slot — only genuinely new messages are charged.
     if (type !== 'system') {
-      const oneMinuteAgo = now - 60000;
-      const recentMessages = await ctx.db
-        .query('privateMessages')
-        .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
-        .filter((q) =>
-          q.and(
-            q.eq(q.field('senderId'), senderId),
-            q.gt(q.field('createdAt'), oneMinuteAgo)
-          )
-        )
-        .take(10);
-      if (recentMessages.length >= 10) {
-        throw new Error('You are sending messages too quickly');
+      const sendLimit = await reserveActionSlots(ctx, senderId, 'p2_send_message', [
+        { kind: '1min', windowMs: 60_000, max: 10 },
+        { kind: '1hour', windowMs: 60 * 60 * 1000, max: 200 },
+        { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 1000 },
+      ]);
+      if (!sendLimit.accept) {
+        throw new Error('You are sending messages too quickly. Please try again later.');
       }
     }
 
@@ -1137,36 +1199,61 @@ export const sendPrivateMessage = mutation({
           )
           .first();
 
-        const notificationBody = 'You have a new message';
-        // ANON-LOADING-FIX: getPhase2DisplayName may now return null when the
-        // sender's private profile is missing. Use a graceful generic label so
-        // notification text never reads "null sent you a message" or leaks the
-        // intentional-mode-only word "Anonymous".
-        const senderLabel = (await getPhase2DisplayName(ctx, senderId)) ?? 'Someone';
+        // P1-RL-06: Per-recipient spam cap. Without this, a single sender (or
+        // many senders) could burn the recipient's notification quota / DB
+        // writes by sending streams of messages. We only consume a slot on
+        // genuinely new notification rows — the dedupe-key patch path below
+        // already collapses repeats into a single row, so the recipient
+        // never sees more than one inbox bell per conversation per "unread"
+        // window. Silent drop: the message itself was already written
+        // above, so we never fail the primary action — we just skip the
+        // bell-side notification when the recipient is being overwhelmed.
+        //
+        // The fresh-insert path is the only one that consumes a slot —
+        // patching an existing row is idempotent from a quota standpoint.
+        let allowNotificationWrite = true;
+        if (!existingNotif) {
+          const notifLimit = await reserveActionSlots(
+            ctx,
+            recipientId,
+            'p2_message_notification',
+            [{ kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 200 }],
+          );
+          allowNotificationWrite = notifLimit.accept;
+        }
 
-        if (existingNotif) {
-          await ctx.db.patch(existingNotif._id, {
-            title: `${senderLabel} sent you a message`,
-            body: notificationBody,
-            createdAt: now,
-            expiresAt: now + 24 * 60 * 60 * 1000,
-            readAt: undefined,
-          });
-        } else {
-          await ctx.db.insert('privateNotifications', {
-            userId: recipientId,
-            type: 'phase2_private_message',
-            title: `${senderLabel} sent you a message`,
-            body: notificationBody,
-            data: {
-              privateConversationId: conversationId as string,
-              otherUserId: senderId as string,
-            },
-            phase: 'phase2',
-            dedupeKey,
-            createdAt: now,
-            expiresAt: now + 24 * 60 * 60 * 1000,
-          });
+        if (allowNotificationWrite) {
+          const notificationBody = 'You have a new message';
+          // ANON-LOADING-FIX: getPhase2DisplayName may now return null when the
+          // sender's private profile is missing. Use a graceful generic label so
+          // notification text never reads "null sent you a message" or leaks the
+          // intentional-mode-only word "Anonymous".
+          const senderLabel = (await getPhase2DisplayName(ctx, senderId)) ?? 'Someone';
+
+          if (existingNotif) {
+            await ctx.db.patch(existingNotif._id, {
+              title: `${senderLabel} sent you a message`,
+              body: notificationBody,
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+              readAt: undefined,
+            });
+          } else {
+            await ctx.db.insert('privateNotifications', {
+              userId: recipientId,
+              type: 'phase2_private_message',
+              title: `${senderLabel} sent you a message`,
+              body: notificationBody,
+              data: {
+                privateConversationId: conversationId as string,
+                otherUserId: senderId as string,
+              },
+              phase: 'phase2',
+              dedupeKey,
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+            });
+          }
         }
       }
     }
@@ -1350,10 +1437,14 @@ export const getTotalUnreadCount = query({
   handler: async (ctx, { token, authUserId }) => {
     const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
+    // P2-BOUNDS-01: Bounded scan. Capped at MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN
+    // so a pathological account never triggers an unbounded `.collect()` over
+    // its participations index when the badge query runs (which can be on
+    // every tab switch).
     const participations = await ctx.db
       .query('privateConversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN);
 
     let totalUnreadCount = 0;
     for (const participation of participations) {
@@ -1393,10 +1484,11 @@ export const getPrivateUnreadConversationCount = query({
   handler: async (ctx, { token, authUserId }) => {
     const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
+    // P2-BOUNDS-01: Bounded scan, matches `getTotalUnreadCount` above.
     const participations = await ctx.db
       .query('privateConversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN);
 
     const unreadParticipations = participations.filter(
       (p) => p.isHidden !== true && p.unreadCount > 0
@@ -1489,7 +1581,10 @@ export const markPrivateMessagesDelivered = mutation({
       }
     }
 
-    // Get all messages from OTHER user that are not yet delivered
+    // P2-BOUNDS-02: Bounded scan. Same shape as Phase-1
+    // `msg_mark_all_delivered`. If the user has accumulated more than
+    // MAX_PRIVATE_MESSAGE_MARK_BATCH undelivered messages in a single
+    // conversation, the remainder will be picked up on the next call.
     const undeliveredMessages = await ctx.db
       .query('privateMessages')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -1499,7 +1594,7 @@ export const markPrivateMessagesDelivered = mutation({
           q.eq(q.field('deliveredAt'), undefined)
         )
       )
-      .collect();
+      .take(MAX_PRIVATE_MESSAGE_MARK_BATCH);
 
     // Mark each message as delivered
     for (const message of undeliveredMessages) {
@@ -1534,11 +1629,13 @@ export const markAllPrivateMessagesDelivered = mutation({
 
     const userId = await requirePrivateConversationActor(ctx, token, authUserId);
 
-    // Get all conversations this user is part of
+    // P2-BOUNDS-01: Bounded scan over participations, matches the badge
+    // count queries above. A user with more than this many participations
+    // will have remaining conversations picked up on a subsequent call.
     const participations = await ctx.db
       .query('privateConversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
-      .collect();
+      .take(MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN);
 
     let totalMarked = 0;
 
@@ -1559,6 +1656,10 @@ export const markAllPrivateMessagesDelivered = mutation({
         continue;
       }
 
+      // P2-BOUNDS-02: Per-conversation bound. The outer cap bounds how many
+      // conversations we visit; this inner cap bounds the per-conversation
+      // fan-out of `ctx.db.patch` calls. A pathologically large per-chat
+      // undelivered backlog will be drained on subsequent calls.
       const undeliveredMessages = await ctx.db
         .query('privateMessages')
         .withIndex('by_conversation', (q) => q.eq('conversationId', participation.conversationId))
@@ -1568,7 +1669,7 @@ export const markAllPrivateMessagesDelivered = mutation({
             q.eq(q.field('deliveredAt'), undefined)
           )
         )
-        .collect();
+        .take(MAX_PRIVATE_MESSAGE_MARK_BATCH);
 
       for (const message of undeliveredMessages) {
         await ctx.db.patch(message._id, { deliveredAt: now });

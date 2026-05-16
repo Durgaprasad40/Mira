@@ -405,17 +405,35 @@ async function isWithinDeepConnectImpressionRateLimit(
   return true;
 }
 
-// Get private discovery profiles (blurred photos only) with Phase-2 ranking
-// Filters out:
-// - The requesting user
-// - Incomplete profiles
-// - Blocked users (in BOTH directions - shared across phases)
-// - Users outside reciprocal age/distance hard preferences
-// - Users with pending deletion
-// Ranking behavior:
-// - Users seen within 4-hour suppression window are pushed to back
-// - Users without ranking metrics use fallback defaults for scoring
-// Returns profiles sorted by ranking score (descending)
+/**
+ * Phase-2 Deep Connect discover feed.
+ *
+ * Returns blurred-photo profile cards for the viewer's deck.
+ *
+ * SECURITY CONTRACT (do not weaken without explicit review):
+ *   - Identity: `requireTokenBoundViewer(token, {userId, authUserId})` — the
+ *     `userId` / `authUserId` args are ASSERTION HINTS ONLY and are
+ *     cross-checked against the token-resolved viewer. Never use them as
+ *     the source of truth.
+ *   - Eligibility: `getDeepConnectAccessContext` enforces phase-2 onboarding
+ *     completion, age verification, and active-account state. Returns
+ *     empty array on any failure (no leak via error channel).
+ *   - Server-side filters (the only place privacy is enforced):
+ *       • The requesting viewer themselves
+ *       • Incomplete / un-onboarded profiles
+ *       • Bidirectional blocks (Phase-1 + Phase-2 — `isBlockedBidirectional`)
+ *       • Mutual-preference age/distance hard filters
+ *       • Users with `isPrivateDataDeleted` true or pending deletion
+ *       • Users who set `hideFromDeepConnect`
+ *   - Ranking: a 4-hour suppression window pushes recently-seen users to
+ *     the back. Do NOT change this to a hard filter without UX review —
+ *     it must remain a re-rank, not a hide.
+ *   - Photos returned are URLs to BLURRED variants only. Unblurred photos
+ *     are revealed only via the privateReveals flow, never via this query.
+ *   - This is a `query` (read-only) — no `ctx.db.patch` paths should ever
+ *     be introduced here. Impression recording lives in
+ *     `recordDeepConnectImpressions` (separate mutation).
+ */
 export const getProfiles = query({
   args: {
     token: v.string(),

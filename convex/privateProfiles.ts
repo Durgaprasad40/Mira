@@ -15,10 +15,23 @@ import { validateOwnedSafePrivatePhotoUrls } from './phase2PrivatePhotos';
 const PHASE2_PRIVATE_BIO_MIN_LENGTH = 20;
 const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
 
-// Phase-2 nickname (displayName) validation — kept in sync with
+// P3-DRIFT-01: Phase-2 nickname (displayName) validation — kept in sync with
 // `lib/phase2Onboarding.ts > validateNickname`. Convex source files cannot
 // import from the app code path, so the rules are mirrored here. If you change
 // either side, update the other.
+//
+// Mirrored constants (must stay byte-identical with lib/phase2Onboarding.ts):
+//   - PHASE2_DISPLAY_NAME_MIN_LENGTH      ↔ PHASE2_NICKNAME_MIN_LENGTH
+//   - PHASE2_DISPLAY_NAME_MAX_LENGTH      ↔ PHASE2_NICKNAME_MAX_LENGTH
+//   - PHASE2_DISPLAY_NAME_MAX_DIGIT_RUN   ↔ PHASE2_NICKNAME_MAX_DIGIT_RUN
+//   - PHASE2_DISPLAY_NAME_BLOCKED_LONG_TOKENS  ↔ PHASE2_NICKNAME_BLOCKED_LONG_TOKENS
+//   - PHASE2_DISPLAY_NAME_BLOCKED_SHORT_TOKENS ↔ PHASE2_NICKNAME_BLOCKED_SHORT_TOKENS
+//
+// Drift consequence: if the backend list is stricter, the UI will accept a
+// nickname that the save mutation then rejects with a HANDLE_TOKEN error.
+// If the backend is looser, a hostile actor could bypass UI filtering by
+// posting the mutation directly. The backend is the source of truth — UI
+// rules exist for fast feedback only.
 const PHASE2_DISPLAY_NAME_MIN_LENGTH = 3;
 const PHASE2_DISPLAY_NAME_MAX_LENGTH = 20;
 const PHASE2_DISPLAY_NAME_MAX_DIGIT_RUN = 3;
@@ -451,285 +464,22 @@ export const backfillPrivateProfileAgeByAuthUserId = internalMutation({
   },
 });
 
-// Get private profile by user ID
-export const getByUserId = query({
-  args: {
-    token: v.string(),
-    userId: v.id('users'),
-  },
-  handler: async (ctx, args) => {
-    const viewerId = await validateSessionToken(ctx, args.token.trim());
-    if (!viewerId || viewerId !== args.userId) {
-      throw new Error('Unauthorized: private profile self-read required');
-    }
-
-    // Check if private data is in pending_deletion state
-    const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
-    if (isDeleted) {
-      return null; // Return null if data is pending deletion
-    }
-
-    const profile = await ctx.db
-      .query('userPrivateProfiles')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
-      .first();
-    return profile;
-  },
-});
-
-// Create or update private profile
-// NOTE: hobbies and isVerified are imported from Phase-1 during setup and stored here for isolation
-export const upsert = mutation({
-  args: {
-    userId: v.id('users'),
-    isPrivateEnabled: v.boolean(),
-    ageConfirmed18Plus: v.boolean(),
-    ageConfirmedAt: v.optional(v.number()),
-    privatePhotosBlurred: v.array(v.id('_storage')),
-    privatePhotoUrls: v.array(v.string()),
-    privatePhotoBlurLevel: v.optional(v.number()),
-    privateIntentKeys: v.array(v.string()),
-    privateIntentKey: v.optional(v.union(v.string(), v.null())),
-    privateDesireTagKeys: v.array(v.string()),
-    privateBoundaries: v.array(v.string()),
-    privateBio: v.optional(v.string()),
-    displayName: v.string(),
-    age: v.number(),
-    city: v.optional(v.string()),
-    gender: v.string(),
-    revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
-    isSetupComplete: v.boolean(),
-    // Phase-1 imported fields (stored in Phase-2 for isolation)
-    hobbies: v.optional(v.array(v.string())),
-    isVerified: v.optional(v.boolean()),
-  },
-  handler: async (ctx, args) => {
-    // C9 FIX: Require authentication and verify ownership (pattern: truthDare.ts:1424-1426)
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    if (args.userId !== identity.subject) {
-      throw new Error('Unauthorized: cannot modify another user profile');
-    }
-
-    // Check if private data is in pending_deletion state
-    const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
-    if (isDeleted) {
-      throw new Error('Cannot update profile while deletion is pending');
-    }
-    const photoValidation = await validateOwnedSafePrivatePhotoUrls(
-      ctx,
-      args.userId,
-      args.privatePhotoUrls,
-      { requireMinimum: true },
-    );
-    if (!photoValidation.ok) {
-      throw new Error(photoValidation.error);
-    }
-
-    const existing = await ctx.db
-      .query('userPrivateProfiles')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
-      .first();
-
-    const now = Date.now();
-    const privateIntentKeys = sanitizePrivateIntentKeysForSave(
-      args.privateIntentKeys,
-      args.privateIntentKey,
-    ) ?? [];
-    const privateDesireTagKeys = sanitizePrivateDesireTagKeysForSave(
-      args.privateDesireTagKeys,
-    ) ?? [];
-    const { privateIntentKey: _legacyPrivateIntentKey, ...profileArgs } = args;
-    const safeProfileArgs = {
-      ...profileArgs,
-      privatePhotoUrls: photoValidation.urls,
-    };
-
-    if (existing) {
-      await ctx.db.patch(existing._id, {
-        ...safeProfileArgs,
-        privateIntentKeys,
-        privateDesireTagKeys,
-        updatedAt: now,
-      });
-      return { success: true, profileId: existing._id };
-    }
-
-    const profileId = await ctx.db.insert('userPrivateProfiles', {
-      ...safeProfileArgs,
-      privateIntentKeys,
-      privateDesireTagKeys,
-      createdAt: now,
-      updatedAt: now,
-    });
-    return { success: true, profileId };
-  },
-});
-
-// Update specific fields on private profile
-export const updateFields = mutation({
-  args: {
-    userId: v.id('users'),
-    isPrivateEnabled: v.optional(v.boolean()),
-    privateIntentKeys: v.optional(v.array(v.string())),
-    privateIntentKey: v.optional(v.union(v.string(), v.null())),
-    privateDesireTagKeys: v.optional(v.array(v.string())),
-    privateBoundaries: v.optional(v.array(v.string())),
-    privateBio: v.optional(v.string()),
-    revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
-    isSetupComplete: v.optional(v.boolean()),
-    // Profile details
-    height: v.optional(v.union(v.number(), v.null())),
-    weight: v.optional(v.union(v.number(), v.null())),
-    smoking: v.optional(v.union(v.string(), v.null())),
-    drinking: v.optional(v.union(v.string(), v.null())),
-    education: v.optional(v.union(v.string(), v.null())),
-    religion: v.optional(v.union(v.string(), v.null())),
-    // Photos
-    privatePhotoUrls: v.optional(v.array(v.string())),
-  },
-  handler: async (ctx, args) => {
-    // BE-001 SECURITY FIX: Require authentication and verify ownership
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    if (args.userId !== identity.subject) {
-      throw new Error('Unauthorized: cannot modify another user profile');
-    }
-
-    // Check if private data is in pending_deletion state
-    const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
-    if (isDeleted) {
-      throw new Error('Cannot update profile while deletion is pending');
-    }
-
-    const existing = await ctx.db
-      .query('userPrivateProfiles')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
-      .first();
-
-    if (!existing) {
-      throw new Error('Private profile not found');
-    }
-
-    const privateIntentKeys = sanitizePrivateIntentKeysForSave(
-      args.privateIntentKeys,
-      args.privateIntentKey,
-    );
-    const privateDesireTagKeys = sanitizePrivateDesireTagKeysForSave(args.privateDesireTagKeys);
-    const { userId, privateIntentKey: _legacyPrivateIntentKey, ...updates } = args;
-    // Remove undefined values
-    const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
-    for (const [key, value] of Object.entries(updates)) {
-      if (value !== undefined) {
-        cleanUpdates[key] = value;
-      }
-    }
-    if (args.privatePhotoUrls !== undefined) {
-      const photoValidation = await validateOwnedSafePrivatePhotoUrls(
-        ctx,
-        args.userId,
-        args.privatePhotoUrls,
-        { requireMinimum: true },
-      );
-      if (!photoValidation.ok) {
-        throw new Error(photoValidation.error);
-      }
-      cleanUpdates.privatePhotoUrls = photoValidation.urls;
-    }
-    if (privateIntentKeys !== undefined) {
-      cleanUpdates.privateIntentKeys = privateIntentKeys;
-    }
-    if (privateDesireTagKeys !== undefined) {
-      cleanUpdates.privateDesireTagKeys = privateDesireTagKeys;
-    }
-
-    await ctx.db.patch(existing._id, cleanUpdates);
-    return { success: true };
-  },
-});
-
-// Update blurred photos after upload
-export const updateBlurredPhotos = mutation({
-  args: {
-    userId: v.id('users'),
-    privatePhotosBlurred: v.array(v.id('_storage')),
-    privatePhotoUrls: v.array(v.string()),
-  },
-  handler: async (ctx, args) => {
-    // BE-002 SECURITY FIX: Require authentication and verify ownership
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    if (args.userId !== identity.subject) {
-      throw new Error('Unauthorized: cannot modify another user photos');
-    }
-
-    const existing = await ctx.db
-      .query('userPrivateProfiles')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
-      .first();
-
-    if (!existing) {
-      throw new Error('Private profile not found');
-    }
-    const photoValidation = await validateOwnedSafePrivatePhotoUrls(
-      ctx,
-      args.userId,
-      args.privatePhotoUrls,
-      { requireMinimum: true },
-    );
-    if (!photoValidation.ok) {
-      throw new Error(photoValidation.error);
-    }
-
-    await ctx.db.patch(existing._id, {
-      privatePhotosBlurred: args.privatePhotosBlurred,
-      privatePhotoUrls: photoValidation.urls,
-      updatedAt: Date.now(),
-    });
-
-    return { success: true };
-  },
-});
-
-// Delete private profile
-export const deleteProfile = mutation({
-  args: { userId: v.id('users') },
-  handler: async (ctx, args) => {
-    // BE-003 SECURITY FIX: Require authentication and verify ownership
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    if (args.userId !== identity.subject) {
-      throw new Error('Unauthorized: cannot delete another user profile');
-    }
-
-    const existing = await ctx.db
-      .query('userPrivateProfiles')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
-      .first();
-
-    if (!existing) return { success: true };
-
-    // Delete blurred photos from storage
-    for (const storageId of existing.privatePhotosBlurred) {
-      try {
-        await ctx.storage.delete(storageId);
-      } catch {
-        // Storage item may already be deleted
-      }
-    }
-
-    await ctx.db.delete(existing._id);
-    return { success: true };
-  },
-});
+// P2-DEAD-01..05: The following five mutations/queries were removed in the
+// Deep Connect P2 batch after grep confirmed zero callers (frontend + backend):
+//   - getByUserId         (replaced by `getByAuthUserId` which uses the
+//                          custom session-token auth path)
+//   - upsert              (replaced by `upsertByAuthId`)
+//   - updateFields        (replaced by `updateFieldsByAuthId`)
+//   - updateBlurredPhotos (no live callers; photo updates now flow through
+//                          `updateFieldsByAuthId` + `saveOnboardingPhotos`)
+//   - deleteProfile       (no live callers; deletion is centralized in
+//                          `convex/privateDeletion.ts` via the pending-state
+//                          state machine)
+// Each removed function used the legacy `ctx.auth.getUserIdentity()` pattern.
+// Mira migrated to custom session tokens (`validateSessionToken`); leaving
+// these mutations alive meant a divergent auth path with no consumers, which
+// is a maintenance hazard and a latent backdoor risk if a future caller is
+// added without realizing it bypasses the session-token flow.
 
 /**
  * Update specific fields on private profile by auth user ID.
@@ -1677,9 +1427,52 @@ export const getAndHealByAuthUserId = mutation({
     // Normalize privateIntentKeys
     const privateIntentKeys = returnProfile.privateIntentKeys ?? [];
 
+    // P3-PROJ-01: Explicit projection. Mirrors `getByAuthUserId` field-for-field
+    // so future schema additions (moderation flags, fraud signals,
+    // server-trust-only state like ageConfirmed18Plus/ageConfirmedAt, etc.)
+    // do NOT auto-leak via a `...returnProfile` spread if this function is
+    // ever re-used in a non-self context. Self-read today (validateOwnership
+    // above), but the projection is defense-in-depth. If you add a field to
+    // the `userPrivateProfiles` schema that the owner client must read, mirror
+    // the addition in BOTH this list AND `getByAuthUserId`'s projection.
     return {
-      ...returnProfile,
+      _id: returnProfile._id,
+      updatedAt: returnProfile.updatedAt,
+      displayName: returnProfile.displayName,
+      displayNameEditCount: returnProfile.displayNameEditCount,
+      age: returnProfile.age,
+      gender: returnProfile.gender,
+      city: returnProfile.city,
+      privateBio: returnProfile.privateBio,
       privateIntentKeys,
+      privateDesireTagKeys: returnProfile.privateDesireTagKeys,
+      privateBoundaries: returnProfile.privateBoundaries,
+      privatePhotoUrls: returnProfile.privatePhotoUrls,
+      photoBlurEnabled: returnProfile.photoBlurEnabled,
+      photoBlurSlots: returnProfile.photoBlurSlots,
+      promptAnswers: returnProfile.promptAnswers,
+      hobbies: returnProfile.hobbies,
+      isSetupComplete: returnProfile.isSetupComplete,
+      isPrivateEnabled: returnProfile.isPrivateEnabled,
+      isVerified: returnProfile.isVerified,
+      height: returnProfile.height,
+      weight: returnProfile.weight,
+      smoking: returnProfile.smoking,
+      drinking: returnProfile.drinking,
+      education: returnProfile.education,
+      religion: returnProfile.religion,
+      preferenceStrength: returnProfile.preferenceStrength,
+      hideFromDeepConnect: returnProfile.hideFromDeepConnect,
+      hideAge: returnProfile.hideAge,
+      hideDistance: returnProfile.hideDistance,
+      disableReadReceipts: returnProfile.disableReadReceipts,
+      safeMode: returnProfile.safeMode,
+      notificationsEnabled: returnProfile.notificationsEnabled,
+      notificationCategories: returnProfile.notificationCategories,
+      defaultPhotoVisibility: returnProfile.defaultPhotoVisibility,
+      allowUnblurRequests: returnProfile.allowUnblurRequests,
+      defaultSecureMediaTimer: returnProfile.defaultSecureMediaTimer,
+      defaultSecureMediaViewingMode: returnProfile.defaultSecureMediaViewingMode,
     };
   },
 });
