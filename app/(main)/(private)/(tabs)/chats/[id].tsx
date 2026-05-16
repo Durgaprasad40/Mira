@@ -92,6 +92,11 @@ type PendingPhase2Message = {
   viewOnce?: boolean;
   protectedMediaViewingMode?: 'tap' | 'hold';
   protectedMediaIsMirrored?: boolean;
+  // P1-2: Declared video duration in ms. Required by the backend for
+  // type === 'video' sends (see validatePrivateMessageMediaMetadata).
+  // Captured at stage time from the picker asset / camera-composer handoff
+  // so retries reuse the same value without re-prompting.
+  videoDurationMs?: number;
   clientMessageId: string;
 };
 
@@ -473,6 +478,12 @@ export default function Phase2ChatThread() {
     'photo'
   );
   const [pendingIsMirrored, setPendingIsMirrored] = useState(false);
+  // P1-2: Captured at stage time for video assets only. The backend now
+  // requires `videoDurationMs` for any type==='video' send, so we read
+  // the asset/handoff duration once and carry it through to runP2UploadAndSend.
+  const [pendingMediaDurationMs, setPendingMediaDurationMs] = useState<number | null>(
+    null
+  );
 
   // [P2_MEDIA_UPLOAD] Optimistic pending media bubbles (mirrors Phase-1
   // ChatScreenInner.tsx:556 `pendingSecureMessages`). Array, not scalar, so
@@ -1449,6 +1460,15 @@ export default function Phase2ChatThread() {
       void fromCamera;
       setPendingMediaUri(asset.uri);
       setPendingMediaType(isVideo ? 'video' : 'photo');
+      // P1-2: expo-image-picker reports `asset.duration` in milliseconds for
+      // videos. We treat anything missing / non-positive as null so the
+      // confirm step can decide what to do; the backend will reject a video
+      // send with no/invalid duration.
+      if (isVideo && typeof asset.duration === 'number' && asset.duration > 0) {
+        setPendingMediaDurationMs(Math.round(asset.duration));
+      } else {
+        setPendingMediaDurationMs(null);
+      }
     },
     []
   );
@@ -1457,6 +1477,7 @@ export default function Phase2ChatThread() {
     setPendingMediaUri(null);
     setPendingMediaType('photo');
     setPendingIsMirrored(false);
+    setPendingMediaDurationMs(null);
   }, []);
 
   // [P2_MEDIA_UPLOAD] Drive the pending bubble through upload (with real byte
@@ -1556,6 +1577,10 @@ export default function Phase2ChatThread() {
           type: isVideo ? 'video' : 'image',
           content: pending.content,
           imageStorageId: storageId as any,
+          // P1-2: Backend requires `videoDurationMs` for any video send.
+          // Only attach for the video branch — photos have no duration
+          // concept and the backend ignores the field for type==='image'.
+          ...(isVideo ? { videoDurationMs: pending.videoDurationMs } : {}),
           isProtected: true,
           protectedMediaTimer: pending.protectedMediaTimer ?? 0,
           viewOnce: pending.viewOnce === true,
@@ -1624,6 +1649,10 @@ export default function Phase2ChatThread() {
       }
       const isVideo = pendingMediaType === 'video';
       const isMirrored = pendingIsMirrored;
+      // P1-2: Snapshot the staged duration BEFORE clearPendingMedia() resets
+      // it. Backend requires `videoDurationMs` for any type==='video' send;
+      // the pending row carries it so upload retries reuse the same value.
+      const videoDurationMs = isVideo ? pendingMediaDurationMs ?? undefined : undefined;
 
       // [P2_MEDIA_UPLOAD] Build the optimistic pending row BEFORE clearing
       // the review-sheet state, so we never lose the user's chosen URI.
@@ -1648,6 +1677,7 @@ export default function Phase2ChatThread() {
         protectedMediaViewingMode: options.viewingMode,
         protectedMediaIsMirrored:
           isVideo && isMirrored,
+        videoDurationMs,
         clientMessageId,
       };
       addPendingPhase2Message(pending);
@@ -1663,6 +1693,7 @@ export default function Phase2ChatThread() {
       userId,
       pendingMediaType,
       pendingIsMirrored,
+      pendingMediaDurationMs,
       addPendingPhase2Message,
       clearPendingMedia,
       runP2UploadAndSend,
@@ -1762,6 +1793,19 @@ export default function Phase2ChatThread() {
       setPendingIsMirrored(!!captured.isMirrored);
       setPendingMediaUri(uri);
       setPendingMediaType(type);
+      // P1-2: Camera-composer reports `durationSec` (seconds) for video
+      // captures. Convert to ms and gate on a positive finite value so the
+      // backend duration check has a real number to validate.
+      if (
+        type === 'video' &&
+        typeof captured.durationSec === 'number' &&
+        Number.isFinite(captured.durationSec) &&
+        captured.durationSec > 0
+      ) {
+        setPendingMediaDurationMs(Math.round(captured.durationSec * 1000));
+      } else {
+        setPendingMediaDurationMs(null);
+      }
     }, [id, isConversationClosed])
   );
 

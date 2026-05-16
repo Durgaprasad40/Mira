@@ -51,6 +51,30 @@ const MAX_PRIVATE_MESSAGE_MARK_BATCH = 200;
 
 type PrivateMessageMediaKind = 'image' | 'video' | 'audio';
 
+// P3-3: Per-media-kind byte caps for Phase-2 attachments. These differ
+// from the Phase-1 photo baseline by design:
+//   - Phase-1 (`convex/photos.ts:MAX_PHOTO_SIZE_BYTES`) caps regular
+//     non-protected photos at 10 MB. Those photos are stored as long-
+//     lived profile/chat artifacts and aspirationally compressed by the
+//     Phase-1 composer before upload.
+//   - Phase-2 secure photos are captured/picked through the protected-
+//     media composer which intentionally does LESS aggressive client
+//     compression (preserves quality for the recipient's brief view
+//     window) and is one-time-view / timer-expiring on the receiver.
+//     The 15 MB ceiling absorbs the larger payload an uncompressed iOS
+//     HEIC or Android JPEG can produce when captured at native sensor
+//     resolution, without the composer needing a Phase-1-style downscale
+//     stage that would visibly degrade the photo for the short viewing
+//     window. The blob is hard-deleted on cleanup (see
+//     `cleanupExpiredPrivateMessage` + cron sweep) so the storage cost
+//     is bounded in time, not just in size.
+//   - Video at 100 MB and audio at 20 MB are paired with the P1 duration
+//     caps (`MAX_PRIVATE_VIDEO_DURATION_MS` = 60 s, `MAX_PRIVATE_AUDIO_DURATION_MS`
+//     = 5 min) so a pathological long-low-bitrate file cannot slip
+//     through the byte gate.
+// Intentionally NOT aligning image to 10 MB — would force the secure-
+// media composer to add a downscale step that breaks the current
+// receiver experience for HEIC/large-JPEG captures.
 const PRIVATE_MESSAGE_MEDIA_LIMITS: Record<
   PrivateMessageMediaKind,
   { maxBytes: number; contentTypePrefix: string }
@@ -59,6 +83,48 @@ const PRIVATE_MESSAGE_MEDIA_LIMITS: Record<
   video: { maxBytes: 100 * 1024 * 1024, contentTypePrefix: 'video/' },
   audio: { maxBytes: 20 * 1024 * 1024, contentTypePrefix: 'audio/' },
 };
+
+// P1-1 / P1-2: Hard server-side duration caps for Phase-2 voice and video
+// messages. Byte caps alone do not prevent pathological long-low-bitrate
+// uploads — a 100 MB video could in principle run for hours and a 20 MB
+// audio file could run far beyond a normal voice note. These caps mirror
+// the Phase-1 / Chat Rooms parity baseline (5 min audio) and the existing
+// Phase-2 frontend secure-capture/picker policy (30 s video) with a 2x
+// headroom factor on video to absorb clock skew, rounding from
+// expo-image-picker and vision-camera, and brief overshoots near the
+// cap boundary.
+const MAX_PRIVATE_AUDIO_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_PRIVATE_VIDEO_DURATION_MS = 60 * 1000; // 60 seconds (frontend caps at 30 s)
+
+// P3-2: Hard cap on outgoing Phase-2 text-message content length.
+// Previously this mutation accepted up to 5000 chars while the Phase-2
+// composer (`components/chat/MessageInput.tsx` with `theme="phase2"`)
+// caps user input at 150 chars (`PHASE2_LEGACY_TEXT_INPUT_MAX_LENGTH`).
+// That 33× gap meant a stolen-token attacker or a custom client could
+// drop in messages an order of magnitude longer than any honest Phase-2
+// composer can produce, bloating storage rows and the chat-history feed.
+//
+// We pick 500 (3.3× the frontend cap) instead of mirroring 150 exactly
+// so honest clients have headroom for:
+//   - multi-byte grapheme expansion (emoji, combining marks) where the
+//     same visual length consumes more `String.length` units,
+//   - very small future product tweaks to the composer cap (no need to
+//     re-deploy the backend when the product nudges the cap to e.g. 200),
+//   - paste-from-source slack on the rare edge where the keystroke
+//     `maxLength` guard is bypassed by a fast paste before the prop
+//     enforces the truncate.
+// The hard ceiling at 500 still throws (existing 'Message too long'
+// contract) for any payload an honest client cannot realistically
+// produce, hard-bounding the bytes a stolen token can write per row.
+const PRIVATE_MESSAGE_MAX_CONTENT_LENGTH = 500;
+
+// P1-3: Server-side floor on how often `updatePresence` will actually patch
+// the privateUserPresence row. Frontend heartbeat fires every 15 s; this
+// floor silently no-ops any call that arrives within ~8 s of the last
+// committed write so a malicious client cannot drive write amplification
+// against the row by spamming the mutation. Picked below the heartbeat
+// interval so the normal cadence is never throttled.
+const PRIVATE_PRESENCE_MIN_WRITE_INTERVAL_MS = 8_000;
 
 type PrivateSecureMediaVisibilityFields = {
   isProtected?: boolean;
@@ -195,7 +261,8 @@ async function verifyOrClaimPrivateMessageMediaOwnership(
 async function validatePrivateMessageMediaMetadata(
   ctx: MutationCtx,
   storageId: Id<'_storage'>,
-  mediaKind: PrivateMessageMediaKind
+  mediaKind: PrivateMessageMediaKind,
+  declaredDurationMs?: number
 ): Promise<void> {
   const meta = (await ctx.db.system.get(storageId)) as
     | { size?: number; contentType?: string }
@@ -214,6 +281,62 @@ async function validatePrivateMessageMediaMetadata(
   if (!contentType.toLowerCase().startsWith(limits.contentTypePrefix)) {
     throw new Error(`Media content type does not match declared ${mediaKind}`);
   }
+
+  // P1-1 / P1-2: Duration enforcement for time-bounded media. The frontend
+  // is required to declare a duration for voice and video sends. We reject
+  // NaN/Infinity/non-numeric/<=0 values so a client cannot bypass the cap
+  // by sending sentinel values, and we reject any duration above the
+  // documented per-kind ceiling. Image media has no duration concept and
+  // is unaffected. The byte cap above remains the first line of defense;
+  // this is the second line that defeats long-low-bitrate uploads.
+  if (mediaKind === 'audio') {
+    if (
+      typeof declaredDurationMs !== 'number' ||
+      !Number.isFinite(declaredDurationMs) ||
+      declaredDurationMs <= 0
+    ) {
+      throw new Error('Voice message duration is required');
+    }
+    if (declaredDurationMs > MAX_PRIVATE_AUDIO_DURATION_MS) {
+      throw new Error('Voice message exceeds maximum allowed length');
+    }
+  } else if (mediaKind === 'video') {
+    if (
+      typeof declaredDurationMs !== 'number' ||
+      !Number.isFinite(declaredDurationMs) ||
+      declaredDurationMs <= 0
+    ) {
+      throw new Error('Video duration is required');
+    }
+    if (declaredDurationMs > MAX_PRIVATE_VIDEO_DURATION_MS) {
+      throw new Error('Video exceeds maximum allowed length');
+    }
+  }
+
+  // P2-DIM-01 NOTE (image dimension floor — DEFERRED, matches Phase-1):
+  // Phase-1 `convex/photos.ts` documents (lines ~227-242) that
+  // `MIN_PHOTO_DIMENSION = 200` is enforced ONLY as a UX hint inside the
+  // unauthenticated `validatePhotoUpload` query because width/height are
+  // client-supplied and are NOT independently re-derived server-side from
+  // the storage object. A server-authoritative dimension check on the
+  // Phase-2 send path requires the same upstream work Phase-1 still
+  // defers:
+  //   (1) a Convex action that downloads the storage blob and decodes
+  //       its header bytes (e.g. via `image-size`) — adds runtime
+  //       dependency surface, per-message latency, and must itself be
+  //       rate-limited;
+  //   (2) a trusted upstream extractor that signs a width/height/mimeType
+  //       sidecar this mutation can verify.
+  // Until one of those lands here OR in Phase-1, introducing a Phase-2-
+  // only check would either (a) accept client-asserted dimensions and
+  // therefore be trivially bypassed (matching neither Phase-1's stance
+  // nor a real security boundary), or (b) silently drop legitimate sends
+  // by rejecting blobs we cannot actually measure. The mitigations that
+  // remain in force on this path are the byte-size cap above
+  // (PRIVATE_MESSAGE_MEDIA_LIMITS) and the contentType-prefix check —
+  // both server-authoritative via ctx.db.system.get(storageId).
+  // Tracked here so a future hardening pass does not assume coverage
+  // exists, mirroring the Phase-1 deferral note verbatim in intent.
 }
 
 function getPrivateConversationPreviewContent(
@@ -257,6 +380,17 @@ async function requirePrivateConversationActor(
   return userId;
 }
 
+// P3-4: Bound the per-user participation scan in this connectivity check.
+// Callers use the result as an authorization signal ("are these two users
+// already in a Phase-2 conversation together?"); the scan is keyed on the
+// per-user `by_user` index and is structurally bounded by how many Phase-2
+// conversations a single user has, but we cap it at the same ceiling as
+// the list/badge queries (`MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN`) so a
+// pathological participation count cannot turn this helper into an
+// unbounded `.collect()`. Honest users never come close to this cap; if
+// they did, missing a conversation here would only return `false` (deny
+// the implied connection), which fails closed and is consistent with
+// other Phase-2 bounded-scan call sites.
 async function usersShareActivePrivateConversation(
   ctx: QueryCtx | MutationCtx,
   viewerId: Id<'users'>,
@@ -267,7 +401,7 @@ async function usersShareActivePrivateConversation(
   const participations = await ctx.db
     .query('privateConversationParticipants')
     .withIndex('by_user', (q) => q.eq('userId', viewerId))
-    .collect();
+    .take(MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN);
 
   for (const participation of participations) {
     if (participation.isHidden === true) continue;
@@ -782,6 +916,25 @@ export const getPrivateMessages = query({
       // Keep this branch even after the cleanup cron clears imageStorageId so
       // expired secure media renders as an expired card during its grace window
       // instead of falling through as a plain "Secure photo/video" message.
+      //
+      // P3-5: Receiver-only URL issuance contract.
+      // This `imageUrl: null` is deliberate and applies UNIFORMLY to BOTH
+      // sender and receiver. Neither party can pull a playable storage URL
+      // out of `getPrivateMessages` for visual media — the only path that
+      // mints a presigned URL is `openPrivateSecureMedia`, which:
+      //   - rejects the sender entirely (sender-bypass contract — they
+      //     use their local URI for the composer/preview),
+      //   - rejects non-participants,
+      //   - rejects expired / view-once-already-consumed messages,
+      //   - rate-limits via `p2_secure_media_open` (P2-RL-03a),
+      //   - returns the URL only to the legitimate receiver, exactly once
+      //     per accepted call.
+      // Returning `imageUrl: null` here is what guarantees the receiver
+      // MUST go through the rate-limited, view-state-aware mutation path
+      // for every open, instead of caching a long-lived URL from the
+      // history fetch. The receiver's UI relies on this contract — see
+      // `Phase2ProtectedMediaBubble` / `Phase2ProtectedMediaViewer` for
+      // the consumer side.
       if (isPrivateVisualMediaType(m.type)) {
         // PHASE-2 SECURE-MEDIA EXPIRY GATE: derive expiry from `isExpired`
         // (frontend-flipped) OR from `timerEndsAt <= now` (deadline elapsed
@@ -879,8 +1032,19 @@ export const markPrivateMessagesRead = mutation({
     if (!otherParticipantId) {
       return { success: true, markedCount: 0 };
     }
+    // P2-BLOCK-SHAPE: Block check returns the same silent {success:false,
+    // markedCount:0} shape that markPrivateMessagesDelivered already uses
+    // for blocked pairs (see `markPrivateMessagesDelivered` ~line 1644).
+    // Previously this branch threw 'Access denied', which surfaced an
+    // error toast on debounced focus-flap / scroll-into-view mark-read
+    // calls in chats that had just been blocked, and also leaked block-
+    // status as a distinct error code to a scripted caller. Silent
+    // {success:false, markedCount:0} matches the
+    // delivered-on-blocked path exactly and is byte-identical to the
+    // already-silent rate-limited / unavailable-user paths above and
+    // below.
     if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
-      throw new Error('Access denied');
+      return { success: false, markedCount: 0 };
     }
     {
       const otherUser = await ctx.db.get(otherParticipantId);
@@ -967,6 +1131,11 @@ export const sendPrivateMessage = mutation({
     imageStorageId: v.optional(v.id('_storage')),
     audioStorageId: v.optional(v.id('_storage')),
     audioDurationMs: v.optional(v.number()),
+    // P1-2: Declared video duration in ms. Required server-side for any
+    // type === 'video' send (see validatePrivateMessageMediaMetadata).
+    // Not persisted on privateMessages today; used purely for the hard
+    // duration check at send time.
+    videoDurationMs: v.optional(v.number()),
     // P1-001: Protected media fields for secure photos/videos
     isProtected: v.optional(v.boolean()),
     protectedMediaTimer: v.optional(v.number()),
@@ -978,6 +1147,7 @@ export const sendPrivateMessage = mutation({
   handler: async (ctx, args) => {
     const {
       token, conversationId, type, content, imageStorageId, audioStorageId, audioDurationMs,
+      videoDurationMs,
       isProtected, protectedMediaTimer, viewOnce, protectedMediaViewingMode, protectedMediaIsMirrored,
       clientMessageId
     } = args;
@@ -989,8 +1159,10 @@ export const sendPrivateMessage = mutation({
       throw new Error('Unauthorized: invalid or expired session');
     }
 
-    // Message length limit
-    if (content.length > 5000) {
+    // Message length limit (P3-2: see PRIVATE_MESSAGE_MAX_CONTENT_LENGTH
+    // for rationale on the 500-char ceiling vs. the 150-char Phase-2
+    // composer cap).
+    if (content.length > PRIVATE_MESSAGE_MAX_CONTENT_LENGTH) {
       throw new Error('Message too long');
     }
 
@@ -1070,7 +1242,15 @@ export const sendPrivateMessage = mutation({
         throw new Error('Visual media messages require a storage reference');
       }
       await verifyOrClaimPrivateMessageMediaOwnership(ctx, imageStorageId, senderId, type);
-      await validatePrivateMessageMediaMetadata(ctx, imageStorageId, type);
+      // P1-2: For video sends, pass the declared duration through to the
+      // validator so the hard cap is enforced server-side. Photos have no
+      // duration concept and are unaffected.
+      await validatePrivateMessageMediaMetadata(
+        ctx,
+        imageStorageId,
+        type,
+        type === 'video' ? videoDurationMs : undefined
+      );
     } else if (imageStorageId) {
       throw new Error('Image storage reference is only valid for photo/video messages');
     }
@@ -1080,7 +1260,10 @@ export const sendPrivateMessage = mutation({
         throw new Error('Audio storage reference is only valid for voice messages');
       }
       await verifyOrClaimPrivateMessageMediaOwnership(ctx, audioStorageId, senderId, 'audio');
-      await validatePrivateMessageMediaMetadata(ctx, audioStorageId, 'audio');
+      // P1-1: Enforce the audio duration cap using the client-declared
+      // `audioDurationMs`. The validator rejects missing/NaN/<=0/over-cap
+      // values so old clients that don't report duration fail closed.
+      await validatePrivateMessageMediaMetadata(ctx, audioStorageId, 'audio', audioDurationMs);
     }
 
     if (
@@ -1555,6 +1738,24 @@ export const markPrivateMessagesDelivered = mutation({
       return { success: false, count: 0 };
     }
 
+    // P3-1a: Light rate limit on per-conversation delivered-mark. Each
+    // accepted call performs a bounded scan (`MAX_PRIVATE_MESSAGE_MARK_BATCH`
+    // = 200) and patches each row's `deliveredAt`. Honest UX fires this
+    // once per conversation open; 60/min + 600/hr is generous (covers
+    // rapid switching between conversations on the Messages list) while
+    // bounding the worst-case patch fan-out at 60 × 200 = 12k row patches
+    // per minute per attacker token. Silent denial returns the same
+    // `{success:false, count:0}` shape this mutation already uses for
+    // missing-conversation / blocked / non-participant branches, so the
+    // client doesn't distinguish rate-limit from those benign reasons.
+    const deliveredLimit = await reserveActionSlots(ctx, userId, 'p2_mark_delivered', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 600 },
+    ]);
+    if (!deliveredLimit.accept) {
+      return { success: false, count: 0 };
+    }
+
     // Get conversation and verify user is participant
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
@@ -1628,6 +1829,25 @@ export const markAllPrivateMessagesDelivered = mutation({
     const now = Date.now();
 
     const userId = await requirePrivateConversationActor(ctx, token, authUserId);
+
+    // P3-1b: Light rate limit on bulk delivered-mark. Worst-case fan-out
+    // is `MAX_PRIVATE_UNREAD_PARTICIPATIONS_SCAN` × `MAX_PRIVATE_MESSAGE_MARK_BATCH`
+    // = 200 × 200 = 40k row patches per accepted call, so even a single
+    // call carries non-trivial cost; this is by FAR the heaviest of the
+    // four P3-1 mutations. Honest UX fires this once per app foreground
+    // (Messages list mount). 10/min + 60/hr easily covers backgrounding/
+    // foregrounding the app every few seconds while hard-blocking an
+    // attacker who tries to repeatedly trigger the bulk patch loop. Returns
+    // the same `{success:true, count:0}` no-op shape as the empty-inbox
+    // branch so the rate-limited call is indistinguishable from "nothing
+    // to deliver" from the client's perspective.
+    const bulkDeliveredLimit = await reserveActionSlots(ctx, userId, 'p2_mark_all_delivered', [
+      { kind: '1min', windowMs: 60_000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 60 },
+    ]);
+    if (!bulkDeliveredLimit.accept) {
+      return { success: true, count: 0 };
+    }
 
     // P2-BOUNDS-01: Bounded scan over participations, matches the badge
     // count queries above. A user with more than this many participations
@@ -1707,6 +1927,24 @@ export const deletePrivateMessage = mutation({
       throw new Error('Unauthorized: invalid session');
     }
 
+    // P2-RL-04: Cap delete-message churn. Each accepted call performs a
+    // get + ownership check + best-effort `ctx.storage.delete` (image and/
+    // or audio) + `ctx.db.delete`. A real user deletes their own messages
+    // rarely (and usually one at a time); 10/min + 100/hr is generous for
+    // any honest UX while hard-blocking an attacker who tries to enumerate
+    // message IDs or thrash storage deletions. Throws (not silent) because
+    // delete is a direct user action — the client surfaces a transient
+    // error and the user can retry. Resolved BEFORE the get/ownership
+    // branches so an unauthorized caller cannot probe at unbounded rate
+    // either.
+    const deleteLimit = await reserveActionSlots(ctx, userId, 'p2_delete_message', [
+      { kind: '1min', windowMs: 60_000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 100 },
+    ]);
+    if (!deleteLimit.accept) {
+      throw new Error('You are deleting messages too quickly. Please try again later.');
+    }
+
     // Get the message
     const message = await ctx.db.get(messageId);
     if (!message) {
@@ -1778,6 +2016,28 @@ export const cleanupExpiredPrivateMessage = mutation({
       throw new Error('Unauthorized: invalid session');
     }
 
+    // P3-1c: Light rate limit on cleanup churn. Each accepted call performs
+    // a get + eligibility checks + best-effort `ctx.storage.delete` +
+    // `ctx.db.delete`. Either participant can call this (it's a system-
+    // cleanup affordance, not a sender-only delete), so it's a less-gated
+    // surface than `deletePrivateMessage`. The eligibility branches
+    // (`isProtected` + `isExpired` + `timerEndsAt <= now`) already bound
+    // *which* messages can be cleaned, but unbounded calling rate could
+    // still amplify storage IO. Honest UX fires this once per expired
+    // message as the receiver's timer elapses; 30/min + 300/hr is generous
+    // for any realistic backlog while bounding attacker thrash. Throws
+    // (not silent) to match the existing error-shape contract this
+    // mutation uses for ineligible/unauthorized cases — the client treats
+    // it the same as a transient cleanup failure and the cron sweep is
+    // the authoritative backstop anyway.
+    const cleanupLimit = await reserveActionSlots(ctx, userId, 'p2_cleanup_expired_message', [
+      { kind: '1min', windowMs: 60_000, max: 30 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 300 },
+    ]);
+    if (!cleanupLimit.accept) {
+      throw new Error('You are cleaning up messages too quickly. Please try again later.');
+    }
+
     // Get the message
     const message = await ctx.db.get(messageId);
     if (!message) {
@@ -1843,6 +2103,24 @@ export const generateSecureMediaUploadUrl = mutation({
       throw new Error('Unauthorized: invalid session');
     }
 
+    // P2-RL-02: Cap presigned-URL minting per user. Without this an attacker
+    // can mint unbounded upload URLs and burn storage objects even without
+    // ever calling `sendPrivateMessage` to attach them (orphaned blobs are
+    // reaped by GC, but the minting itself is unbounded today). The
+    // downstream `sendPrivateMessage` already enforces `p2_send_message`,
+    // so we only need to bound URL minting here. 30/min + 200/hr matches a
+    // user opening the secure-media composer many times in succession while
+    // hard-blocking automated thrash. Throw (not silent) because this is a
+    // direct user action — the client surfaces a transient error and can
+    // retry on the next composer open.
+    const uploadLimit = await reserveActionSlots(ctx, userId, 'p2_secure_upload_url', [
+      { kind: '1min', windowMs: 60_000, max: 30 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 200 },
+    ]);
+    if (!uploadLimit.accept) {
+      throw new Error('You are uploading too quickly. Please try again later.');
+    }
+
     // Generate upload URL
     const uploadUrl = await ctx.storage.generateUploadUrl();
     return uploadUrl;
@@ -1860,6 +2138,25 @@ export const openPrivateSecureMedia = mutation({
       return { status: 'unauthorized' as const };
     }
 
+    // P2-RL-03a: Cap secure-media open attempts. Each call performs a
+    // get-by-id, several auth checks, and a `ctx.storage.getUrl` — the
+    // latter mints a presigned URL backed by storage, so unbounded calls
+    // could be used to enumerate or to amplify storage-side load. A real
+    // user opens secure media a handful of times per chat session; 60/min
+    // + 600/hr is comfortably above that ceiling. Silent denial returns
+    // `no_media` so the client falls through the same code path as a
+    // missing/expired blob (already user-facing for legitimate cases) and
+    // does NOT distinguish rate-limit from real expiry, avoiding any
+    // probe signal. Resolved BEFORE the existing sender-bypass / IDOR /
+    // block branches so we don't leak per-recipient timing.
+    const openLimit = await reserveActionSlots(ctx, viewerUserId, 'p2_secure_media_open', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 600 },
+    ]);
+    if (!openLimit.accept) {
+      return { status: 'no_media' as const };
+    }
+
     const message = await ctx.db.get(messageId);
     if (!message || !isPrivateVisualMediaType(message.type)) {
       return { status: 'no_media' as const };
@@ -1870,6 +2167,28 @@ export const openPrivateSecureMedia = mutation({
       return { status: 'not_authorized' as const };
     }
 
+    // P3-5: Secure-media sender-bypass contract.
+    // The sender NEVER gets a freshly-minted storage URL from this
+    // mutation. Their own composer keeps the local URI it captured/
+    // picked from (the same pre-upload `file://...` reference the bubble
+    // renders into `<Image source={{uri: localUri}} />` for the
+    // sender-side preview). This means:
+    //   - the sender can re-view their own outgoing protected photo/video
+    //     locally without ever round-tripping through `ctx.storage.getUrl`,
+    //   - the backend's "view-once / timer" state machine
+    //     (`viewedAt`, `timerEndsAt`, `markPrivateSecureMediaViewed`,
+    //     cleanup cron) is driven exclusively by RECEIVER opens, so the
+    //     sender's local previews do not consume the one-time-view or
+    //     start the expiry timer,
+    //   - if the sender's device drops the local URI (uninstall, cache
+    //     eviction), the photo is unrecoverable from their side — the
+    //     server-side blob is destined to be hard-deleted on receiver
+    //     view / expiry and is intentionally not re-issued back to the
+    //     sender via this path.
+    // Returning `not_authorized` (not `no_media`) here distinguishes the
+    // sender-bypass branch from missing-blob branches in tests/logs while
+    // remaining indistinguishable to the client UI (both render an
+    // "unavailable" state).
     if (message.senderId === viewerUserId) {
       return { status: 'not_authorized' as const };
     }
@@ -1965,6 +2284,26 @@ export const leavePrivateConversation = mutation({
       return { success: false, error: 'unauthorized' };
     }
 
+    // P3-1d: Light rate limit on leave-conversation. The mutation itself is
+    // cheap (one get + one indexed lookup + one patch) and idempotent, but
+    // without a cap an attacker with a stolen token could (a) probe random
+    // `conversationId` values for the error-shape difference between
+    // `conversation_not_found` / `not_participant` / `participation_not_found`
+    // and (b) thrash the participation row by repeatedly re-patching
+    // `isHidden:true`. 10/min + 60/hr easily covers any honest UX (leaving
+    // a conversation is a deliberate, infrequent action) while bounding
+    // both probe and patch-churn vectors. Returns the existing
+    // `{success:false, error:'rate_limited'}` shape so the client treats
+    // it the same as the other reject branches and shows a generic
+    // transient error.
+    const leaveLimit = await reserveActionSlots(ctx, userId, 'p2_leave_conversation', [
+      { kind: '1min', windowMs: 60_000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 60 },
+    ]);
+    if (!leaveLimit.accept) {
+      return { success: false, error: 'rate_limited' };
+    }
+
     // Get the conversation to verify it exists
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
@@ -2020,6 +2359,23 @@ export const markPrivateSecureMediaViewed = mutation({
     const userId = await validateSessionToken(ctx, token);
     if (!userId) {
       return { success: false, error: 'unauthorized' };
+    }
+
+    // P2-RL-03b: Cap mark-viewed calls. The mutation patches `viewedAt`/
+    // `timerEndsAt` on the message row and inserts a `privateMessageMediaViews`
+    // record on first view; the existing idempotency branch already absorbs
+    // honest re-opens, so any thrash above ~60/min is either a buggy retry
+    // loop or an attacker trying to flush message-row patches. Silent denial
+    // returns the same `{success:false, error:'rate_limited'}` shape this
+    // mutation already uses for other reject reasons (`message_not_found`,
+    // `not_authorized`, `not_visual_media`, etc.) so the client doesn't
+    // distinguish — and the viewer simply won't start its local countdown.
+    const viewLimit = await reserveActionSlots(ctx, userId, 'p2_secure_media_viewed', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 600 },
+    ]);
+    if (!viewLimit.accept) {
+      return { success: false, error: 'rate_limited' };
     }
 
     // Get the message
@@ -2139,6 +2495,23 @@ export const markPrivateSecureMediaExpired = mutation({
     const userId = await validateSessionToken(ctx, token);
     if (!userId) {
       return { success: false, error: 'unauthorized' };
+    }
+
+    // P2-RL-03c: Cap mark-expired calls. The idempotency branch already
+    // absorbs honest re-fires from the same client (timer-end + close +
+    // hold-release can all race), so a slightly looser cap is appropriate
+    // here than for open/view. 120/min + 1200/hr lets the client safely
+    // retry on transient network errors while still bounding writes to
+    // `isExpired`/`expiredAt` on the message row. Silent denial preserves
+    // the existing `{success:false, error}` shape so the cron-driven
+    // backend sweep (`cleanupExpiredPrivateProtectedMedia`) remains the
+    // authoritative fallback if a client is rate-limited mid-expiry.
+    const expireLimit = await reserveActionSlots(ctx, userId, 'p2_secure_media_expired', [
+      { kind: '1min', windowMs: 60_000, max: 120 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 1200 },
+    ]);
+    if (!expireLimit.accept) {
+      return { success: false, error: 'rate_limited' };
     }
 
     // Get the message
@@ -2349,6 +2722,27 @@ export const updatePresence = mutation({
 
     const now = Date.now();
 
+    // P1-3 (defense-in-depth ceiling): Generous rate-limit ladder. The
+    // frontend heartbeat is every 15 s (4/min) plus occasional foreground
+    // / chat-open bursts, so 30/min and 1000/hour leave ample headroom for
+    // normal use while clipping pathological clients that try to call
+    // this mutation many times per second. Windows are checked BEFORE
+    // any DB write so the limiter itself cannot be used to amplify writes.
+    const presenceRateLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'p2_update_presence',
+      [
+        { kind: '1min', windowMs: 60_000, max: 30 },
+        { kind: '1hour', windowMs: 60 * 60 * 1000, max: 1000 },
+      ]
+    );
+    if (!presenceRateLimit.accept) {
+      // Fail closed but quietly — the heartbeat is best-effort and the
+      // caller does not need to know it was throttled.
+      return { success: true };
+    }
+
     // Check if presence record exists
     const existing = await ctx.db
       .query('privateUserPresence')
@@ -2356,6 +2750,17 @@ export const updatePresence = mutation({
       .first();
 
     if (existing) {
+      // P1-3 (primary defense): Server-side no-op floor. If the previous
+      // heartbeat was committed within `PRIVATE_PRESENCE_MIN_WRITE_INTERVAL_MS`
+      // (8 s, well below the 15 s heartbeat cadence), silently skip the
+      // patch. This collapses bursts/duplicate triggers (focus + foreground
+      // + interval tick can all overlap on resume) into at most one write
+      // per ~8 s window per user without changing observable presence UX —
+      // `getPresence` reads `lastActiveAt` and any consumer using "online
+      // within last N minutes" tolerates the small additional lag.
+      if (now - existing.updatedAt < PRIVATE_PRESENCE_MIN_WRITE_INTERVAL_MS) {
+        return { success: true };
+      }
       // Update existing record
       await ctx.db.patch(existing._id, {
         lastActiveAt: now,
@@ -2425,6 +2830,22 @@ export const setPrivateTypingStatus = mutation({
     // Validate session
     const userId = await validateSessionToken(ctx, token);
     if (!userId) return { success: false };
+
+    // P2-RL-01: Cap typing-indicator churn. Client-side debounce is ~1
+    // change per 2-3 s plus a stop event, so a real user emits well under
+    // 30/min per chat. 60/min + 1000/hr leaves headroom for multi-chat
+    // typing while hard-blocking an attacker who tries to thrash the
+    // privateTypingStatus row to amplify recipient query refetches. Silent
+    // denial returns `{success:false}` so the debounced client just skips
+    // the next emit (no user-visible error) — matches the existing
+    // unauthorized/idle return shape on this mutation.
+    const typingLimit = await reserveActionSlots(ctx, userId, 'p2_typing_status', [
+      { kind: '1min', windowMs: 60_000, max: 60 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 1000 },
+    ]);
+    if (!typingLimit.accept) {
+      return { success: false };
+    }
 
     // Verify user is participant (IDOR prevention)
     const conversation = await ctx.db.get(conversationId);

@@ -23,6 +23,7 @@ import {
   BackHandler,
   Platform,
   Pressable,
+  Dimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -34,6 +35,7 @@ import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { useAuthStore } from '@/stores/authStore';
+import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
@@ -259,6 +261,46 @@ export function Phase2ProtectedMediaViewer({
 
   // PHASE-1 PARITY FIX: Get auth token for backend mutations
   const token = useAuthStore((s) => s.token);
+
+  // P2-WM-01: Forensic watermark parity with Phase-1
+  // (`components/chat/ProtectedMediaViewer.tsx` ~line 139/620). Phase-1
+  // computes `${viewerName} · ${dateStr}` server-side and renders 5
+  // diagonal low-opacity copies over the media; Phase-2's local-URI
+  // viewer cannot piggy-back on that backend signal, so we synthesize the
+  // same label client-side from the viewer's own private profile
+  // (`displayName`) plus the open timestamp. Purely an informational
+  // overlay — the authoritative screenshot defense is still
+  // `useScreenProtection` (FLAG_SECURE / preventScreenCaptureAsync,
+  // engaged a few lines above). The watermark exists so that if a
+  // screenshot ever leaks despite that defense, the recipient who
+  // captured it is identifiable in the resulting image.
+  //
+  // P3-5: Deterrence-only contract.
+  // This watermark is explicitly NOT an authoritative protection layer.
+  // It is rendered client-side and can in principle be cropped, painted
+  // over, or bypassed by any rooted device, custom OS overlay, or
+  // external camera pointed at the screen. The real Phase-2 secure-
+  // media defenses are:
+  //   - FLAG_SECURE / preventScreenCaptureAsync (above) — blocks the
+  //     OS-level screenshot/recording path on standard devices,
+  //   - view-once / timer expiry on the backend (`openPrivateSecureMedia`
+  //     + `markPrivateSecureMediaViewed` + `cleanupExpiredPrivateMessage`
+  //     + cron sweep) — the storage blob is destroyed shortly after the
+  //     receiver's first view,
+  //   - receiver-only URL issuance contract (see `getPrivateMessages`
+  //     `imageUrl: null` branch and `openPrivateSecureMedia` sender-
+  //     rejection branch) — the playable URL is never retrievable from
+  //     the history feed and never issued back to the sender.
+  // The watermark's job is purely social: a leaked screenshot carries
+  // the viewer's name + timestamp, raising the social/legal cost of
+  // exfiltration even when the technical defenses are bypassed.
+  const viewerDisplayName = usePrivateProfileStore((s) => s.displayName);
+  const watermarkLabel = React.useMemo(() => {
+    if (!visible) return null;
+    const name = (viewerDisplayName && viewerDisplayName.trim()) || 'Viewer';
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    return `${name} · ${stamp}`;
+  }, [visible, viewerDisplayName]);
 
   // PHASE-1 PARITY FIX: Backend mutations for secure media state
   const markViewedMutation = useMutation(api.privateConversations.markPrivateSecureMediaViewed);
@@ -668,6 +710,34 @@ export function Phase2ProtectedMediaViewer({
                 <Text style={styles.cornerBadgeText}>{timerLabel}</Text>
               </View>
             )}
+
+            {/* P2-WM-01: Forensic watermark overlay — mirrors the Phase-1
+                viewer's diagonal-tile layout. Placed inside the mirrored
+                wrapper so a counter-flip keeps the text upright when the
+                media itself is mirrored, matching the cornerBadge
+                treatment. `pointerEvents="none"` so touches still reach
+                the hold-mode container. */}
+            {watermarkLabel && (
+              <View
+                style={[styles.watermarkContainer, isMirrored && styles.mirroredBadge]}
+                pointerEvents="none"
+              >
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <Text
+                    key={i}
+                    style={[
+                      styles.watermarkText,
+                      {
+                        top: 80 + i * 140,
+                        transform: [{ rotate: '-30deg' }],
+                      },
+                    ]}
+                  >
+                    {watermarkLabel}
+                  </Text>
+                ))}
+              </View>
+            )}
           </View>
         ) : mediaLoadError ? (
           // Phase-2 Fix B: Graceful "unavailable" state when URI is stale
@@ -811,5 +881,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: C.text,
     fontWeight: '500',
+  },
+  // P2-WM-01: Watermark styles ported from Phase-1
+  // (`components/chat/ProtectedMediaViewer.tsx` ~line 817). Values
+  // intentionally identical so the overlay reads with the same opacity
+  // and tile density on both surfaces.
+  watermarkContainer: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+  },
+  watermarkText: {
+    position: 'absolute',
+    fontSize: 18,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.08)',
+    left: 20,
+    width: Dimensions.get('window').width * 1.5,
+    textAlign: 'center',
   },
 });

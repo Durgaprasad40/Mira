@@ -1671,6 +1671,24 @@ export const unmatchPrivate = mutation({
 
     const userId = await requirePrivateSwipeActor(ctx, token, authUserId);
 
+    // P2-RL-05: Cap unmatch churn. Each accepted call deactivates the
+    // bilateral `privateMatches` row AND patches the caller's
+    // participation row to `isHidden=true`. A real user unmatches at most
+    // a handful of conversations in a session, so 5/min + 30/hr is very
+    // generous for honest UX and hard-blocks an attacker who tries to
+    // enumerate or thrash match state. Returns the existing
+    // `{success:false, error}` shape (silent rate-limit) so the caller's
+    // UI handles it identically to `conversation_not_found` /
+    // `not_a_participant` — the unmatch button simply stays clickable for
+    // a retry — and we don't surface a separate rate-limit message.
+    const unmatchLimit = await reserveActionSlots(ctx, userId, 'p2_unmatch', [
+      { kind: '1min', windowMs: 60_000, max: 5 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+    ]);
+    if (!unmatchLimit.accept) {
+      return { success: false, error: 'rate_limited' as const };
+    }
+
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
       return { success: false, error: 'conversation_not_found' as const };

@@ -21,6 +21,7 @@ import { v } from 'convex/values';
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server';
 import type { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
+import { reserveActionSlots } from './actionRateLimits';
 
 /**
  * P2-001: Local actor-resolver — mirrors the `requirePrivateConversationActor`
@@ -195,6 +196,25 @@ export const requestPrivatePhotoAccess = mutation({
       return { success: false, error: 'Unauthorized' };
     }
 
+    // P2-RL-06a: Cap photo-access request churn. Each accepted call inserts
+    // a new `privatePhotoAccessRequests` row (when one doesn't already
+    // exist) and is visible to the owner's notification surface. A real
+    // user sends a handful of requests per session; 10/min + 60/hr is
+    // generous for honest UX and hard-blocks an attacker who tries to spam
+    // many owners or thrash a single owner's pending-request list. Returns
+    // the existing `{success:false, error}` shape so the caller's request-
+    // button UI handles it identically to "already declined" — silent to
+    // the rate-limited probe — and the existingRequest short-circuit
+    // (already_approved/already_pending/declined) still applies on the
+    // accepted path so honest re-taps don't consume slots needlessly.
+    const requestLimit = await reserveActionSlots(ctx, viewerUserId, 'p2_photo_access_request', [
+      { kind: '1min', windowMs: 60_000, max: 10 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 60 },
+    ]);
+    if (!requestLimit.accept) {
+      return { success: false, error: 'rate_limited' };
+    }
+
     // Cannot request access to own photos
     if (String(viewerUserId) === String(ownerUserId)) {
       return { success: false, error: 'Cannot request access to own photos' };
@@ -258,6 +278,22 @@ export const respondToPhotoAccessRequest = mutation({
       userId = await requirePhotoAccessActor(ctx, token, authUserId);
     } catch {
       return { success: false, error: 'Unauthorized' };
+    }
+
+    // P2-RL-06b: Cap owner-response churn. Each accepted call patches the
+    // request row to approved/declined and is otherwise idempotent. An
+    // honest owner taps approve/decline once per request — even bulk-
+    // approving a notification backlog is bounded by how many distinct
+    // requests exist. 20/min + 200/hr safely covers bulk-approve flows
+    // while hard-blocking any thrash by a stolen-token attacker. Returns
+    // the same `{success:false, error}` shape used for `Request not found`
+    // / `Unauthorized` so the response button UI is shape-stable.
+    const respondLimit = await reserveActionSlots(ctx, userId, 'p2_photo_access_respond', [
+      { kind: '1min', windowMs: 60_000, max: 20 },
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 200 },
+    ]);
+    if (!respondLimit.accept) {
+      return { success: false, error: 'rate_limited' };
     }
 
     // Get the request
