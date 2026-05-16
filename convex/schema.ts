@@ -136,6 +136,18 @@ export default defineSchema({
     publishedLng: v.optional(v.number()),
     publishedAt: v.optional(v.number()),
 
+    // Phase-2 scale: coarse geographic cell identifier derived from the
+    // grid-snapped latitude/longitude. Maintained by every server-side
+    // location writer (publishLocation, recordLocation, updateLocation)
+    // so recordLocation's candidate lookup can use `by_verification_cell`
+    // instead of scanning every verified user. Optional because legacy
+    // rows are populated by a paginated backfill mutation. Readers must
+    // tolerate `undefined` so reading code never crashes mid-backfill.
+    // Cell size is fixed at 0.02° per axis (~2.2km lat, ~1.1–2.2km lng
+    // depending on latitude), comfortably wider than the 1km crossed-path
+    // radius across all 9 viewer+neighbor cells.
+    nearbyCell5: v.optional(v.string()),
+
     // Preferences
     lookingFor: v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'))),
     relationshipIntent: v.array(v.union(
@@ -634,7 +646,12 @@ export default defineSchema({
     .index('by_verification_status', ['verificationStatus'])
     .index('by_demo_user_id', ['demoUserId'])
     .index('by_auth_user_id', ['authUserId'])
-    .index('by_deleted_at', ['deletedAt']),
+    .index('by_deleted_at', ['deletedAt'])
+    // Phase-2 scale: bounded geo-cell candidate lookup for recordLocation.
+    // Lets the crossed-path detector fetch only verified users in the
+    // viewer's cell + 8 neighbors instead of scanning every verified user.
+    // Guarded server-side by RECORD_LOCATION_GEO_INDEX_ENABLED.
+    .index('by_verification_cell', ['verificationStatus', 'nearbyCell5']),
 
   // Wallet ledger: auditable balance changes for engagement rewards and spend events.
   walletLedger: defineTable({

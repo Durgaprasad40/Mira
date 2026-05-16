@@ -199,18 +199,19 @@ export default function NearbySettingsScreen() {
 
   const ensureNearbyConsent = useCallback(async (): Promise<boolean> => {
     if (isDemoMode) return true;
-    if (!userId) return false;
+    if (!userId || !token) return false;
     if (hasNearbyConsent) return true;
 
     const accepted = await confirmNearbyConsent();
     if (!accepted) return false;
 
     await acceptNearbyConsentMut({
+      token,
       authUserId: userId,
       consentVersion: NEARBY_CONSENT_VERSION,
     });
     return true;
-  }, [acceptNearbyConsentMut, confirmNearbyConsent, hasNearbyConsent, userId]);
+  }, [acceptNearbyConsentMut, confirmNearbyConsent, hasNearbyConsent, token, userId]);
 
   // Toggle handlers
   const handleNearbyEnabledToggle = useCallback(
@@ -233,7 +234,7 @@ export default function NearbySettingsScreen() {
               nearbyEnabled: true,
               recordCrossedPaths: true,
             });
-            await pauseNearbyMut({ authUserId: userId, paused: false });
+            await pauseNearbyMut({ token, authUserId: userId, paused: false });
           }
           Toast.show('Nearby is on');
         } catch (error: any) {
@@ -421,16 +422,16 @@ export default function NearbySettingsScreen() {
       setPausedUntil(null);
       return;
     }
-    if (!userId) return;
+    if (!userId || !token) return;
     try {
-      await pauseNearbyMut({ authUserId: userId, paused: false });
+      await pauseNearbyMut({ token, authUserId: userId, paused: false });
       setIsPaused(false);
       setPausedUntil(null);
       Toast.show('Nearby visibility resumed');
     } catch {
       Toast.show('Failed to update pause status');
     }
-  }, [pauseNearbyMut, userId]);
+  }, [pauseNearbyMut, token, userId]);
 
   // Pause with chosen duration (Phase-2)
   const handlePauseWithDuration = async (durationMs: number | null, shortLabel: string) => {
@@ -443,9 +444,9 @@ export default function NearbySettingsScreen() {
       setPausedUntil(Date.now() + effectiveMs);
       return;
     }
-    if (!userId) return;
+    if (!userId || !token) return;
     try {
-      await pauseNearbyMut({ authUserId: userId, paused: true, durationMs });
+      await pauseNearbyMut({ token, authUserId: userId, paused: true, durationMs });
       await disableBackgroundCrossedPaths();
       await refreshBackgroundStatus();
       setIsPaused(true);

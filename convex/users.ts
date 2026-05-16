@@ -6,7 +6,13 @@ import { logAdminAction } from "./adminLog";
 import { validateAccess } from "./devReset";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateOwnership, validateSessionToken } from "./helpers";
 import { reserveActionSlots } from "./actionRateLimits";
-import { BG_LOCATION_CONSENT_VERSION, NEARBY_CONSENT_VERSION } from "./crossedPaths";
+import {
+  BG_LOCATION_CONSENT_VERSION,
+  NEARBY_CONSENT_VERSION,
+  computeNearbyCell5,
+  rejectIfUnsafeLocation,
+  roundToGrid,
+} from "./crossedPaths";
 import {
   hasCurrentBgCrossedPathsConsentOnUser,
   isBgCrossedPathsEnabled,
@@ -46,6 +52,22 @@ const PHASE2_PRIVATE_BIO_MAX_LENGTH = 300;
 const PHASE2_MIN_PRIVATE_INTENT_KEYS = 1;
 const PHASE2_MAX_PRIVATE_INTENT_KEYS = 3;
 const PHASE1_MESSAGES_RELATIONSHIP_SCAN_LIMIT = 1000;
+const NEARBY_AUDIT_LOG_ENABLED = process.env.NEARBY_AUDIT === "1";
+const NEARBY_SETTINGS_RATE_LIMIT_WINDOWS = [
+  { kind: "1hour", windowMs: 60 * 60 * 1000, max: 20 },
+  { kind: "24hour", windowMs: 24 * 60 * 60 * 1000, max: 100 },
+];
+
+async function reserveNearbySettingsSlot(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  action: string,
+): Promise<void> {
+  const limit = await reserveActionSlots(ctx, userId, action, NEARBY_SETTINGS_RATE_LIMIT_WINDOWS);
+  if (!limit.accept) {
+    throw new Error("rate_limited");
+  }
+}
 
 function normalizeOptionalTrimmedString(
   value: string | undefined,
@@ -1406,25 +1428,46 @@ export const updatePreferences = mutation({
 // APP-P0-001 FIX: Server-side auth - user can only update their own location
 export const updateLocation = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     latitude: v.number(),
     longitude: v.number(),
     city: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, latitude, longitude, city } = args;
+    const { token, authUserId, latitude, longitude, city } = args;
 
-    // APP-P0-001 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, token, authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:updateLocation");
 
-    await ctx.db.patch(userId, {
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    const now = Date.now();
+    const locationSafety = await rejectIfUnsafeLocation(
+      ctx,
+      userId,
+      user,
       latitude,
       longitude,
+      now,
+    );
+    if (locationSafety.rejected) {
+      throw new Error(locationSafety.reason ?? "suspicious_location");
+    }
+    const snapped = roundToGrid(latitude, longitude);
+
+    await ctx.db.patch(userId, {
+      latitude: snapped.lat,
+      longitude: snapped.lng,
+      // Phase-2 scale: maintain coarse geo cell so the bounded
+      // by_verification_cell candidate lookup in recordLocation can find
+      // this user. Derived from the already-grid-snapped coordinates so no
+      // raw GPS is introduced.
+      nearbyCell5: computeNearbyCell5(snapped.lat, snapped.lng),
       city,
-      lastActive: Date.now(),
+      lastActive: now,
+      lastLocationUpdatedAt: now,
     });
 
     return { success: true };
@@ -1435,17 +1478,15 @@ export const updateLocation = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own incognito
 export const toggleIncognito = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, enabled } = args;
+    const { token, authUserId, enabled } = args;
 
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, token, authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:toggleIncognito");
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -1486,27 +1527,31 @@ export const toggleIncognito = mutation({
  */
 export const acceptNearbyConsent = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     consentVersion: v.string(),
   },
   handler: async (ctx, args) => {
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:acceptConsent");
+
     if (args.consentVersion !== NEARBY_CONSENT_VERSION) {
       throw new Error('invalid_nearby_consent_version');
     }
-
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) throw new Error('Unauthorized: user not found');
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');
 
     const now = Date.now();
+    // Intentionally do NOT clear `nearbyPausedUntil` here. A user who paused
+    // Nearby and then re-accepts the disclosure (e.g. after a consent-version
+    // bump) must keep their active pause; otherwise the consent prompt would
+    // silently unpause them. Pause is cleared only via the explicit pause UI.
     await ctx.db.patch(userId, {
       nearbyConsentAt: now,
       nearbyConsentVersion: args.consentVersion,
       nearbyEnabled: true,
       recordCrossedPaths: true,
-      nearbyPausedUntil: undefined,
     });
 
     return { success: true, nearbyConsentAt: now };
@@ -1688,12 +1733,16 @@ async function readBgCrossedPathsFlag(
 
 export const startDiscoveryMode = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     // Optional: client can ask for a shorter window. Anything above the
     // MAX is clamped; anything <=0 or missing gets the default.
     durationMs: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:startDiscovery");
+
     // Phase 1 kill switch — the entire background pipeline is OFF unless
     // the featureFlags row says otherwise. Returning a benign disabled
     // response keeps cached old clients from crashing.
@@ -1701,10 +1750,6 @@ export const startDiscoveryMode = mutation({
       throw new Error('feature_not_ready');
     }
 
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');
 
@@ -1729,33 +1774,35 @@ export const startDiscoveryMode = mutation({
     });
 
     // Compact server-side audit of Discovery Mode start.
-    console.log('[ANDROID_DISCOVERY][server_start]', {
-      userId,
-      startedAt: now,
-      expiresAt,
-      durationMs: clamped,
-    });
+    if (NEARBY_AUDIT_LOG_ENABLED) {
+      console.log('[ANDROID_DISCOVERY][server_start]', {
+        userId,
+        startedAt: now,
+        expiresAt,
+        durationMs: clamped,
+      });
+    }
 
     return { success: true, startedAt: now, expiresAt, durationMs: clamped };
   },
 });
 
 export const stopDiscoveryMode = mutation({
-  args: { authUserId: v.string() },
+  args: { token: v.string(), authUserId: v.string() },
   handler: async (ctx, args) => {
     // Stop is always honored even when the feature flag is off — turning
     // OFF a window must never be blocked, otherwise an admin disabling the
     // flag could leave users stuck in an "active" window they can't end.
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:stopDiscovery");
     await ctx.db.patch(userId, {
       discoveryModeEnabled: false,
       discoveryModeExpiresAt: undefined,
       // discoveryModeStartedAt intentionally left intact for diagnostics.
     });
-    console.log('[ANDROID_DISCOVERY][server_stop]', { userId, at: Date.now() });
+    if (NEARBY_AUDIT_LOG_ENABLED) {
+      console.log('[ANDROID_DISCOVERY][server_stop]', { userId, at: Date.now() });
+    }
     return { success: true };
   },
 });
@@ -1771,12 +1818,10 @@ export const stopDiscoveryMode = mutation({
 // ---------------------------------------------------------------------------
 
 export const acceptBackgroundLocationConsent = mutation({
-  args: { authUserId: v.string() },
+  args: { token: v.string(), authUserId: v.string() },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:acceptBgConsent");
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');
     if (!(await isBgCrossedPathsEnabled(ctx))) {
@@ -1798,22 +1843,22 @@ export const acceptBackgroundLocationConsent = mutation({
       backgroundLocationConsentAt: now,
       backgroundLocationConsentVersion: BG_LOCATION_CONSENT_VERSION,
     });
-    console.log('[BG_LOCATION][consent_accepted]', {
-      userId,
-      version: BG_LOCATION_CONSENT_VERSION,
-      at: now,
-    });
+    if (NEARBY_AUDIT_LOG_ENABLED) {
+      console.log('[BG_LOCATION][consent_accepted]', {
+        userId,
+        version: BG_LOCATION_CONSENT_VERSION,
+        at: now,
+      });
+    }
     return { success: true, at: now, version: BG_LOCATION_CONSENT_VERSION };
   },
 });
 
 export const revokeBackgroundLocationConsent = mutation({
-  args: { authUserId: v.string() },
+  args: { token: v.string(), authUserId: v.string() },
   handler: async (ctx, args) => {
-    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, args.token, args.authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:revokeBgConsent");
     // Revoke must always be honored — never gated by the feature flag and
     // never throws on already-revoked users (idempotent).
     await ctx.db.patch(userId, {
@@ -1823,7 +1868,9 @@ export const revokeBackgroundLocationConsent = mutation({
       discoveryModeEnabled: false,
       discoveryModeExpiresAt: undefined,
     });
-    console.log('[BG_LOCATION][consent_revoked]', { userId, at: Date.now() });
+    if (NEARBY_AUDIT_LOG_ENABLED) {
+      console.log('[BG_LOCATION][consent_revoked]', { userId, at: Date.now() });
+    }
     return { success: true };
   },
 });
@@ -1840,19 +1887,17 @@ export const revokeBackgroundLocationConsent = mutation({
  */
 export const pauseNearby = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     paused: v.boolean(),
     // Phase-2: optional duration. Omit for legacy 24h behavior. null = indefinite.
     durationMs: v.optional(v.union(v.number(), v.null())),
   },
   handler: async (ctx, args) => {
-    const { authUserId, paused, durationMs } = args;
+    const { token, authUserId, paused, durationMs } = args;
 
-    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error("Unauthorized: user not found");
-    }
+    const userId = await validateOwnership(ctx, token, authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:pause");
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -1897,17 +1942,15 @@ export const pauseNearby = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own discovery pause
 export const toggleDiscoveryPause = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, paused } = args;
+    const { token, authUserId, paused } = args;
 
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, token, authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:toggleDiscoveryPause");
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -1932,17 +1975,15 @@ export const toggleDiscoveryPause = mutation({
 // APP-P1-005 FIX: Server-side auth - user can only toggle their own setting
 export const toggleShowLastSeen = mutation({
   args: {
+    token: v.string(),
     authUserId: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { authUserId, enabled } = args;
+    const { token, authUserId, enabled } = args;
 
-    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const userId = await validateOwnership(ctx, token, authUserId);
+    await reserveNearbySettingsSlot(ctx, userId, "nearby:toggleShowLastSeen");
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");

@@ -133,7 +133,7 @@ export type BgEnableResult =
   | { ok: true }
   | { ok: false; reason: BgEnableFailureReason; message?: string };
 
-export type BgDisableFailureReason = 'revoke_failed';
+export type BgDisableFailureReason = 'not_authenticated' | 'revoke_failed';
 
 export type BgDisableResult =
   | { ok: true }
@@ -635,7 +635,7 @@ export function useBackgroundLocation() {
       // and so the backend never sees a pre-consent OS-permission attempt
       // (defense in depth — UI also gates).
       try {
-        await acceptConsentMut({ authUserId: uid });
+        await acceptConsentMut({ token: sessionToken, authUserId: uid });
         recordBgCrossedPathsBreadcrumb('server_consent_result', {
           success: true,
         });
@@ -682,7 +682,7 @@ export function useBackgroundLocation() {
           stage: 'get',
           nativeManifest: manifestErr,
         });
-        await safeRevokeOnRollback(uid, revokeConsentMut);
+        await safeRevokeOnRollback(uid, sessionToken, revokeConsentMut);
         recordBgCrossedPathsBreadcrumb('os_permission_result', {
           permission: 'background',
           granted: false,
@@ -702,7 +702,7 @@ export function useBackgroundLocation() {
             stage: 'request',
             nativeManifest: manifestErr,
           });
-          await safeRevokeOnRollback(uid, revokeConsentMut);
+          await safeRevokeOnRollback(uid, sessionToken, revokeConsentMut);
           recordBgCrossedPathsBreadcrumb('os_permission_result', {
             permission: 'background',
             granted: false,
@@ -715,7 +715,7 @@ export function useBackgroundLocation() {
         }
       }
       if (bg.status !== 'granted') {
-        await safeRevokeOnRollback(uid, revokeConsentMut);
+        await safeRevokeOnRollback(uid, sessionToken, revokeConsentMut);
         recordBgCrossedPathsBreadcrumb('os_permission_result', {
           permission: 'background',
           granted: false,
@@ -734,7 +734,7 @@ export function useBackgroundLocation() {
       //   - iOS:   set backgroundLocationEnabled=true (gates 'slc' samples).
       try {
         if (Platform.OS === 'android') {
-          await startDiscoveryMut({ authUserId: uid });
+          await startDiscoveryMut({ token: sessionToken, authUserId: uid });
         } else {
           await updateNearbySettingsMut({
             token: sessionToken,
@@ -749,7 +749,7 @@ export function useBackgroundLocation() {
         const normalized = normalizeServerBackgroundReason((err as Error)?.message);
         if (normalized) {
           captureBgReliabilityIssue('enable_background', normalized, err);
-          await safeRevokeOnRollback(uid, revokeConsentMut);
+          await safeRevokeOnRollback(uid, sessionToken, revokeConsentMut);
           recordBgCrossedPathsBreadcrumb('platform_setup_result', {
             success: false,
             platform: Platform.OS,
@@ -761,7 +761,7 @@ export function useBackgroundLocation() {
             message: (err as Error)?.message,
           };
         }
-        await safeRevokeOnRollback(uid, revokeConsentMut);
+        await safeRevokeOnRollback(uid, sessionToken, revokeConsentMut);
         recordBgCrossedPathsBreadcrumb('platform_setup_result', {
           success: false,
           platform: Platform.OS,
@@ -791,7 +791,7 @@ export function useBackgroundLocation() {
         // Roll back: stop platform flag, then revoke consent.
         try {
           if (Platform.OS === 'android') {
-            await stopDiscoveryMut({ authUserId: uid });
+            await stopDiscoveryMut({ token: sessionToken, authUserId: uid });
           } else if (sessionToken) {
             await updateNearbySettingsMut({
               token: sessionToken,
@@ -801,7 +801,7 @@ export function useBackgroundLocation() {
         } catch {
           // Swallow — revoke below also clears these defensively.
         }
-        await safeRevokeOnRollback(uid, revokeConsentMut);
+        await safeRevokeOnRollback(uid, sessionToken, revokeConsentMut);
         recordBgCrossedPathsBreadcrumb('background_location_task_start_failed', {
           reason: 'task_start_failed',
           platform: Platform.OS,
@@ -861,10 +861,13 @@ export function useBackgroundLocation() {
         return { ok: true };
       }
       const sessionToken = typeof tokenRef.current === 'string' ? tokenRef.current.trim() : '';
+      if (!sessionToken) {
+        return { ok: false, reason: 'not_authenticated' };
+      }
       try {
         if (Platform.OS === 'android') {
           try {
-            await stopDiscoveryMut({ authUserId: uid });
+            await stopDiscoveryMut({ token: sessionToken, authUserId: uid });
           } catch {
             // Swallow — revoke below also clears Discovery state.
           }
@@ -878,7 +881,7 @@ export function useBackgroundLocation() {
             // Swallow — revoke below also clears backgroundLocationEnabled.
           }
         }
-        await revokeConsentMut({ authUserId: uid });
+        await revokeConsentMut({ token: sessionToken, authUserId: uid });
         recordBgCrossedPathsBreadcrumb('server_revoke_result', {
           success: true,
         });
@@ -945,11 +948,13 @@ export function useBackgroundLocation() {
 // ---------------------------------------------------------------------------
 async function safeRevokeOnRollback(
   authUserId: string,
+  token: string,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  revokeMut: (args: { authUserId: string }) => Promise<any>,
+  revokeMut: (args: { token: string; authUserId: string }) => Promise<any>,
 ): Promise<void> {
+  if (!token) return;
   try {
-    await revokeMut({ authUserId });
+    await revokeMut({ token, authUserId });
     recordBgCrossedPathsBreadcrumb('server_revoke_result', {
       success: true,
       source: 'rollback',

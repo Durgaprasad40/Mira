@@ -322,7 +322,12 @@ const DEFAULT_LONGITUDE_DELTA = 0.004;
 // shops/cafes while still filtering stationary GPS jitter.
 const DETECTION_MIN_MOVEMENT_METERS = 25; // Aligned with server; catches real crossings
 const DETECTION_MIN_INTERVAL_MS = 30000; // Only scan every 30s+
-const PUBLISH_REFRESH_INTERVAL_MS = 30000; // Refresh publishedAt at least every 30s while Nearby is active
+// Refresh cadence for publishedAt while Nearby is active. Backend enforces a
+// 6h publish window and a 500m movement gate, so polling more often than
+// every few minutes wastes work even when it does not consume publish quota.
+// 5 minutes leaves headroom for users walking through a new cell while staying
+// well clear of the per-user `nearby:publish` rate-limit budget.
+const PUBLISH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 // P3-NEARBY-002: Query timeout constant (extracted from inline 30000ms)
 const QUERY_TIMEOUT_MS = 30000; // 30 seconds before showing error
@@ -767,7 +772,9 @@ export default function NearbyScreen() {
       if (isQueryActive) {
         setQueryError('Nearby is taking longer than usual to refresh.');
         setIsRetrying(false);
-        log.warn('[NEARBY]', 'query timeout - no data after 30s');
+        if (__DEV__) {
+          log.warn('[NEARBY]', 'query timeout - no data after 30s');
+        }
       }
       queryTimeoutRef.current = null;
     }, QUERY_TIMEOUT_MS);
@@ -853,8 +860,8 @@ export default function NearbyScreen() {
         autoRetryCountRef.current += 1;
         if (__DEV__) {
           console.log('[NEARBY] auto-retry attempt', autoRetryCountRef.current, 'of', AUTO_RETRY_MAX);
+          log.info('[NEARBY]', 'auto-retry attempt', { attempt: autoRetryCountRef.current, max: AUTO_RETRY_MAX });
         }
-        log.info('[NEARBY]', 'auto-retry attempt', { attempt: autoRetryCountRef.current, max: AUTO_RETRY_MAX });
 
         // Clear error and trigger retry (same as manual retry)
         setQueryError(null);
@@ -1399,7 +1406,9 @@ export default function NearbyScreen() {
       const newClusters = superclusterRef.current.getClusters(bbox, zoom);
       setClusters(newClusters);
     } catch (e) {
-      log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
+      if (__DEV__) {
+        log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
+      }
       setClusters([]);
     }
   }, []);
@@ -1448,7 +1457,9 @@ export default function NearbyScreen() {
         longitudeDelta: lngDelta,
       }, 300);
     } catch (e) {
-      log.warn('[NEARBY]', 'Error handling cluster press', { error: String(e) });
+      if (__DEV__) {
+        log.warn('[NEARBY]', 'Error handling cluster press', { error: String(e) });
+      }
     }
   }, []);
 
@@ -1635,7 +1646,9 @@ export default function NearbyScreen() {
       targetUserId: user.id,
       freshnessLabel: user.freshnessLabel,
     });
-    log.info('[NEARBY]', 'marker tapped, opening preview', { id: user.id });
+    if (__DEV__) {
+      log.info('[NEARBY]', 'marker tapped, opening preview', { id: user.id });
+    }
   }, []);
 
   const handleClosePreview = useCallback(() => {
@@ -1655,7 +1668,9 @@ export default function NearbyScreen() {
       via: 'preview',
     });
     setPreviewUser(null);
-    log.info('[NEARBY]', 'preview → profile', { id: user.id });
+    if (__DEV__) {
+      log.info('[NEARBY]', 'preview → profile', { id: user.id });
+    }
     safePush(router, `/(main)/profile/${user.id}${freshnessParam}` as any, 'nearby->profile');
   }, [router]);
 
@@ -1674,7 +1689,9 @@ export default function NearbyScreen() {
       via: 'preview',
     });
     setPreviewUser(null);
-    log.info('[NEARBY]', 'preview → like (profile)', { id: user.id });
+    if (__DEV__) {
+      log.info('[NEARBY]', 'preview → like (profile)', { id: user.id });
+    }
     safePush(router, `/(main)/profile/${user.id}${freshnessParam}` as any, 'nearby->profile-like');
   }, [router]);
 
@@ -1739,7 +1756,9 @@ export default function NearbyScreen() {
         latitudeDelta: DEFAULT_LATITUDE_DELTA,
         longitudeDelta: DEFAULT_LONGITUDE_DELTA,
       }, 300);
-      log.info('[NEARBY]', 'recentered to my location');
+      if (__DEV__) {
+        log.info('[NEARBY]', 'recentered to my location');
+      }
     } else if (__DEV__) {
       console.warn('[NEARBY] No valid location for recenter');
     }
@@ -1770,8 +1789,8 @@ export default function NearbyScreen() {
       setIsNearbyFocused(true);
       emptyNoticeShownThisFocusRef.current = false;
       requestNearbyRefresh({ force: true });
-      log.info('[NEARBY]', 'screen focused, starting location tracking');
       if (__DEV__) {
+        log.info('[NEARBY]', 'screen focused, starting location tracking');
         console.log('[NEARBY_ENTRY][focus]', {
           event: 'enter',
           hasRetained:
@@ -1798,8 +1817,8 @@ export default function NearbyScreen() {
           clearTimeout(crossedPathsCtaTimeoutRef.current);
           crossedPathsCtaTimeoutRef.current = null;
         }
-        log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
         if (__DEV__) {
+          log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
           console.log('[NEARBY_ENTRY][focus]', { event: 'leave' });
         }
         stopLocationTracking();
@@ -1940,7 +1959,9 @@ export default function NearbyScreen() {
       Linking.openURL('app-settings:');
     } else {
       Linking.openSettings().catch(() => {
-        log.warn('[NEARBY]', 'Failed to open settings');
+        if (__DEV__) {
+          log.warn('[NEARBY]', 'Failed to open settings');
+        }
       });
     }
   }, []);

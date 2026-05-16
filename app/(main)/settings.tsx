@@ -162,11 +162,11 @@ export default function SettingsScreen() {
       setPauseEnabled(paused);
       return;
     }
-    if (!userId) return;
+    if (!userId || !token) return;
 
     try {
-      // FIX: Backend expects { authUserId }, not { token }
-      await toggleDiscoveryPause({ authUserId: userId, paused });
+      // Backend validates token ownership of the requested authUserId.
+      await toggleDiscoveryPause({ token, authUserId: userId, paused });
       setPauseEnabled(paused);
     } catch {
       Toast.show('Couldn\u2019t update this setting. Please try again.');
@@ -180,11 +180,11 @@ export default function SettingsScreen() {
       setShowLastSeenEnabled(show);
       return;
     }
-    if (!userId) return;
+    if (!userId || !token) return;
 
     try {
-      // FIX: Backend expects { authUserId }, not { token }
-      await toggleShowLastSeenMut({ authUserId: userId, enabled: show });
+      // Backend validates token ownership of the requested authUserId.
+      await toggleShowLastSeenMut({ token, authUserId: userId, enabled: show });
       setShowLastSeenEnabled(show);
     } catch {
       Toast.show('Couldn\u2019t update this setting. Please try again.');

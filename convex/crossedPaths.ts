@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 import { validateSessionToken } from './helpers';
+import { reserveActionSlots } from './actionRateLimits';
 import { isDiscoveryExcluded, loadDiscoveryExclusions } from './discoveryExclusions';
 import {
   BG_CROSSED_PATHS_REQUIRED_CONSENT_VERSION,
@@ -142,6 +143,23 @@ const NEARBY_MAX_METERS = 1000; // Maximum distance for nearby map
 // the two surfaces tell a consistent "we were near each other" story.
 const CROSSED_MIN_METERS = 0;    // No minimum floor; co-located is the strongest crossing
 const CROSSED_MAX_METERS = 1000; // Aligned with Nearby map upper bound
+
+const TEN_MINUTES_MS = 10 * 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+const CROSSED_PATHS_AUDIT_ENABLED = process.env.CROSSED_PATHS_AUDIT === '1';
+
+async function reserveNearbyActionRateLimit(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>,
+  action: string,
+  windows: Array<{ kind: string; windowMs: number; max: number }>,
+): Promise<boolean> {
+  const limit = await reserveActionSlots(ctx, userId, action, windows);
+  return limit.accept;
+}
 
 // Location update gate
 const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
@@ -449,7 +467,7 @@ const PRIVACY_ZONE_DEFAULT_RADIUS_METERS = 500;
 const PRIVACY_ZONE_MIN_RADIUS_METERS = 200;
 const PRIVACY_ZONE_MAX_RADIUS_METERS = 1000;
 const PRIVACY_ZONE_LABEL_MAX_LENGTH = 32;
-const PRIVACY_ZONE_AUDIT_ENABLED = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+const PRIVACY_ZONE_AUDIT_ENABLED = process.env.PRIVACY_ZONE_AUDIT === '1';
 
 // ---------------------------------------------------------------------------
 // GPS Jitter Protection Constants (server-side)
@@ -486,7 +504,7 @@ const LOCATION_REJECTS_TO_FLAG = 3;
 // Treat rapid-fire rejects as a single event so a flapping client cannot
 // burn through the suspect threshold in a few seconds.
 const LOCATION_REJECT_DEDUPE_MS = 5000;
-const LOCATION_SAFETY_AUDIT_ENABLED = process.env.EXPO_PUBLIC_DEMO_AUTH_MODE === 'true';
+const LOCATION_SAFETY_AUDIT_ENABLED = process.env.LOCATION_SAFETY_AUDIT === '1';
 
 // ---------------------------------------------------------------------------
 // "Someone crossed you" alert constants
@@ -966,7 +984,7 @@ async function recordLocationSafetyReject(
  * incoming sample, and (on reject) record the safety event. Callers should
  * abort their write/upsert path when this returns rejected=true.
  */
-async function rejectIfUnsafeLocation(
+export async function rejectIfUnsafeLocation(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ctx: any,
   userId: Id<'users'>,
@@ -1542,6 +1560,13 @@ export const publishLocation = mutation({
     if (!userId) {
       return { published: false, publishedAt: null, reason: 'not_authenticated' };
     }
+    // Quota note: the `nearby:publish` rate limit is intentionally NOT reserved
+    // here. The frontend currently refreshes Nearby on a fixed interval and
+    // most of those calls are no-ops (within the 6h window, or no meaningful
+    // movement). Reserving quota above the no-op gates would burn the user's
+    // 10-min / 24-hour publish budget on harmless polling. The reservation is
+    // performed just before the actual `ctx.db.patch` below, so only writes
+    // that change the published snapshot consume quota.
     const { latitude, longitude } = args;
     const now = Date.now();
 
@@ -1629,6 +1654,23 @@ export const publishLocation = mutation({
     // both pipelines share the same precision floor.
     const snapped = roundToGrid(latitude, longitude);
 
+    // Reserve `nearby:publish` quota here — AFTER all cheap no-op gates
+    // (within_window / no_movement / eligibility / impossible_travel /
+    // privacy_zone). Only calls that are actually going to mutate the
+    // published snapshot consume the user's 10-min / 24-hour publish budget.
+    const publishLimit = await reserveNearbyActionRateLimit(ctx, userId, 'nearby:publish', [
+      { kind: '10min', windowMs: TEN_MINUTES_MS, max: 8 },
+      { kind: '24hour', windowMs: ONE_DAY_MS, max: 60 },
+    ]);
+    if (!publishLimit) {
+      return {
+        success: false,
+        published: false,
+        publishedAt: null,
+        reason: 'rate_limited_publish',
+      };
+    }
+
     // Publish new location
     await ctx.db.patch(userId, {
       publishedLat: snapped.lat,
@@ -1640,6 +1682,10 @@ export const publishLocation = mutation({
       // compatible coarse location without storing exact GPS.
       latitude: snapped.lat,
       longitude: snapped.lng,
+      // Phase-2 scale: maintain coarse geo cell so the bounded
+      // by_verification_cell candidate lookup can find this user. Derived
+      // from the same grid-snapped coordinates already used for privacy.
+      nearbyCell5: computeNearbyCell5(snapped.lat, snapped.lng),
       lastLocationUpdatedAt: now,
     });
 
@@ -1672,6 +1718,13 @@ export const detectCrossedUsers = mutation({
     const userId = await resolveUserIdFromSessionToken(ctx, args.token);
     if (!userId) {
       return { triggered: false, reason: 'not_authenticated' };
+    }
+    const detectLimit = await reserveNearbyActionRateLimit(ctx, userId, 'nearby:detect', [
+      { kind: '1hour', windowMs: ONE_HOUR_MS, max: 30 },
+      { kind: '24hour', windowMs: ONE_DAY_MS, max: 300 },
+    ]);
+    if (!detectLimit) {
+      return { triggered: false, reason: 'rate_limited_detect' };
     }
 
     // 1) Validate user exists
@@ -1725,15 +1778,24 @@ export const detectCrossedUsers = mutation({
 
     // Alert source is the same history rows written by the sample matchers.
     // This avoids a second, looser published-location crossing model.
+    //
+    // Bounded read: only the most-recent N rows per side are needed because the
+    // downstream filter rejects any entry older than SAMPLE_TIME_WINDOW_MS
+    // (10 minutes). 200 most-recent rows per side is generous headroom for any
+    // realistic burst of crossings within that window and prevents lifetime
+    // crossPathHistory scans for high-traffic users.
+    const DETECT_HISTORY_PER_SIDE_CAP = 200;
     const [asUser1, asUser2] = await Promise.all([
       ctx.db
         .query('crossPathHistory')
         .withIndex('by_user1', (q: any) => q.eq('user1Id', userId))
-        .collect(),
+        .order('desc')
+        .take(DETECT_HISTORY_PER_SIDE_CAP),
       ctx.db
         .query('crossPathHistory')
         .withIndex('by_user2', (q: any) => q.eq('user2Id', userId))
-        .collect(),
+        .order('desc')
+        .take(DETECT_HISTORY_PER_SIDE_CAP),
     ]);
 
     const recentHistoryCandidates: Array<{ otherUserId: Id<'users'> }> = [];
@@ -1850,16 +1912,19 @@ export const recordLocation = mutation({
     if (!userId) {
       return { nearbyCount: 0, reason: 'not_authenticated' };
     }
+    const recordLimit = await reserveNearbyActionRateLimit(ctx, userId, 'nearby:recordLocation', [
+      { kind: '10min', windowMs: TEN_MINUTES_MS, max: 20 },
+      { kind: '24hour', windowMs: ONE_DAY_MS, max: 200 },
+    ]);
+    if (!recordLimit) {
+      return { success: false, nearbyCount: 0, reason: 'rate_limited_record_location' };
+    }
     const { latitude, longitude, accuracy } = args;
     const now = Date.now();
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return { success: false };
 
-    // [CROSSED_PATHS_AUDIT] dev-only gate — emits structured logs so we can
-    // trace every accepted/rejected candidate during QA. Can be flipped to
-    // false to silence without removing the logging blocks.
-    const CROSSED_PATHS_AUDIT_ENABLED = true;
     const isDevBypass = isNearbyDevVerificationBypass();
 
     const currentEligibility = checkNearbyHardEligibility(currentUser, {
@@ -1966,6 +2031,12 @@ export const recordLocation = mutation({
     await ctx.db.patch(userId, {
       latitude: snappedCurrentLocation.lat,
       longitude: snappedCurrentLocation.lng,
+      // Phase-2 scale: maintain coarse geo cell so the bounded
+      // by_verification_cell candidate lookup can find this user.
+      nearbyCell5: computeNearbyCell5(
+        snappedCurrentLocation.lat,
+        snappedCurrentLocation.lng,
+      ),
       lastActive: now,
       lastLocationUpdatedAt: now,
     });
@@ -2001,12 +2072,54 @@ export const recordLocation = mutation({
     // STABILITY FIX S3: Use indexed query for verified users only (production).
     // In DEV bypass: widen to all users so unverified demo peers are discoverable.
     // All downstream filters (isActive, nearbyEnabled, pause, blocks, etc.) still apply.
-    const verifiedUsers = isDevBypass
-      ? await ctx.db.query('users').collect()
-      : await ctx.db
-          .query('users')
-          .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
-          .collect();
+    //
+    // Phase-2 scale: when RECORD_LOCATION_GEO_INDEX_ENABLED is set, fetch only
+    // verified users whose `nearbyCell5` matches the viewer's cell or one of
+    // its 8 neighbors via the `by_verification_cell` index. Bounded per cell
+    // by MAX_CANDIDATES_PER_CELL. The downstream filter loop still applies
+    // every existing eligibility / freshness / privacy-zone / range / photo
+    // / pair / block check unchanged — the cell filter only narrows the
+    // candidate set, it does not relax any guard. Legacy full-scan path
+    // remains the default until the operator runs
+    // `internal.crossedPaths.backfillNearbyCells` and flips the env flag.
+    const useGeoCellPath = RECORD_LOCATION_GEO_INDEX_ENABLED && !isDevBypass;
+    let verifiedUsers;
+    if (useGeoCellPath) {
+      const cells = nearbyCell5Neighbors(
+        snappedCurrentLocation.lat,
+        snappedCurrentLocation.lng,
+      );
+      const perCell = await Promise.all(
+        cells.map((cell) =>
+          ctx.db
+            .query('users')
+            .withIndex('by_verification_cell', (q) =>
+              q.eq('verificationStatus', 'verified').eq('nearbyCell5', cell),
+            )
+            .take(MAX_CANDIDATES_PER_CELL),
+        ),
+      );
+      // Dedupe across the 9 cells (no overlap expected, but the dedupe makes
+      // the contract obvious and safe against any future index/cell change).
+      const seen = new Set<string>();
+      const merged: Doc<'users'>[] = [];
+      for (const cellRows of perCell) {
+        for (const row of cellRows) {
+          const key = row._id as string;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          merged.push(row);
+        }
+      }
+      verifiedUsers = merged;
+    } else {
+      verifiedUsers = isDevBypass
+        ? await ctx.db.query('users').collect()
+        : await ctx.db
+            .query('users')
+            .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+            .collect();
+    }
 
     // STABILITY FIX S6/C2: Pre-fetch blocks before loop
     // P1 EXCLUSION: Load full negative-relationship exclusion set.
@@ -2560,7 +2673,7 @@ const SAMPLE_DEDUPE_MIN_GAP_MS = 60 * 1000; // 1 minute
 const MAX_SAMPLES_PER_BATCH = 20;
 
 /** [BG_LOCATION] audit log master switch. Mirrors [CROSSED_PATHS_AUDIT]. */
-const BG_LOCATION_AUDIT_ENABLED = true;
+const BG_LOCATION_AUDIT_ENABLED = process.env.BG_LOCATION_AUDIT === '1';
 
 // ---------------------------------------------------------------------------
 // recordLocationBatch — Phase-1 Background Crossed Paths entry point
@@ -3086,14 +3199,16 @@ export const recordLocationBatch = mutation({
     if (hasBg && !discoveryOn) {
       // Intentionally logged under ANDROID_DISCOVERY so Phase-2 telemetry
       // is separable from Phase-1 iOS logs.
-      console.log('[ANDROID_DISCOVERY][dropped]', {
-        userId,
-        reason: 'discovery_mode_not_active',
-        discoveryModeEnabled: user.discoveryModeEnabled ?? false,
-        discoveryModeExpiresAt: user.discoveryModeExpiresAt ?? null,
-        now,
-        sampleCount: args.samples.length,
-      });
+      if (BG_LOCATION_AUDIT_ENABLED) {
+        console.log('[ANDROID_DISCOVERY][dropped]', {
+          userId,
+          reason: 'discovery_mode_not_active',
+          discoveryModeEnabled: user.discoveryModeEnabled ?? false,
+          discoveryModeExpiresAt: user.discoveryModeExpiresAt ?? null,
+          now,
+          sampleCount: args.samples.length,
+        });
+      }
       await emitBgLocationAuditLog(ctx, {
         userId, sampleCount: args.samples.length, accepted: 0, sources,
         outcome: 'rejected', reason: 'discovery_mode_not_active', deviceHash: args.deviceHash,
@@ -3336,6 +3451,7 @@ export const recordLocationBatch = mutation({
       await ctx.db.patch(userId, {
         latitude: latestAcceptedSample.lat,
         longitude: latestAcceptedSample.lng,
+        nearbyCell5: computeNearbyCell5(latestAcceptedSample.lat, latestAcceptedSample.lng),
         lastActive: Math.max(user.lastActive ?? 0, latestAcceptedSample.capturedAt),
         lastLocationUpdatedAt: latestAcceptedSample.capturedAt,
       });
@@ -3895,8 +4011,16 @@ export const getNearbyUsers = query({
       }
     }
 
+    // Safety cap: cap the Nearby feed to the 150 most-recent distinct
+    // crossed-path peers. Anything below this floor is downstream pruned by
+    // the daily distinct cap (MAX_DAILY_NEW_CROSSED_PROFILES = 40), so 150
+    // already provides a comfortable margin. The cap prevents N+1 explosions
+    // (user fetch, photo joins, pair eligibility, history reads) for users
+    // whose crossPathHistory table has grown unbounded over time.
+    const NEARBY_FEED_HISTORY_CAP = 150;
     const historyEntries = [...latestHistoryByUser.entries()]
-      .sort((a, b) => b[1].createdAt - a[1].createdAt);
+      .sort((a, b) => b[1].createdAt - a[1].createdAt)
+      .slice(0, NEARBY_FEED_HISTORY_CAP);
     const otherUserIds = historyEntries.map(([id]) => id);
     if (otherUserIds.length === 0) return [];
 
@@ -4140,6 +4264,13 @@ export const markDailyCrossedProfilesShown = mutation({
     if (!viewerId) {
       return { success: false, reason: 'unauthorized' };
     }
+    const markShownLimit = await reserveNearbyActionRateLimit(ctx, viewerId, 'nearby:markShown', [
+      { kind: '10min', windowMs: TEN_MINUTES_MS, max: 30 },
+      { kind: '24hour', windowMs: ONE_DAY_MS, max: 300 },
+    ]);
+    if (!markShownLimit) {
+      return { success: false, reason: 'rate_limited_mark_shown' };
+    }
 
     const now = Date.now();
     const dateKey = getDailyShownDateKey(now);
@@ -4162,9 +4293,6 @@ export const markDailyCrossedProfilesShown = mutation({
       .filter((id) => id !== (viewerId as string))
       .filter((id) => !isDiscoveryExcluded(exclusions, id))
       .slice(0, MAX_DAILY_NEW_CROSSED_PROFILES * 2) as Id<'users'>[];
-
-    let inserted = 0;
-    let updated = 0;
 
     for (const targetUserId of uniqueTargetIds) {
       const targetUser = await ctx.db.get(targetUserId);
@@ -4206,7 +4334,6 @@ export const markDailyCrossedProfilesShown = mutation({
           wasExistingCrossedPath:
             existingShown.wasExistingCrossedPath === true || wasExistingCrossedPath,
         });
-        updated++;
       } else {
         await ctx.db.insert('crossedPathDailyShown', {
           viewerId,
@@ -4218,11 +4345,15 @@ export const markDailyCrossedProfilesShown = mutation({
           expiresAt: now + DAILY_SHOWN_RETENTION_MS,
           wasExistingCrossedPath,
         });
-        inserted++;
       }
     }
 
-    return { success: true, inserted, updated };
+    // Intentionally do NOT return per-target outcomes or aggregate
+    // inserted/updated counts. Both would let a caller probe which target
+    // IDs are visible to the viewer by diffing counts across requests with
+    // different ID subsets. Frontend callers (nearby.tsx, crossed-paths.tsx)
+    // are best-effort and ignore the return value beyond `.catch`.
+    return { success: true };
   },
 });
 
@@ -4582,12 +4713,14 @@ export const getCrossPathHistory = query({
     );
 
     // [CROSSED_PATHS_AUDIT] ui — what the client-side list receives.
-    console.log('[CROSSED_PATHS_AUDIT][ui]', {
-      viewer: userId,
-      entriesReturned: cappedResults.length,
-      hasReasonOverlap: cappedResults.filter((r) => (r.reasonTags?.[0] ?? '') !== 'nearby').length,
-      nearbyOnly: cappedResults.filter((r) => (r.reasonTags?.[0] ?? '') === 'nearby').length,
-    });
+    if (CROSSED_PATHS_AUDIT_ENABLED) {
+      console.log('[CROSSED_PATHS_AUDIT][ui]', {
+        viewer: userId,
+        entriesReturned: cappedResults.length,
+        hasReasonOverlap: cappedResults.filter((r) => (r.reasonTags?.[0] ?? '') !== 'nearby').length,
+        nearbyOnly: cappedResults.filter((r) => (r.reasonTags?.[0] ?? '') === 'nearby').length,
+      });
+    }
 
     return cappedResults;
   },
@@ -4610,6 +4743,12 @@ export const hideCrossedPath = mutation({
     const userId = await resolveUserIdFromSessionToken(ctx, token);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
+    }
+    const hideLimit = await reserveNearbyActionRateLimit(ctx, userId, 'nearby:hide', [
+      { kind: '24hour', windowMs: ONE_DAY_MS, max: 120 },
+    ]);
+    if (!hideLimit) {
+      return { success: false, reason: 'rate_limited_hide' };
     }
 
     const entry = await ctx.db.get(historyId);
@@ -4966,12 +5105,18 @@ export const getCrossedPaths = query({
 
       const orderedUser1 = userId < otherUserId ? userId : otherUserId;
       const orderedUser2 = userId < otherUserId ? otherUserId : userId;
+      // Bounded read: only the latest non-expired entry for this pair is used
+      // for distance approximation. 20 most-recent rows is enough to skip a
+      // small tail of just-expired entries while avoiding deep history scans
+      // on long-lived pairs. Preserves correct latest-non-expired selection.
+      const PAIR_HISTORY_CAP = 20;
       const latestHistories = await ctx.db
         .query('crossPathHistory')
         .withIndex('by_users', (q) =>
           q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2),
         )
-        .collect();
+        .order('desc')
+        .take(PAIR_HISTORY_CAP);
       const latestHistory = latestHistories
         .filter((entry) => entry.expiresAt > now)
         .sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -5134,15 +5279,20 @@ export const getCrossedPathsCount = query({
     const viewerUser = viewerEligibility.user;
     const exclusions = await loadDiscoveryExclusions(ctx, userId);
 
+    // Safety cap: bound badge work at 200 pair rows per side. The query is
+    // for a small numeric badge, so under-counting at the cap is acceptable;
+    // the alternative is an unbounded scan for users with very long crossed-
+    // path histories. Convex returns rows newest-first by index order.
+    const CROSSED_PATHS_BADGE_CAP = 200;
     const asUser1 = await ctx.db
       .query('crossedPaths')
       .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-      .collect();
+      .take(CROSSED_PATHS_BADGE_CAP);
 
     const asUser2 = await ctx.db
       .query('crossedPaths')
       .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-      .collect();
+      .take(CROSSED_PATHS_BADGE_CAP);
 
     const visibleCrossedPaths = [...asUser1, ...asUser2].filter(
       (cp) => cp.count > 0 && !isPairDismissedForViewer(cp, userId),
@@ -5210,16 +5360,21 @@ export const getCrossedPathSummary = query({
     }
     const requesterUser = requesterEligibility.user;
 
-    // Get all crossed paths for this user
+    // Safety cap: bound the summary scan to 200 pair rows per side. The
+    // summary is used for a small badge count + a "latest crossing"
+    // timestamp; under-counting at the cap is acceptable and is preferable
+    // to an unbounded scan for power users. Index order yields recent rows
+    // first, so the latest timestamp surfaces correctly within the cap.
+    const CROSSED_PATHS_SUMMARY_CAP = 200;
     const [asUser1, asUser2] = await Promise.all([
       ctx.db
         .query('crossedPaths')
         .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-        .collect(),
+        .take(CROSSED_PATHS_SUMMARY_CAP),
       ctx.db
         .query('crossedPaths')
         .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-        .collect(),
+        .take(CROSSED_PATHS_SUMMARY_CAP),
     ]);
 
     const allCrossedPaths = [...asUser1, ...asUser2].filter(
@@ -5659,7 +5814,7 @@ function bucketNearbyDistance(meters: number): { label: NearbyDistanceBucket; mi
  * Round coordinates to a grid for privacy.
  * Returns approximate location that doesn't reveal exact position.
  */
-function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
+export function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
   // 1 degree latitude is about 111km, so LOCATION_GRID_METERS sets the
   // precision floor used by Nearby and crossed-path event locations.
   const gridSize = LOCATION_GRID_METERS / 111000;
@@ -5668,6 +5823,117 @@ function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
     lng: Math.round(lng / gridSize) * gridSize,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Phase-2 scale: coarse geographic cell helpers
+// ---------------------------------------------------------------------------
+//
+// Used by every server-side location writer (publishLocation, recordLocation,
+// users.updateLocation) to maintain `users.nearbyCell5`, and by the bounded
+// candidate lookup path in recordLocation (gated by the
+// RECORD_LOCATION_GEO_INDEX_ENABLED env flag).
+//
+// Cell size is FIXED at 0.02° per axis on both lat and lng. At a typical
+// mid-latitude this yields ~2.2km × ~1.9km cells. At 60°N the longitudinal
+// dimension shrinks to ~1.1km. The 1km CROSSED_MAX_METERS radius is therefore
+// safely covered by the 9-cell (viewer + 8 neighbor) hood even at the worst
+// realistic latitudes for this product. Cells are computed from
+// already-grid-snapped coordinates so the helpers receive privacy-safe inputs
+// and never store raw GPS.
+
+const NEARBY_CELL_DEG = 0.02;
+
+export function computeNearbyCell5(lat: number, lng: number): string {
+  const latIdx = Math.floor(lat / NEARBY_CELL_DEG);
+  const lngIdx = Math.floor(lng / NEARBY_CELL_DEG);
+  return `c5:${latIdx}_${lngIdx}`;
+}
+
+export function nearbyCell5Neighbors(lat: number, lng: number): string[] {
+  const latIdx = Math.floor(lat / NEARBY_CELL_DEG);
+  const lngIdx = Math.floor(lng / NEARBY_CELL_DEG);
+  const cells: string[] = [];
+  for (let dLat = -1; dLat <= 1; dLat++) {
+    for (let dLng = -1; dLng <= 1; dLng++) {
+      cells.push(`c5:${latIdx + dLat}_${lngIdx + dLng}`);
+    }
+  }
+  return cells;
+}
+
+// Phase-2 scale: server-side feature flag for the bounded geo-cell candidate
+// path in recordLocation. Default OFF — operators must run
+// `internal.crossedPaths.backfillNearbyCells` to populate cell fields, then
+// set the env var to `1` to switch the read path on. Legacy full-scan path
+// remains the default and the rollback target. Never read in client code.
+const RECORD_LOCATION_GEO_INDEX_ENABLED =
+  process.env.RECORD_LOCATION_GEO_INDEX_ENABLED === '1';
+
+// Phase-2 scale: hard cap on candidates returned per cell. With 9 cells per
+// recordLocation call this gives a worst-case bound of ~4,500 candidate rows
+// even in a very dense market. Set comfortably above realistic 9-cell density
+// for known launch geographies.
+const MAX_CANDIDATES_PER_CELL = 500;
+
+// ---------------------------------------------------------------------------
+// Phase-2 scale: backfillNearbyCells — paginated internal mutation that
+// populates users.nearbyCell5 for legacy rows that have latitude/longitude
+// (or publishedLat/publishedLng) but no cell yet. Idempotent: rows that
+// already have a cell matching their snapped coords are skipped without a
+// patch. Bounded per call so a single invocation cannot stall a deployment.
+//
+// Usage: run repeatedly (e.g. via the Convex dashboard or a one-off action)
+// passing the previous `nextCursor` until `done === true`. Then flip the
+// RECORD_LOCATION_GEO_INDEX_ENABLED env var to '1' to activate the bounded
+// candidate path in recordLocation.
+// ---------------------------------------------------------------------------
+
+export const backfillNearbyCells = internalMutation({
+  args: {
+    cursor: v.optional(v.union(v.string(), v.null())),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const pageSize = Math.max(1, Math.min(args.limit ?? 200, 500));
+    const page = await ctx.db
+      .query('users')
+      .paginate({ cursor: args.cursor ?? null, numItems: pageSize });
+
+    let processed = 0;
+    let updated = 0;
+    for (const user of page.page) {
+      processed++;
+      const lat =
+        typeof user.latitude === 'number'
+          ? user.latitude
+          : typeof user.publishedLat === 'number'
+            ? user.publishedLat
+            : undefined;
+      const lng =
+        typeof user.longitude === 'number'
+          ? user.longitude
+          : typeof user.publishedLng === 'number'
+            ? user.publishedLng
+            : undefined;
+      if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+      if (!isValidLatLng(lat, lng)) continue;
+      // Recompute from the already-snapped coordinates that live on the row.
+      // No raw GPS is introduced — both publishLocation and recordLocation
+      // grid-snap before writing latitude/longitude.
+      const expected = computeNearbyCell5(lat, lng);
+      if (user.nearbyCell5 === expected) continue;
+      await ctx.db.patch(user._id, { nearbyCell5: expected });
+      updated++;
+    }
+
+    return {
+      processed,
+      updated,
+      nextCursor: page.continueCursor,
+      done: page.isDone,
+    };
+  },
+});
 
 /**
  * Phase-3 helper: clip a string to `max` characters without cutting in the
