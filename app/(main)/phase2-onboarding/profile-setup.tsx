@@ -89,7 +89,12 @@ export default function Phase2ReviewScreen() {
     } as any);
   };
 
-  const displayName = currentPrivateProfile?.displayName || 'Anonymous';
+  // E1: Never fall back to a Phase-1 identity. Trim and leave empty so the
+  // JSX can show a neutral, non-identity placeholder ("Add your private
+  // nickname"). The loading + missing-profile branches above guarantee
+  // currentPrivateProfile is non-null by this point; only displayName itself
+  // may be empty / whitespace.
+  const displayName = currentPrivateProfile?.displayName?.trim() || '';
   const age = currentPrivateProfile?.age ?? 0;
   const gender = currentPrivateProfile?.gender || currentUser?.gender || '';
   const city = currentPrivateProfile?.city || currentUser?.city || '';
@@ -270,7 +275,7 @@ export default function Phase2ReviewScreen() {
             <View style={styles.row}>
               <Text style={styles.rowLabel}>Nickname</Text>
               <View style={styles.rowValueGroup}>
-                <Text style={styles.rowValue}>{displayName || 'Anonymous'}</Text>
+                <Text style={styles.rowValue}>{displayName || 'Add your private nickname'}</Text>
                 <TouchableOpacity
                   onPress={() => editStep('index')}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}

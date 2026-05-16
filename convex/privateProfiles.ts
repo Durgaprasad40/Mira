@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { internalMutation, internalQuery, mutation, query } from './_generated/server';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { resolveUserIdByAuthId, validateOwnership, validateSessionToken } from './helpers';
+import { reserveActionSlots } from './actionRateLimits';
 import {
   CURRENT_PHASE2_SETUP_VERSION,
   PHASE2_BOUNDARY_KEYS,
@@ -47,6 +48,25 @@ type PhaseDisplayNameValidationCode =
   | 'DIGIT_RUN'
   | 'HANDLE_TOKEN';
 
+/**
+ * Backend Phase-2 display-name validator — SOURCE OF TRUTH.
+ *
+ * P3-F6 DRIFT WARNING — this is the authoritative validator. Every
+ * Phase-2 mutation that accepts a display name (saveOnboardingPhotos,
+ * updateDisplayNameByAuthId, and any future writer) MUST route through
+ * this function before persisting.
+ *
+ * A friendlier mirror lives at `validateNickname` in
+ * `lib/phase2Onboarding.ts` and is used for live UI feedback only.
+ * The frontend copy is UX-only and CANNOT be trusted at the trust
+ * boundary — even if the UI accepts a value, this function may still
+ * reject it.
+ *
+ * If you change any rule here (length bounds, charset, digit-run cap,
+ * long/short blocked-token lists), you MUST update the frontend mirror
+ * in the same change, otherwise users will see a "valid" input that
+ * then fails to save.
+ */
 function validatePhase2DisplayName(
   raw: string,
 ): { ok: true; trimmed: string } | { ok: false; code: PhaseDisplayNameValidationCode } {
@@ -715,6 +735,23 @@ export const deleteProfile = mutation({
  * Update specific fields on private profile by auth user ID.
  * Uses the same auth-safe pattern as upsertByAuthId (no ctx.auth.getUserIdentity).
  * Used by Phase-2 profile for photo sync and field updates.
+ *
+ * E5 DENY-LIST — DO NOT add the following fields here:
+ *   - notificationsEnabled
+ *   - notificationCategories
+ *   - pushNotificationsEnabled
+ *
+ * Notification-preference writes MUST go through `setPhase2NotificationPreferences`
+ * (see convex/notificationPreferences.* / privateProfiles.setPhase2NotificationPreferences).
+ * That dedicated mutation:
+ *   - writes an audit-log entry (compliance trail for safety-relevant prefs),
+ *   - applies a tighter rate-limit / throttle,
+ *   - performs notification-category whitelist validation.
+ *
+ * Adding any of those keys to this generic field updater would silently
+ * bypass all three controls. If you have a legitimate need to bulk-update
+ * notification preferences from a new code path, route it through the
+ * dedicated mutation instead — do NOT widen this arg list.
  */
 export const updateFieldsByAuthId = mutation({
   args: {
@@ -830,6 +867,22 @@ export const updateFieldsByAuthId = mutation({
 
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
+    // P1: rate-limit generic private-profile field updates. Higher ceiling
+    // than nickname/photos because legitimate "edit profile" sessions can
+    // touch many fields in a short window; still capped at 30/hr + 200/day
+    // to bound moderation surface.
+    const fieldsLimit = await reserveActionSlots(ctx, userId, 'phase2_private_profile_update_fields', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 30 },
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 200 },
+    ]);
+    if (!fieldsLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: fieldsLimit.retryAfterMs,
+      };
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
@@ -853,6 +906,31 @@ export const updateFieldsByAuthId = mutation({
     // database will reject the write. Stripping null also preserves
     // any existing valid value: a missing key in patch leaves the
     // current row value untouched.
+    //
+    // P3-F2 ALLOWLIST CONTRACT — read before adding any field below:
+    //   The `args` v.object schema above is the ONLY field allowlist for
+    //   this mutation. The destructure below intentionally pulls out
+    //   `token`, `authUserId`, and the legacy `privateIntentKey` alias
+    //   and forwards `...updates` straight into the patch. Convex's arg
+    //   validator guarantees `updates` cannot contain unvalidated keys —
+    //   that guarantee is the WHOLE security model of this destructure.
+    //
+    //   Do NOT change this rest object to widen its inputs:
+    //     - never accept `v.any()` or unvalidated record types in args
+    //     - never spread `args` directly without removing
+    //       `{ token, authUserId, privateIntentKey }`
+    //     - never read from `ctx.request` to add extra keys
+    //
+    //   To ADD a new field:
+    //     1. Add an explicit v.<type>(...) entry in the args object.
+    //     2. Add a sanitizer / enum-validator in the validation block
+    //        above (mirror sanitizePrivateIntentKeysForSave / validateEnumKeys).
+    //     3. Review whether the new field needs its own rate-limit
+    //        (notification prefs already have one — see the E5 doc-block
+    //        above this mutation).
+    //     4. Confirm the field is NOT on the E5 deny-list
+    //        (notificationsEnabled / notificationCategories /
+    //        pushNotificationsEnabled).
     const { authUserId, token, privateIntentKey: _legacyPrivateIntentKey, ...updates } = args;
     const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
     for (const [key, value] of Object.entries(updates)) {
@@ -1024,6 +1102,22 @@ export const updateDisplayNameByAuthId = mutation({
     const trimmed = validation.trimmed;
 
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    // P1: short-window throttle on nickname changes. The lifetime cap of
+    // 3 nickname edits is enforced below (currentCount >= 3 branch) and
+    // is NOT replaced — this limiter prevents rapid-fire mutation loops
+    // that could otherwise burn quota before the count check fires.
+    const displayNameLimit = await reserveActionSlots(ctx, userId, 'phase2_private_display_name_update', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 5 },
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+    ]);
+    if (!displayNameLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: displayNameLimit.retryAfterMs,
+      };
+    }
 
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
@@ -1282,6 +1376,21 @@ export const saveOnboardingPhotos = mutation({
   handler: async (ctx, args) => {
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
+    // P1: rate-limit photo-save attempts so the expensive owned-photo
+    // validation and skeleton insert cannot be hammered. Placed AFTER
+    // ownership and BEFORE deletion-state / photo validation / DB writes.
+    const photosSaveLimit = await reserveActionSlots(ctx, userId, 'phase2_onboarding_photos_save', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 10 },
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 30 },
+    ]);
+    if (!photosSaveLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: photosSaveLimit.retryAfterMs,
+      };
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
@@ -1308,9 +1417,20 @@ export const saveOnboardingPhotos = mutation({
       // Build patch object starting with photos
       const patch: Record<string, unknown> = {
         privatePhotoUrls: photoValidation.urls,
-        phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
         updatedAt: now,
       };
+
+      // P3-F1: Only patch phase2SetupVersion when the row's version is
+      // actually stale. Previously this was written on every photo save,
+      // which caused (a) unnecessary write churn during normal re-uploads
+      // and (b) noisy updatedAt-driven cache invalidation on the schema
+      // version column. We still update `updatedAt` (callers rely on it
+      // to refetch photos) so the only behavior change is: rows whose
+      // phase2SetupVersion already equals CURRENT_PHASE2_SETUP_VERSION
+      // skip the redundant write.
+      if (existing.phase2SetupVersion !== CURRENT_PHASE2_SETUP_VERSION) {
+        patch.phase2SetupVersion = CURRENT_PHASE2_SETUP_VERSION;
+      }
 
       // Self-heal: fix age if invalid
       const needsAgeFix =
@@ -1344,10 +1464,16 @@ export const saveOnboardingPhotos = mutation({
       };
     }
     const trimmedDisplayName = displayNameValidation.trimmed;
+    // P1-D3: backend derives 18+ status from Phase-1 DOB. Mirrors the
+    // pattern used by updateDisplayNameByAuthId's skeleton path so both
+    // skeleton creation sites stay in sync.
+    const adultAgeConfirmed = derivedAge >= 18;
     const profileId = await ctx.db.insert('userPrivateProfiles', {
       userId,
       displayName: trimmedDisplayName || '',
-      displayNameEditCount: 0,
+      // P1-D1: a non-empty trimmed nickname IS one nickname write, so count it.
+      // Empty-string skeletons keep count 0 so the first real edit can land.
+      displayNameEditCount: trimmedDisplayName ? 1 : 0,
       lastDisplayNameEditedAt: now,
       phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       // Canonical identity field: backend source of truth only
@@ -1357,9 +1483,14 @@ export const saveOnboardingPhotos = mutation({
       privateIntentKeys: [],
       privatePhotoUrls: photoValidation.urls,
       city: user?.city || '',
-      isPrivateEnabled: true,
-      ageConfirmed18Plus: true,
-      ageConfirmedAt: now,
+      // P1-D2: skeleton row is incomplete (no bio, no intents, no prompts).
+      // Keep it disabled for discovery until setupPrivateProfile /
+      // setPhase2OnboardingCompleted flips both isPrivateEnabled and
+      // isSetupComplete together.
+      isPrivateEnabled: false,
+      // P1-D3: derived from Phase-1 DOB, never hardcoded.
+      ageConfirmed18Plus: adultAgeConfirmed,
+      ...(adultAgeConfirmed ? { ageConfirmedAt: now } : {}),
       privatePhotosBlurred: [],
       privatePhotoBlurLevel: 0,
       privateDesireTagKeys: [],
@@ -1425,9 +1556,63 @@ export const getByAuthUserId = query({
     // Always expose privateIntentKeys to clients (schema-required; normalize if ever missing in a row)
     const privateIntentKeys = profile.privateIntentKeys ?? [];
 
+    // E2: Replace `{ ...profile }` spread with an EXPLICIT projection.
+    //
+    // Rationale:
+    //   - A spread auto-exposes every new column added to the schema,
+    //     including server-trust-only flags (e.g. ageConfirmed18Plus,
+    //     ageConfirmedAt) and any future moderation / fraud fields.
+    //   - Enumerate ONLY the fields the frontend actually consumes
+    //     (see app/(main)/phase2-onboarding/*, (private)/* and
+    //     stores/privateProfileStore.hydrateFromConvex).
+    //
+    // DO NOT add the following without explicit security review:
+    //   - ageConfirmed18Plus, ageConfirmedAt  (server trust only)
+    //   - privatePhotosBlurred, privatePhotoBlurLevel  (no consumer)
+    //   - lastDisplayNameEditedAt, phase2SetupVersion  (no consumer)
+    //   - revealPolicy                              (no consumer)
+    //   - createdAt                                 (no consumer)
+    //
+    // Adding new fields requires (a) confirmed frontend consumer AND
+    // (b) confirmation the field is safe to expose to the owner client.
     return {
-      ...profile,
+      _id: profile._id,
+      updatedAt: profile.updatedAt,
+      displayName: profile.displayName,
+      displayNameEditCount: profile.displayNameEditCount,
+      age: profile.age,
+      gender: profile.gender,
+      city: profile.city,
+      privateBio: profile.privateBio,
       privateIntentKeys,
+      privateDesireTagKeys: profile.privateDesireTagKeys,
+      privateBoundaries: profile.privateBoundaries,
+      privatePhotoUrls: profile.privatePhotoUrls,
+      photoBlurEnabled: profile.photoBlurEnabled,
+      photoBlurSlots: profile.photoBlurSlots,
+      promptAnswers: profile.promptAnswers,
+      hobbies: profile.hobbies,
+      isSetupComplete: profile.isSetupComplete,
+      isPrivateEnabled: profile.isPrivateEnabled,
+      isVerified: profile.isVerified,
+      height: profile.height,
+      weight: profile.weight,
+      smoking: profile.smoking,
+      drinking: profile.drinking,
+      education: profile.education,
+      religion: profile.religion,
+      preferenceStrength: profile.preferenceStrength,
+      hideFromDeepConnect: profile.hideFromDeepConnect,
+      hideAge: profile.hideAge,
+      hideDistance: profile.hideDistance,
+      disableReadReceipts: profile.disableReadReceipts,
+      safeMode: profile.safeMode,
+      notificationsEnabled: profile.notificationsEnabled,
+      notificationCategories: profile.notificationCategories,
+      defaultPhotoVisibility: profile.defaultPhotoVisibility,
+      allowUnblurRequests: profile.allowUnblurRequests,
+      defaultSecureMediaTimer: profile.defaultSecureMediaTimer,
+      defaultSecureMediaViewingMode: profile.defaultSecureMediaViewingMode,
     };
   },
 });

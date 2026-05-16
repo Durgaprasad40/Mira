@@ -3782,6 +3782,41 @@ export const upsertOnboardingDraft = mutation({
 /**
  * Get comprehensive onboarding status for hydration and routing decisions.
  * Returns all data needed to hydrate stores and determine next onboarding step.
+ *
+ * --- P3-F3 contract notes (DO NOT BREAK without auditing consumers) ---
+ *
+ * Purpose:
+ *   Single source of truth for Phase-1 + Phase-2 onboarding routing.
+ *   Read by the root layout / index router and the Phase-2 onboarding
+ *   layout to pick the next screen and to hydrate auth/private stores.
+ *
+ * Auth model:
+ *   - `token` is REQUIRED and resolves the caller via validateSessionToken.
+ *   - `userId` is OPTIONAL and exists for backcompat only. When supplied,
+ *     it MUST resolve to the same row as the session token; otherwise the
+ *     query throws "Unauthorized: onboarding status self-read required".
+ *   - This is a self-read only query — never let it return another user's
+ *     row. If you ever add an admin/staff caller, make a SEPARATE query.
+ *
+ * Return shape groups (read by the router):
+ *   - basicInfo                  — name, nickname (handle), DOB, gender
+ *   - basicInfoComplete          — derived flag for Phase-1 routing
+ *   - verification               — referencePhoto*, faceVerificationStatus,
+ *                                  faceVerificationPassed/Pending
+ *   - photos                     — normalPhotoCount, hasMinPhotos
+ *   - phase-1 onboarding         — onboardingCompleted, onboardingDraft
+ *   - phase-2 onboarding         — phase2OnboardingCompleted
+ *   - private welcome (consent)  — privateWelcomeConfirmed (18+ gate)
+ *
+ * Adding a new field to this return:
+ *   1. Confirm the router / hydration code actually needs it.
+ *   2. Confirm it is safe for the caller to see (this is owner-only,
+ *      but new fields can still leak server-trust data if uncurated —
+ *      see the E2 deny-list comment on privateProfiles.getByAuthUserId).
+ *   3. Update the router/hydration consumers in the same change.
+ *   4. Do NOT add deletion/deactivation/banned flags here without a
+ *      separate moderation review — those are surfaced via dedicated
+ *      queries today.
  */
 export const getOnboardingStatus = query({
   args: {
@@ -3885,6 +3920,22 @@ export const setPhase2OnboardingCompleted = mutation({
       return { success: true, alreadyCompleted: true };
     }
 
+    // P1: rate-limit Phase-2 finalization. Placed AFTER the idempotent
+    // alreadyCompleted return so repeat calls by completed users never
+    // burn quota, and BEFORE the expensive private-profile read +
+    // photo validation + double-patch + internal ranking init below.
+    const completionLimit = await reserveActionSlots(ctx, resolvedUserId, 'phase2_onboarding_complete', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 5 },
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 10 },
+    ]);
+    if (!completionLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: completionLimit.retryAfterMs,
+      };
+    }
+
     const privateProfile = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', resolvedUserId))
@@ -3979,10 +4030,34 @@ export const setPhase2OnboardingCompleted = mutation({
       phase2OnboardingCompletedAt: Date.now(),
     });
 
-    // Initialize Phase-2 ranking metrics for Deep Connect discovery
-    await ctx.runMutation(internal.phase2Ranking.initializePhase2RankingMetrics, {
-      userId: resolvedUserId,
-    });
+    // P3-F4: Initialize Phase-2 ranking metrics for Deep Connect discovery.
+    //
+    // Ranking-metric seed is BEST-EFFORT. The user is already marked
+    // phase2OnboardingCompleted above; if the seed fails (transient
+    // ranking-system error, schema drift, mutation deploy lag, etc.)
+    // we must NOT rollback completion, otherwise the user would be
+    // stuck in a permanent "complete but un-flippable" state on retry
+    // (the idempotent `alreadyCompleted` short-circuit would block
+    // any subsequent attempt from re-running this seed anyway).
+    //
+    // Ranking metrics are self-healing via background jobs and on first
+    // Deep Connect read, so a missed seed degrades discovery quality
+    // briefly but never breaks correctness.
+    //
+    // The warning intentionally logs ONLY the sanitized error message —
+    // no userId, no auth token, no private profile fields.
+    try {
+      await ctx.runMutation(internal.phase2Ranking.initializePhase2RankingMetrics, {
+        userId: resolvedUserId,
+      });
+    } catch (rankingErr) {
+      const sanitizedMsg =
+        rankingErr instanceof Error ? rankingErr.message : 'unknown_error';
+      console.warn(
+        '[setPhase2OnboardingCompleted] ranking metric seed failed (non-fatal):',
+        sanitizedMsg,
+      );
+    }
 
     return { success: true };
   },
@@ -4001,9 +4076,45 @@ export const setPrivateWelcomeConfirmed = mutation({
   handler: async (ctx, args) => {
     const resolvedUserId = await validateOwnership(ctx, args.token, args.authUserId);
 
+    // P1: rate-limit the consent-gate confirm endpoint. Generous bounds
+    // because legitimate users press this exactly once; cap exists only
+    // to stop automation loops from spamming the gate.
+    const welcomeLimit = await reserveActionSlots(ctx, resolvedUserId, 'phase2_private_welcome_confirmed', [
+      { kind: '1hour', windowMs: 60 * 60 * 1000, max: 10 },
+      { kind: '1day', windowMs: 24 * 60 * 60 * 1000, max: 30 },
+    ]);
+    if (!welcomeLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        retryAfterMs: welcomeLimit.retryAfterMs,
+      };
+    }
+
     const user = await ctx.db.get(resolvedUserId);
     if (!user) {
       return { success: false, error: 'user_not_found' };
+    }
+
+    // E3: Re-validate 18+ eligibility from the trusted DOB at confirm time.
+    //
+    // This is a *trust-side* precheck. The frontend already gates the consent
+    // screen on age, but we cannot rely on the client: a stale, tampered, or
+    // missing DOB row would otherwise let a non-eligible user flip the
+    // privateWelcomeConfirmed flag.
+    //
+    // calculatePhase1EligibleAge() returns null for any of:
+    //   - dateOfBirth missing / malformed
+    //   - age < 18
+    //   - age > 120 (sanity guard)
+    //
+    // IMPORTANT: this check is placed BEFORE the `alreadyConfirmed`
+    // short-circuit on purpose. If a user's DOB has been blanked or
+    // invalidated since the original confirm, we must NOT keep treating
+    // their old consent as valid for subsequent calls.
+    const eligibleAge = calculatePhase1EligibleAge(user.dateOfBirth);
+    if (eligibleAge === null) {
+      return { success: false as const, error: 'invalid_age_eligibility' as const };
     }
 
     // Idempotent: skip if already confirmed

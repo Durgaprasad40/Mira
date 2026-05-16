@@ -93,6 +93,16 @@ export const sanitizeNickname = (value: string): string => value.replace(/[^a-zA
  *
  * Returns `{ ok: true }` when valid, otherwise an `{ ok: false, code, message }`
  * object with a friendly single-line user-facing message.
+ *
+ * P3-F6 DRIFT WARNING — this validator is UX-ONLY.
+ *   The authoritative source of truth lives in the backend:
+ *     `validatePhase2DisplayName` in `convex/privateProfiles.ts`.
+ *   If you change any rule here (length bounds, charset, digit-run cap,
+ *   long/short blocked-token lists), you MUST mirror the change in the
+ *   backend or a request that the UI accepted will be rejected at save
+ *   time (or worse, vice-versa). The rule constants and token lists are
+ *   intentionally duplicated rather than shared to keep `lib/*` free of
+ *   `convex/*` imports — a code-review check, not a build-time check.
  */
 export function validateNickname(value: string): NicknameValidationResult {
   const trimmed = value.trim();
