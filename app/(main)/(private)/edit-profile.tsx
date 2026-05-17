@@ -50,6 +50,7 @@ import {
   type Phase2PromptAnswer,
 } from '@/lib/privateConstants';
 import { cmToFeetInches } from '@/lib/utils';
+import { getPhase2RateLimitCopy } from '@/lib/phase2RateLimitCopy';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -103,6 +104,13 @@ const PhotoSlotItem = React.memo(function PhotoSlotItem({
         onPress={handleOpen}
         activeOpacity={0.9}
         disabled={isThisSlotLoading}
+        accessibilityRole="button"
+        accessibilityLabel={
+          isMain
+            ? `Main photo, slot ${slotIndex + 1}`
+            : `Photo slot ${slotIndex + 1}`
+        }
+        accessibilityHint="Opens preview with delete and replace options"
       >
         {shouldRenderImage ? (
           <Image
@@ -130,6 +138,9 @@ const PhotoSlotItem = React.memo(function PhotoSlotItem({
           onPress={handleSetMain}
           activeOpacity={0.7}
           disabled={isThisSlotLoading}
+          accessibilityRole="button"
+          accessibilityLabel={`Set photo ${slotIndex + 1} as main photo`}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         >
           <Ionicons name="star-outline" size={12} color="#FFFFFF" />
         </TouchableOpacity>
@@ -141,6 +152,14 @@ const PhotoSlotItem = React.memo(function PhotoSlotItem({
           onPress={handleToggle}
           activeOpacity={0.7}
           disabled={isThisSlotLoading}
+          accessibilityRole="button"
+          accessibilityLabel={
+            isSlotBlurred
+              ? `Show photo ${slotIndex + 1}`
+              : `Blur photo ${slotIndex + 1}`
+          }
+          accessibilityState={{ selected: isSlotBlurred }}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
         >
           <Ionicons
             name={isSlotBlurred ? 'eye-off' : 'eye'}
@@ -149,6 +168,14 @@ const PhotoSlotItem = React.memo(function PhotoSlotItem({
           />
         </TouchableOpacity>
       )}
+
+      {/* P3-5: explicit upload spinner overlay so the user sees that an
+          existing slot is mid-update instead of just looking unresponsive. */}
+      {isThisSlotLoading ? (
+        <View style={styles.photoSlotUploadingOverlay} pointerEvents="none">
+          <ActivityIndicator size="small" color="#FFFFFF" />
+        </View>
+      ) : null}
     </View>
   );
 });
@@ -652,6 +679,11 @@ export default function EditProfileScreen() {
                   Alert.alert('Could not sync details', 'We could not find your main profile. Please try again.');
                 } else if (err === 'profile_not_found') {
                   Alert.alert('Could not sync details', 'We could not find your private profile. Please try again.');
+                } else if (err === 'rate_limited') {
+                  // P1-6: surface the dedicated rate-limit message added by P1-2.
+                  // P3-2: calmer, premium copy via shared helper.
+                  const copy = getPhase2RateLimitCopy('sync_main_profile');
+                  Alert.alert(copy.title, copy.message);
                 } else {
                   Alert.alert('Could not sync details', 'Please try again.');
                 }
@@ -756,6 +788,14 @@ export default function EditProfileScreen() {
   // `persistProfileUpdate`. If the user navigates away mid-flight we will
   // best-effort cleanup these rows on unmount so they do not become orphans.
   const inflightUploadsRef = useRef<Set<string>>(new Set());
+  // P1-5: Synchronous lock for handleAddPhoto. The previous guard
+  // (`if (addingSlotIndex !== null) return`) used React state, which does
+  // NOT update synchronously — two quick taps on different "+" slots could
+  // both pass the guard, run two parallel uploads, and clobber each other's
+  // `privatePhotoUrls` (the second persist overwrites the first because
+  // both read the same `mergedPhotoUrls` snapshot). A ref flips atomically
+  // and blocks any second invocation until the first finishes its `finally`.
+  const addingPhotoLockRef = useRef(false);
   // Latest auth context for the unmount-only cleanup effect (which captures
   // its closure once at mount time).
   const cleanupAuthCtxRef = useRef<{ token: string | null; userId: string | null }>({
@@ -889,11 +929,30 @@ export default function EditProfileScreen() {
             sanitizedUpdates[key] = value;
           }
 
-          await updatePrivateProfile({
+          const result = await updatePrivateProfile({
             token,
             authUserId: userId,
             ...sanitizedUpdates,
           });
+
+          // P1-6: Backend may return { success: false, error: 'rate_limited' }
+          // for `updateFieldsByAuthId`. The previous code awaited without
+          // inspecting the result, so a throttled save silently looked like
+          // a success and the UI lied to the user. Surface a dedicated
+          // message; fall through to the generic failure path for other
+          // structured errors so they still get the screen-specific message.
+          if (result && typeof result === 'object' && (result as { success?: unknown }).success === false) {
+            const errCode = (result as { error?: string }).error;
+            onFailure?.();
+            if (errCode === 'rate_limited') {
+              // P3-2: calmer, premium copy via shared helper.
+              const copy = getPhase2RateLimitCopy('profile_save');
+              Alert.alert(copy.title, copy.message);
+            } else {
+              Alert.alert('Error', failureMessage);
+            }
+            return false;
+          }
         }
 
         onSuccess?.();
@@ -932,11 +991,28 @@ export default function EditProfileScreen() {
             throw new Error('Please sign in to save changes.');
           }
 
-          await updatePhotoBlurSlots({
+          const result = await updatePhotoBlurSlots({
             token,
             authUserId: userId,
             ...updates,
           });
+
+          // P1-6: `updatePhotoBlurSlots` now returns
+          // { success: false, error: 'rate_limited' } when throttled
+          // (P1-1). Surface a dedicated message instead of pretending the
+          // save succeeded.
+          if (result && typeof result === 'object' && (result as { success?: unknown }).success === false) {
+            const errCode = (result as { error?: string }).error;
+            onFailure?.();
+            if (errCode === 'rate_limited') {
+              // P3-2: calmer, premium copy via shared helper.
+              const copy = getPhase2RateLimitCopy('photo_blur');
+              Alert.alert(copy.title, copy.message);
+            } else {
+              Alert.alert('Error', failureMessage);
+            }
+            return false;
+          }
         }
 
         onSuccess?.();
@@ -970,7 +1046,10 @@ export default function EditProfileScreen() {
 
   // Add photo
   const handleAddPhoto = async (slotIndex: number) => {
-    if (addingSlotIndex !== null) return;
+    // P1-5: Synchronous ref-lock blocks tap-tap races on different slot
+    // buttons before React commits the addingSlotIndex state update.
+    if (addingPhotoLockRef.current) return;
+    addingPhotoLockRef.current = true;
     setAddingSlotIndex(slotIndex);
 
     try {
@@ -1011,6 +1090,26 @@ export default function EditProfileScreen() {
         } catch {
           if (__DEV__) {
             console.error('[EditProfile] Photo upload failed');
+          }
+          // P1-4: If the upload-stage error left a tracked pending row or
+          // an in-flight ref entry, clean it up immediately so we don't
+          // wait for unmount (or never, if the user stays on this screen).
+          // Best-effort: cleanupPendingUpload is idempotent and tolerates a
+          // missing row.
+          if (uploadedStorageId && userId && token) {
+            try {
+              await cleanupPendingUpload({
+                token,
+                userId,
+                storageId: uploadedStorageId,
+              });
+            } catch {
+              // Best-effort only; backend stale-pending cron is the
+              // ultimate safety net.
+            }
+            inflightUploadsRef.current.delete(
+              uploadedStorageId as unknown as string,
+            );
           }
           throw new Error('Failed to upload photo.');
         }
@@ -1066,6 +1165,10 @@ export default function EditProfileScreen() {
       Alert.alert('Error', 'Failed to add photo.');
     } finally {
       if (mountedRef.current) setAddingSlotIndex(null);
+      // P1-5: Always release the synchronous lock so the next handleAddPhoto
+      // invocation can proceed. Runs even if the component is unmounted —
+      // the ref outlives the component for the rest of this microtask chain.
+      addingPhotoLockRef.current = false;
     }
   };
 
@@ -1294,6 +1397,8 @@ export default function EditProfileScreen() {
             style={styles.backBtn}
             onPress={handleBack}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
           >
             <Ionicons name="arrow-back" size={24} color={C.text} />
           </TouchableOpacity>
@@ -1317,6 +1422,8 @@ export default function EditProfileScreen() {
             style={styles.backBtn}
             onPress={handleBack}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
           >
             <Ionicons name="arrow-back" size={24} color={C.text} />
           </TouchableOpacity>
@@ -1339,6 +1446,8 @@ export default function EditProfileScreen() {
             style={styles.backBtn}
             onPress={handleBack}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
           >
             <Ionicons name="arrow-back" size={24} color={C.text} />
           </TouchableOpacity>
@@ -1436,6 +1545,8 @@ export default function EditProfileScreen() {
             style={styles.backBtn}
             onPress={handleBack}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Back"
           >
             <Ionicons name="arrow-back" size={24} color={C.text} />
           </TouchableOpacity>
@@ -1500,7 +1611,8 @@ export default function EditProfileScreen() {
                           const res = await updateDisplayName({ token, authUserId: userId, displayName: next });
                           if (!res?.success) {
                             if ((res as any)?.error === 'Nickname change limit reached') {
-                              setNicknameError('Nickname is now locked.');
+                              // P3-7: align with positive locked-state framing.
+                              setNicknameError('You\u2019ve used all your nickname changes. Your nickname is set.');
                             } else if ((res as any)?.error === 'INVALID_DISPLAY_NAME') {
                               setNicknameError('Nickname must use letters and numbers only.');
                             } else {
@@ -1516,14 +1628,20 @@ export default function EditProfileScreen() {
                       }}
                     />
                   ) : (
-                    <Text style={styles.infoValue}>{displayName || 'Anonymous'}</Text>
+                    // P3-8: replace literal "Anonymous" fallback with a calm
+                    // placeholder that doesn't feel like a label assigned to
+                    // the user; em-dash matches the Age/Gender fallback style.
+                    <Text style={styles.infoValue}>{displayName || '—'}</Text>
                   )}
                 </View>
               </View>
               <View style={styles.nicknameMetaRow}>
                 <Text style={styles.nicknameMetaText}>
+                  {/* P3-7: When the 3-change lifetime cap is reached, frame
+                      the state positively ("set") instead of punitively
+                      ("locked"). Underlying 3-edit rule is unchanged. */}
                   {isDisplayNameLocked
-                    ? 'Nickname is now locked'
+                    ? 'Your nickname is set'
                     : `${remainingDisplayNameChanges} ${remainingDisplayNameChanges === 1 ? 'change' : 'changes'} remaining`}
                 </Text>
                 {!isEditingNickname ? (
@@ -1535,6 +1653,10 @@ export default function EditProfileScreen() {
                     disabled={isDisplayNameLocked}
                     activeOpacity={0.7}
                     style={[styles.nicknameEditBtn, isDisplayNameLocked && styles.nicknameEditBtnDisabled]}
+                    accessibilityRole="button"
+                    accessibilityLabel="Edit nickname"
+                    accessibilityState={{ disabled: isDisplayNameLocked }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
                     <Text style={styles.nicknameEditBtnText}>Edit</Text>
                   </TouchableOpacity>
@@ -1548,6 +1670,9 @@ export default function EditProfileScreen() {
                       }}
                       activeOpacity={0.7}
                       style={styles.nicknameActionBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel nickname change"
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     >
                       <Text style={styles.nicknameActionText}>Cancel</Text>
                     </TouchableOpacity>
@@ -1570,7 +1695,8 @@ export default function EditProfileScreen() {
                           const res = await updateDisplayName({ token, authUserId: userId, displayName: next });
                           if (!res?.success) {
                             if ((res as any)?.error === 'Nickname change limit reached') {
-                              setNicknameError('Nickname is now locked.');
+                              // P3-7: align with positive locked-state framing.
+                              setNicknameError('You\u2019ve used all your nickname changes. Your nickname is set.');
                             } else if ((res as any)?.error === 'INVALID_DISPLAY_NAME') {
                               setNicknameError('Nickname must use letters and numbers only.');
                             } else {
@@ -1585,6 +1711,9 @@ export default function EditProfileScreen() {
                       }}
                       activeOpacity={0.7}
                       style={styles.nicknameActionBtnPrimary}
+                      accessibilityRole="button"
+                      accessibilityLabel="Save nickname"
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     >
                       <Text style={styles.nicknameActionTextPrimary}>Save</Text>
                     </TouchableOpacity>
@@ -1677,6 +1806,13 @@ export default function EditProfileScreen() {
                     style={[styles.addSlot, isThisSlotLoading && styles.addSlotDisabled]}
                     onPress={() => handleAddPhoto(slotIndex)}
                     disabled={addingSlotIndex !== null}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      isThisSlotLoading
+                        ? `Uploading photo to slot ${slotIndex + 1}`
+                        : `Add photo to slot ${slotIndex + 1}`
+                    }
+                    accessibilityState={{ disabled: addingSlotIndex !== null, busy: isThisSlotLoading }}
                   >
                     {isThisSlotLoading ? (
                       <ActivityIndicator size="small" color={C.primary} />
@@ -2228,9 +2364,17 @@ export default function EditProfileScreen() {
             onPress={handleSaveAll}
             disabled={isSaving}
             activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel={isSaving ? 'Saving changes' : 'Save changes'}
+            accessibilityState={{ disabled: isSaving, busy: isSaving }}
           >
             {isSaving ? (
-              <ActivityIndicator size="small" color="#FFFFFF" />
+              <>
+                <ActivityIndicator size="small" color="#FFFFFF" />
+                {/* P3-1: tiny "Saving…" label gives sighted users explicit
+                    feedback while the indicator spins. */}
+                <Text style={[styles.saveButtonText, styles.saveButtonTextSaving]}>Saving…</Text>
+              </>
             ) : (
               <Text style={styles.saveButtonText}>Save Changes</Text>
             )}
@@ -2517,6 +2661,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  // P3-5: visible "uploading" feedback overlay for filled slots.
+  photoSlotUploadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   mainBadge: {
     position: 'absolute',
@@ -2939,5 +3090,10 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
     letterSpacing: 0.3,
+  },
+  // P3-1: visual "Saving…" sibling to ActivityIndicator while persisting.
+  saveButtonTextSaving: {
+    fontSize: 15,
+    fontWeight: '600',
   },
 });

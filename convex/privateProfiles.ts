@@ -186,7 +186,12 @@ function calculateAgeFromDOB(dob: string | undefined | null): number {
 }
 
 function ageFromUser(user: any): number {
-  // Canonical source of truth: users.dateOfBirth (Phase-1)
+  // SECURITY (P0-2): Canonical source of truth = users.dateOfBirth (Phase-1).
+  // calculateAgeFromDOB returns 0 when DOB is missing, unparseable, or
+  // out-of-range. Callers gating adult content (e.g. `derivedAge >= 18`)
+  // therefore safely evaluate to `false` for any missing/invalid DOB —
+  // never silently treat absent DOB as 18+. Do not introduce a fallback
+  // that returns a non-zero default; that would defeat the gate.
   const dob = user?.dateOfBirth;
   return calculateAgeFromDOB(typeof dob === 'string' ? dob : null);
 }
@@ -269,8 +274,11 @@ function sanitizePrivateDesireTagKeysForSave(keys: string[] | undefined): string
   return sanitizeEnumKeysForSave(keys, PHASE2_DESIRE_TAG_KEY_SET);
 }
 
-const PHASE2_NOTIFICATION_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const PHASE2_NOTIFICATION_RATE_LIMIT_MAX_WRITES = 20;
+// P2-1: Notification-preference rate-limit constants removed. Limiting now
+// flows through the canonical `reserveActionSlots` infrastructure (see the
+// `phase2_private_notification_prefs` action key inside
+// `setPhase2NotificationPreferences`), so the ad-hoc audit-log-count window
+// is no longer used or referenced anywhere.
 
 function normalizeNotificationCategorySettings(
   categories:
@@ -747,6 +755,31 @@ export const setPhase2NotificationPreferences = mutation({
   handler: async (ctx, args) => {
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
+    // P2-1: Canonical reserveActionSlots rate limit on notification-pref
+    // writes. Replaces the previous audit-log-count window so we (a) match
+    // every other Phase-2 mutation, (b) do not depend on audit-log table
+    // scans to throttle, and (c) cap the audit-log + userPrivateProfiles
+    // write storm a hostile loop could otherwise produce. Tight caps
+    // reflect that this surface fronts a small handful of toggles —
+    // legitimate users edit prefs a few times per minute at most.
+    const notifPrefsLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'phase2_private_notification_prefs',
+      [
+        { kind: 'minute', windowMs: 60_000, max: 10 },
+        { kind: 'hour', windowMs: 60 * 60_000, max: 60 },
+      ],
+    );
+    if (!notifPrefsLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        windowKind: notifPrefsLimit.windowKind,
+        retryAfterMs: notifPrefsLimit.retryAfterMs,
+      };
+    }
+
     const isDeleted = await isPrivateDataDeleted(ctx, userId);
     if (isDeleted) {
       return { success: false as const, error: 'deletion_pending' as const };
@@ -762,16 +795,6 @@ export const setPhase2NotificationPreferences = mutation({
     }
 
     const now = Date.now();
-    const recentWrites = await ctx.db
-      .query('userPrivateProfileAuditLog')
-      .withIndex('by_user_changedAt', (q) =>
-        q.eq('userId', userId).gte('changedAt', now - PHASE2_NOTIFICATION_RATE_LIMIT_WINDOW_MS)
-      )
-      .take(PHASE2_NOTIFICATION_RATE_LIMIT_MAX_WRITES + 1);
-
-    if (recentWrites.length > PHASE2_NOTIFICATION_RATE_LIMIT_MAX_WRITES) {
-      return { success: false as const, error: 'rate_limited' as const };
-    }
 
     const changedFields: string[] = [];
     const previousValues: Record<string, unknown> = {};
@@ -891,13 +914,26 @@ export const updateDisplayNameByAuthId = mutation({
       // to flip both flags to `true`.
       const now = Date.now();
       const user = await ctx.db.get(userId);
+      // SECURITY (P0-2): adult-confirmation is derived strictly from the
+      // Phase-1 users.dateOfBirth via ageFromUser (which returns 0 when DOB
+      // is missing/invalid). It is NEVER taken from a separate Phase-2
+      // "consent" toggle and NEVER trusted from the client. If DOB is absent
+      // or under 18, `adultAgeConfirmed` is `false` and the timestamp is
+      // omitted — the row will not pass any 18+ gate downstream.
       const derivedAge = ageFromUser(user);
       const adultAgeConfirmed = derivedAge >= 18;
 
+      // P2-7 SKELETON-DRIFT FIX: A non-empty trimmed nickname IS one
+      // nickname write, so count it. Mirrors `saveOnboardingPhotos`
+      // (line further below) which already starts at 1 when a nickname is
+      // present in the skeleton insert. Previously this path started at 0
+      // — giving users an effective 4-edit budget (insert + 3 patches)
+      // instead of the documented 3-edit lifetime cap.
+      const skeletonDisplayNameEditCount = 1;
       const profileId = await ctx.db.insert('userPrivateProfiles', {
         userId,
         displayName: trimmed,
-        displayNameEditCount: 0,
+        displayNameEditCount: skeletonDisplayNameEditCount,
         lastDisplayNameEditedAt: now,
         phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
         age: derivedAge,
@@ -908,6 +944,7 @@ export const updateDisplayNameByAuthId = mutation({
         city: user?.city || '',
         // P2-3: skeleton row stays disabled until full setup completes.
         isPrivateEnabled: false,
+        // P0-2: server-derived from Phase-1 DOB (see comment above).
         ageConfirmed18Plus: adultAgeConfirmed,
         ...(adultAgeConfirmed ? { ageConfirmedAt: now } : {}),
         privatePhotosBlurred: [],
@@ -923,7 +960,25 @@ export const updateDisplayNameByAuthId = mutation({
         updatedAt: now,
       });
 
-      return { success: true as const, profileId, displayNameEditCount: 0 };
+      // P2-2: Audit-log row for the initial nickname write on a skeleton
+      // insert. Mirrors the audit pattern used by
+      // `setPhase2NotificationPreferences`. previousValues.displayName is
+      // recorded as null (no prior nickname existed) so moderation tooling
+      // can distinguish first-set from rename.
+      await ctx.db.insert('userPrivateProfileAuditLog', {
+        userId,
+        changedFields: ['displayName'],
+        previousValues: { displayName: null },
+        newValues: { displayName: trimmed },
+        changedAt: now,
+        source: 'user',
+      });
+
+      return {
+        success: true as const,
+        profileId,
+        displayNameEditCount: skeletonDisplayNameEditCount,
+      };
     }
 
     const currentCount = (existing as any).displayNameEditCount ?? 0;
@@ -931,12 +986,35 @@ export const updateDisplayNameByAuthId = mutation({
       return { success: false, error: 'Nickname change limit reached' as const };
     }
 
-    const now = Date.now();
+    const previousDisplayName = (existing as any).displayName ?? null;
+    const patchNow = Date.now();
     await ctx.db.patch(existing._id, {
       displayName: trimmed,
       displayNameEditCount: currentCount + 1,
-      lastDisplayNameEditedAt: now,
-      updatedAt: now,
+      lastDisplayNameEditedAt: patchNow,
+      updatedAt: patchNow,
+    });
+
+    // P2-2: Audit-log row for nickname renames on an existing profile.
+    // Captures previous + next + edit-count snapshot so abuse moderation
+    // can observe identity-rotation patterns. Insert is unconditional
+    // because we only reach this branch on a confirmed change AND the
+    // 3-edit lifetime cap above has already been enforced — the audit
+    // log cannot be flooded beyond that lifetime budget plus the
+    // short-window rate limit declared at the top of this mutation.
+    await ctx.db.insert('userPrivateProfileAuditLog', {
+      userId,
+      changedFields: ['displayName'],
+      previousValues: {
+        displayName: previousDisplayName,
+        displayNameEditCount: currentCount,
+      },
+      newValues: {
+        displayName: trimmed,
+        displayNameEditCount: currentCount + 1,
+      },
+      changedAt: patchNow,
+      source: 'user',
     });
 
     return { success: true as const, displayNameEditCount: currentCount + 1 };
@@ -957,6 +1035,30 @@ export const syncFromMainProfile = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    // P1-2: Rate-limit the manual Phase-1 → Phase-2 import. This is a
+    // user-initiated "Import from main profile" action; nobody legitimately
+    // needs it more than a couple of times per minute. Tight caps prevent a
+    // loop from repeatedly reading the Phase-1 users row and patching the
+    // Phase-2 row (each call also bumps `updatedAt`, which is the discovery
+    // ranking signal). Owner-only via validateOwnership above.
+    const syncLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'phase2_private_profile_sync_main',
+      [
+        { kind: 'minute', windowMs: 60_000, max: 2 },
+        { kind: 'hour', windowMs: 60 * 60_000, max: 10 },
+      ],
+    );
+    if (!syncLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        windowKind: syncLimit.windowKind,
+        retryAfterMs: syncLimit.retryAfterMs,
+      };
+    }
 
     // Phase-1 user record (source of truth for this manual sync)
     const user = await ctx.db.get(userId);
@@ -980,14 +1082,20 @@ export const syncFromMainProfile = mutation({
       updatedAt: Date.now(),
     };
 
-    // Only include lifestyle fields if they have valid values
-    const height = (user as any).height;
-    const weight = (user as any).weight;
-    const smoking = (user as any).smoking;
-    const drinking = (user as any).drinking;
-    const education = (user as any).education;
-    const religion = (user as any).religion;
-    const activities = (user as any).activities;
+    // P2-6: Replace per-field `(user as any).X` casts with a single
+    // tightly-scoped `Record<string, unknown>` view of the Phase-1 user
+    // row, then guard each access with an explicit typeof / Array.isArray
+    // check. The schema does not type these optional fields, so we cannot
+    // remove the cast entirely — but we narrow it to one expression and
+    // keep every downstream read fully type-checked.
+    const userRecord = user as unknown as Record<string, unknown>;
+    const rawHeight = userRecord.height;
+    const rawWeight = userRecord.weight;
+    const rawSmoking = userRecord.smoking;
+    const rawDrinking = userRecord.drinking;
+    const rawEducation = userRecord.education;
+    const rawReligion = userRecord.religion;
+    const rawActivities = userRecord.activities;
 
     const appliedFields = {
       height: false,
@@ -999,33 +1107,52 @@ export const syncFromMainProfile = mutation({
       hobbies: false,
     };
 
-    if (typeof height === 'number' && height > 0) {
-      patch.height = height;
+    let phase1Height: number | undefined;
+    let phase1Weight: number | undefined;
+    let phase1Smoking: string | undefined;
+    let phase1Drinking: string | undefined;
+    let phase1Education: string | undefined;
+    let phase1Religion: string | undefined;
+    let phase1Activities: string[] | undefined;
+
+    if (typeof rawHeight === 'number' && Number.isFinite(rawHeight) && rawHeight > 0) {
+      patch.height = rawHeight;
       appliedFields.height = true;
+      phase1Height = rawHeight;
     }
-    if (typeof weight === 'number' && weight > 0) {
-      patch.weight = weight;
+    if (typeof rawWeight === 'number' && Number.isFinite(rawWeight) && rawWeight > 0) {
+      patch.weight = rawWeight;
       appliedFields.weight = true;
+      phase1Weight = rawWeight;
     }
-    if (typeof smoking === 'string' && smoking.length > 0) {
-      patch.smoking = smoking;
+    if (typeof rawSmoking === 'string' && rawSmoking.length > 0) {
+      patch.smoking = rawSmoking;
       appliedFields.smoking = true;
+      phase1Smoking = rawSmoking;
     }
-    if (typeof drinking === 'string' && drinking.length > 0) {
-      patch.drinking = drinking;
+    if (typeof rawDrinking === 'string' && rawDrinking.length > 0) {
+      patch.drinking = rawDrinking;
       appliedFields.drinking = true;
+      phase1Drinking = rawDrinking;
     }
-    if (typeof education === 'string' && education.length > 0) {
-      patch.education = education;
+    if (typeof rawEducation === 'string' && rawEducation.length > 0) {
+      patch.education = rawEducation;
       appliedFields.education = true;
+      phase1Education = rawEducation;
     }
-    if (typeof religion === 'string' && religion.length > 0) {
-      patch.religion = religion;
+    if (typeof rawReligion === 'string' && rawReligion.length > 0) {
+      patch.religion = rawReligion;
       appliedFields.religion = true;
+      phase1Religion = rawReligion;
     }
-    if (Array.isArray(activities) && activities.length > 0) {
-      patch.hobbies = activities;
+    if (
+      Array.isArray(rawActivities) &&
+      rawActivities.length > 0 &&
+      rawActivities.every((entry): entry is string => typeof entry === 'string')
+    ) {
+      patch.hobbies = rawActivities;
       appliedFields.hobbies = true;
+      phase1Activities = rawActivities;
     }
 
     const availableInPhase1 =
@@ -1042,13 +1169,13 @@ export const syncFromMainProfile = mutation({
     // included; the rest are explicitly undefined so the client can tell
     // them apart from "value happens to be falsy in Phase-1".
     const phase1Snapshot = {
-      height: appliedFields.height ? (height as number) : undefined,
-      weight: appliedFields.weight ? (weight as number) : undefined,
-      smoking: appliedFields.smoking ? (smoking as string) : undefined,
-      drinking: appliedFields.drinking ? (drinking as string) : undefined,
-      education: appliedFields.education ? (education as string) : undefined,
-      religion: appliedFields.religion ? (religion as string) : undefined,
-      hobbies: appliedFields.hobbies ? (activities as string[]) : undefined,
+      height: phase1Height,
+      weight: phase1Weight,
+      smoking: phase1Smoking,
+      drinking: phase1Drinking,
+      education: phase1Education,
+      religion: phase1Religion,
+      hobbies: phase1Activities,
     };
 
     if (availableInPhase1) {
@@ -1374,6 +1501,14 @@ export const getByAuthUserId = query({
  *
  * IMPORTANT: This is a mutation (not a query) because it writes to the database.
  * Frontend should use useMutation and call this on profile load for self-healing.
+ *
+ * SCALE (P0-3): The frontend (`private-profile.tsx`) gates this to AT MOST
+ * ONE call per screen lifecycle via `hasHealedRef`. To defend against a
+ * malfunctioning or hostile client that bypasses that gate, the actual
+ * write path (the `ctx.db.patch` heal step) is rate-limited per user.
+ * Read-only profiles (healthy `age`) cost nothing extra and never write.
+ * Denied heal calls still return the corrected age in the response so the
+ * UI does not regress; the row simply heals on a later, non-throttled call.
  */
 export const getAndHealByAuthUserId = mutation({
   args: {
@@ -1414,12 +1549,29 @@ export const getAndHealByAuthUserId = mutation({
     if (needsAgeFix) {
       const fixedAge = ageFromUser(user);
       if (fixedAge > 0) {
-        // Patch DB immediately
-        await ctx.db.patch(profile._id, {
-          age: fixedAge,
-          updatedAt: Date.now(),
-        });
-        // Return corrected value
+        // P0-3: Rate-limit the heal WRITE path. Healthy profiles never reach
+        // this branch. A buggy/hostile loop against an unhealed profile is
+        // capped at 5 writes/minute and 30 writes/hour per user. The legit
+        // path (one heal per screen lifecycle, then `age` becomes valid and
+        // this branch is skipped forever) is unaffected.
+        const healLimit = await reserveActionSlots(
+          ctx,
+          userId,
+          'phase2_private_profile_heal',
+          [
+            { kind: 'minute', windowMs: 60_000, max: 5 },
+            { kind: 'hour', windowMs: 60 * 60_000, max: 30 },
+          ],
+        );
+        if (healLimit.accept) {
+          await ctx.db.patch(profile._id, {
+            age: fixedAge,
+            updatedAt: Date.now(),
+          });
+        }
+        // Return corrected value to the caller even if the persist was
+        // throttled — the UI shows the right age, and the row will heal
+        // on a later, non-throttled call.
         returnProfile = { ...profile, age: fixedAge };
       }
     }
@@ -1481,6 +1633,12 @@ export const getAndHealByAuthUserId = mutation({
  * Upsert private profile by auth user ID.
  * Called from Phase-2 onboarding completion to persist profile to Convex.
  * IMPORTANT: Only stores backend URLs, not local file URIs.
+ *
+ * SECURITY (P0-1): Trust flags — `isVerified`, `ageConfirmed18Plus`, and
+ * `ageConfirmedAt` — must NEVER be accepted from the client. They are
+ * derived server-side from the authenticated Phase-1 `users` row (verification
+ * state, dateOfBirth). Any future field that gates moderation, age, identity,
+ * or eligibility MUST follow the same pattern: server-derived only.
  */
 export const upsertByAuthId = mutation({
   args: {
@@ -1497,8 +1655,9 @@ export const upsertByAuthId = mutation({
     city: v.optional(v.string()),
     // Optional fields with defaults
     isPrivateEnabled: v.optional(v.boolean()),
-    ageConfirmed18Plus: v.optional(v.boolean()),
-    ageConfirmedAt: v.optional(v.number()),
+    // SECURITY (P0-1): `ageConfirmed18Plus`, `ageConfirmedAt`, and `isVerified`
+    // are intentionally NOT client args. They are derived server-side below
+    // from the authenticated Phase-1 users row. Do not re-add them here.
     privatePhotosBlurred: v.optional(v.array(v.id('_storage'))),
     privatePhotoBlurLevel: v.optional(v.number()),
     privateDesireTagKeys: v.optional(v.array(v.string())),
@@ -1506,7 +1665,6 @@ export const upsertByAuthId = mutation({
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.optional(v.boolean()),
     hobbies: v.optional(v.array(v.string())),
-    isVerified: v.optional(v.boolean()),
     // Profile details (imported from Phase-1)
     height: v.optional(v.union(v.number(), v.null())),
     weight: v.optional(v.union(v.number(), v.null())),
@@ -1583,6 +1741,29 @@ export const upsertByAuthId = mutation({
 
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
 
+    // P2-5: Rate-limit the onboarding-completion upsert. Legit clients call
+    // this once at the end of onboarding; rare re-runs after sync are fine
+    // but a loop must not be able to repeatedly re-validate every owned
+    // photo URL or re-run the trust-flag derivation. Caps are deliberately
+    // tight — well above realistic legitimate retry but far below abuse.
+    const upsertLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'phase2_private_profile_upsert',
+      [
+        { kind: 'minute', windowMs: 60_000, max: 5 },
+        { kind: 'hour', windowMs: 60 * 60_000, max: 20 },
+      ],
+    );
+    if (!upsertLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        windowKind: upsertLimit.windowKind,
+        retryAfterMs: upsertLimit.retryAfterMs,
+      };
+    }
+
     const user = await ctx.db.get(userId);
     if (!user) {
       return { success: false, error: 'user_not_found' };
@@ -1610,20 +1791,33 @@ export const upsertByAuthId = mutation({
 
     const now = Date.now();
 
+    // SECURITY (P0-1): Derive trust flags server-side from the authenticated
+    // Phase-1 users row. NEVER trust the client for these values.
+    //   - ageConfirmed18Plus: true iff backend-computed age >= 18.
+    //   - ageConfirmedAt: timestamp set only when 18+ is confirmed; otherwise
+    //     preserved from existing row (or omitted on fresh insert).
+    //   - isVerified: mirrors the Phase-1 users.isVerified flag, which is the
+    //     single source of truth for verification status.
+    const derivedAge = ageFromUser(user);
+    const adultAgeConfirmed = derivedAge >= 18;
+    const derivedAgeConfirmedAt = adultAgeConfirmed
+      ? (existing?.ageConfirmedAt ?? now)
+      : existing?.ageConfirmedAt;
+    const derivedIsVerified = user?.isVerified === true;
+
     // Build profile data with defaults
     const profileData = {
       userId,
       displayName: args.displayName,
       // Canonical identity fields: backend source of truth only
-      age: ageFromUser(user),
+      age: derivedAge,
       gender: user?.gender || args.gender,
       privateBio: bioValidation.value,
       privateIntentKeys,
       privatePhotoUrls: photoValidation.urls,
       city: args.city || '',
       isPrivateEnabled: args.isPrivateEnabled ?? true,
-      ageConfirmed18Plus: args.ageConfirmed18Plus ?? true,
-      ageConfirmedAt: args.ageConfirmedAt ?? now,
+      ageConfirmed18Plus: adultAgeConfirmed,
       privatePhotosBlurred: args.privatePhotosBlurred ?? [],
       privatePhotoBlurLevel: args.privatePhotoBlurLevel ?? 0,
       privateDesireTagKeys,
@@ -1634,9 +1828,12 @@ export const upsertByAuthId = mutation({
       // completed row. New completion must go through users.setPhase2OnboardingCompleted.
       isSetupComplete: existing?.isSetupComplete === true,
       hobbies: args.hobbies ?? [],
-      isVerified: args.isVerified ?? false,
+      isVerified: derivedIsVerified,
       // Phase-2 Onboarding Step 3: Prompt answers
       promptAnswers: promptValidation.value ?? [],
+      ...(derivedAgeConfirmedAt !== undefined
+        ? { ageConfirmedAt: derivedAgeConfirmedAt }
+        : {}),
     };
 
     // Profile details (imported from Phase-1) - only include if defined
@@ -1709,6 +1906,31 @@ export const updatePhotoBlurSlots = mutation({
     }
 
     const userId = await validateOwnership(ctx, args.token, args.authUserId);
+
+    // P1-1: Rate-limit the blur-slot mutation so it cannot be used as a
+    // write-amplification vector. Every call bumps `updatedAt` on
+    // userPrivateProfiles, which is the discovery / Crossed-Paths ranking
+    // signal — a tight loop here would let one user keep re-floating to the
+    // top of every reader's feed. Owner-only (validateOwnership above), so
+    // the limit is per-account and does not throttle global discovery.
+    const blurLimit = await reserveActionSlots(
+      ctx,
+      userId,
+      'phase2_private_profile_blur_update',
+      [
+        { kind: 'minute', windowMs: 60_000, max: 20 },
+        { kind: 'hour', windowMs: 60 * 60_000, max: 100 },
+        { kind: 'day', windowMs: 24 * 60 * 60_000, max: 300 },
+      ],
+    );
+    if (!blurLimit.accept) {
+      return {
+        success: false as const,
+        error: 'rate_limited' as const,
+        windowKind: blurLimit.windowKind,
+        retryAfterMs: blurLimit.retryAfterMs,
+      };
+    }
 
     // Find existing profile
     const existing = await ctx.db

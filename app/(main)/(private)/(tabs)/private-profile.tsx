@@ -467,7 +467,15 @@ export default function PrivateProfileScreen() {
           <ActivityIndicator size="large" color={C.primary} />
           <Text style={styles.loadingText}>Loading profile...</Text>
           {showSlowNetworkHint ? (
-            <TouchableOpacity onPress={handleRetry} activeOpacity={0.7}>
+            // P3-3: hitSlop widens the touch target on small text without
+            // changing visual layout. accessibilityRole exposes it as a button.
+            <TouchableOpacity
+              onPress={handleRetry}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel="Retry loading profile"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
               <Text style={styles.slowNetworkHint}>Still loading — tap to retry</Text>
             </TouchableOpacity>
           ) : null}
@@ -506,7 +514,13 @@ export default function PrivateProfileScreen() {
           <Ionicons name="cloud-offline-outline" size={48} color={C.textLight} />
           <Text style={styles.errorTitle}>Unable to load profile</Text>
           <Text style={styles.errorText}>Please check your connection and try again.</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={handleRetry} activeOpacity={0.7}>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={handleRetry}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Retry"
+          >
             <Ionicons name="refresh" size={18} color="#FFFFFF" />
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>
@@ -529,7 +543,13 @@ export default function PrivateProfileScreen() {
           <Text style={styles.errorText}>
             We couldn&apos;t find your saved private profile data. Complete setup or try again after reconnecting.
           </Text>
-          <TouchableOpacity style={styles.retryButton} onPress={handleRetry} activeOpacity={0.7}>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={handleRetry}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Retry"
+          >
             <Ionicons name="refresh" size={18} color="#FFFFFF" />
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>
@@ -588,6 +608,8 @@ export default function PrivateProfileScreen() {
           style={styles.completionCard}
           onPress={handleEditProfile}
           activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel={`Profile completion ${completionPercentage} percent. Tap to edit.`}
         >
           <View style={styles.completionTopRow}>
             <View style={styles.completionIcon}>
@@ -628,12 +650,18 @@ export default function PrivateProfileScreen() {
         </TouchableOpacity>
 
         {/* Settings Menu */}
+        {/* P3-3: Each row exposes accessibilityRole="button" + a stable label
+            for screen readers. Row height (~56px) already meets the 44pt
+            touch-target minimum so no extra hitSlop is needed. */}
         <View style={styles.menuSection}>
           {/* 1. Edit Profile */}
           <TouchableOpacity
             style={styles.menuItem}
             onPress={handleEditProfile}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Edit Profile"
+            accessibilityHint="Opens the full edit profile screen"
           >
             <Ionicons name="create-outline" size={22} color={C.text} />
             <Text style={styles.menuText}>Edit Profile</Text>
@@ -645,6 +673,9 @@ export default function PrivateProfileScreen() {
             style={styles.menuItem}
             onPress={() => router.push('/(main)/(private)/settings/private-privacy' as any)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Privacy"
+            accessibilityHint="Opens privacy settings"
           >
             <Ionicons name="lock-closed-outline" size={22} color={C.text} />
             <Text style={styles.menuText}>Privacy</Text>
@@ -656,6 +687,9 @@ export default function PrivateProfileScreen() {
             style={styles.menuItem}
             onPress={() => router.push('/(main)/(private)/settings/private-notifications' as any)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Notifications"
+            accessibilityHint="Opens notification preferences"
           >
             <Ionicons name="notifications-outline" size={22} color={C.text} />
             <Text style={styles.menuText}>Notifications</Text>
@@ -667,6 +701,9 @@ export default function PrivateProfileScreen() {
             style={styles.menuItem}
             onPress={() => router.push('/(main)/(private)/settings/private-safety' as any)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Safety"
+            accessibilityHint="Opens safety settings"
           >
             <Ionicons name="shield-checkmark-outline" size={22} color={C.text} />
             <Text style={styles.menuText}>Safety</Text>
@@ -678,6 +715,9 @@ export default function PrivateProfileScreen() {
             style={styles.menuItem}
             onPress={() => router.push('/(main)/(private)/settings/private-account' as any)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Account"
+            accessibilityHint="Opens account settings"
           >
             <Ionicons name="person-outline" size={22} color={C.text} />
             <Text style={styles.menuText}>Account</Text>
@@ -689,6 +729,9 @@ export default function PrivateProfileScreen() {
             style={styles.menuItem}
             onPress={() => router.push('/(main)/(private)/settings/private-support' as any)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Support and FAQ"
+            accessibilityHint="Opens support and frequently asked questions"
           >
             <Ionicons name="help-circle-outline" size={22} color={C.text} />
             <Text style={styles.menuText}>Support & FAQ</Text>
